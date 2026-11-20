@@ -1,0 +1,23 @@
+{
+  "name": "master-of-donuts-2-reborn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build",
+    "build:facebook": "npm run typecheck && vite build --mode facebook",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "pixi.js": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

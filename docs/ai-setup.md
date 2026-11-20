@@ -14,6 +14,12 @@ The PM and area managers own coordination and independent acceptance. They may i
 
 ## Delegation and reporting
 
+Every spawned project chat at every level, including managers, implementers, and specialists, must be named, visible to the owner, and directly openable and messageable in the owner's designated project folder in the left sidebar.
+
+The chat creator and every manager delegating to the chat must explicitly select the same sidebar project as the owner's project chat. Before relying on the handoff, they must verify that the chat appears in that project and can be opened and messaged directly. If a check fails, correct the mismatch and verify again, or pause the handoff and escalate to the PM. The PM escalates unresolved blockers to the owner. A parent workspace, sibling source checkout, hidden subagent, or link alone does not satisfy the rule.
+
+For Master of Donuts 2 work, select **Master of Donuts 2** in the sidebar, including when the code is in the Reborn checkout.
+
 1. For each distinct implementation assignment, the area manager creates a fresh, named, user-visible project chat. Use **Sol High** for complex or important work and **Sol Medium** for bounded work. Revisions to the same assignment may stay with its named Sol owner.
 2. Before any implementation changes, give the implementer a written handoff in the named chat. Record the actual implementer chat ID or link, exact model and reasoning effort, expected outcome, scope, owned paths, constraints, acceptance criteria and checks, and reporting destination. Identify the workspace or branch when it matters. Assign clear ownership before starting parallel work that could touch the same files. If the required Sol chat is missing or delegation is unavailable, hold implementation and escalate the blocker to the PM. The PM escalates unresolved blockers to the owner.
 3. The implementer reports changed files, what they verified, the evidence, and any blocker or decision needed. The assigning manager independently verifies the result against the acceptance criteria, names the Sol chat that did the work, and reports the acceptance outcome and evidence to the PM and owner. Managers relay decisions, dependencies, and issues that need action. Send review findings that require implementation and fixes of any size back to Sol.
