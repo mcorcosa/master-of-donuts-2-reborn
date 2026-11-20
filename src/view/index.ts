@@ -1,5 +1,5 @@
 import type { Application } from 'pixi.js';
-import { canMove, createGame, move } from '../game';
+import { canMove, createGame, type DoughInsert, move } from '../game';
 import { StackGestures } from './gestures';
 import { preloadScoreFont } from './matchEffect';
 import { beginMatch, matchFrame, type MatchPlayback } from './matchPlayback';
@@ -21,7 +21,7 @@ export async function mountGame(app: Application): Promise<void> {
   let levelStartScore = 0;
   const pressureLimit = state.movesLeft;
   let feedback: Feedback | null = null;
-  let pending: { playback: MatchPlayback; levelUp: boolean } | null = null;
+  let pending: { playback: MatchPlayback; levelUp: boolean; inserts: readonly DoughInsert[] } | null = null;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const gestures = new StackGestures(index => state.stacks[index].length > 0, (from, to) => canMove(state, from, to));
 
@@ -30,7 +30,7 @@ export async function mountGame(app: Application): Promise<void> {
     if (feedback && now - feedback.started >= feedback.duration) feedback = null;
     const { source, destination } = gestures;
     const legal = source !== null && destination !== null && canMove(state, source, destination);
-    scene.showInteraction(gestures, legal, feedback, now);
+    scene.showInteraction(gestures, legal, feedback, now, motion.matches);
   }
 
   function draw(): void {
@@ -42,6 +42,7 @@ export async function mountGame(app: Application): Promise<void> {
     pending = null;
     feedback = null;
     scene.cancelMatch();
+    scene.finishMove();
   }
 
   function resize(): void {
@@ -62,7 +63,12 @@ export async function mountGame(app: Application): Promise<void> {
   function down(event: PointerEvent): void {
     if (pending || event.button !== 0) return;
     const position = point(event);
-    if (!gestures.start(event.pointerId, position, scene.hit(position))) return;
+    const target = scene.hit(position);
+    if (state.gameOver && target !== 'restart') return;
+    if (!gestures.start(event.pointerId, position, target)) return;
+    scene.finishMove();
+    feedback = null;
+    updateInteraction();
     try {
       canvas.setPointerCapture(event.pointerId);
     } catch {
@@ -91,24 +97,28 @@ export async function mountGame(app: Application): Promise<void> {
     if (action?.kind === 'move') {
       const { from, to } = action;
       const before = state;
-      // Commit once so an interrupted match can immediately draw the resolved board.
-      state = move(before, from, to);
+      let inserts: readonly DoughInsert[] = [];
+      // Commit once so interrupted playback can immediately draw the resolved board.
+      state = move(before, from, to, undefined, dough => { inserts = dough; });
       const started = performance.now();
       const levelUp = state.level !== before.level;
       if (levelUp) levelStartScore = before.nextLevelScore;
       const playback = beginMatch(before, state, from, to, started, motion.matches);
       if (playback) {
-        pending = { playback, levelUp };
+        pending = { playback, levelUp, inserts };
         feedback = null;
         scene.startMatch(playback);
         scene.showMatch(matchFrame(playback, started));
-        scene.showAward(started);
+        scene.showMatchTail(started);
         return;
       }
-      const newDough = state.movesLeft > before.movesLeft;
-      const start = !motion.matches && !newDough ? scene.topPosition(from) : undefined;
-      feedback = { target: to, started, duration: 280, start, color: before.stacks[from].at(-1) };
+      const start = scene.topPosition(from);
+      const color = before.stacks[from].at(-1)!;
+      const pressure = inserts.length && state.movesLeft > before.movesLeft
+        ? { movesLeft: state.movesLeft, limit: pressureLimit } : undefined;
+      feedback = { target: to, started, duration: 280, color };
       draw();
+      scene.startMove(inserts, started, motion.matches, { to, start, color, pressure });
       return;
     }
     if (action?.kind === 'blocked') {
@@ -127,7 +137,7 @@ export async function mountGame(app: Application): Promise<void> {
   const tick = () => {
     const now = performance.now();
     if (pending) {
-      const { playback, levelUp } = pending;
+      const { playback, levelUp, inserts } = pending;
       const frame = matchFrame(playback, now);
       scene.showMatch(frame);
       if (frame.phase === 'resolved') {
@@ -136,9 +146,11 @@ export async function mountGame(app: Application): Promise<void> {
           feedback = { target: playback.to, started: now, duration: 750, color: playback.color, levelUp };
         }
         draw();
+        scene.startMove(inserts, now, playback.reduced);
       }
     } else if (feedback) updateInteraction();
-    scene.showAward(now);
+    scene.showMove(now);
+    scene.showMatchTail(now);
   };
   ticker.add(tick);
   canvas.addEventListener('pointerdown', down, options);
@@ -150,7 +162,12 @@ export async function mountGame(app: Application): Promise<void> {
     if (pending) {
       cancelPresentation();
       draw();
-    } else if (gestures.cancel()) updateInteraction();
+    } else {
+      scene.finishMove();
+      gestures.cancel();
+      feedback = null;
+      updateInteraction();
+    }
   }, options);
 
   const close = () => scene.root.destroy({ children: true });

@@ -45,6 +45,12 @@ export class StackGestures {
     return null;
   }
 
+  get pressedStack(): number | null {
+    const press = this.press;
+    return press && !press.dragged && typeof press.target === 'number' && press.target === press.hover
+      ? press.target : null;
+  }
+
   start(id: number, point: Point, target: Target): boolean {
     if (this.press) return false;
     this.press = { id, origin: point, target, hover: target, dragged: false };
@@ -62,7 +68,7 @@ export class StackGestures {
       press.dragged = dx * dx + dy * dy >= SWIPE_DISTANCE * SWIPE_DISTANCE;
     }
     press.hover = target;
-    return press.dragged && (!wasDragged || previous !== target);
+    return wasDragged !== press.dragged || previous !== target;
   }
 
   finish(id: number, point: Point, target: Target): GestureResult | null {

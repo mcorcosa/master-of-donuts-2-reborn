@@ -1,11 +1,17 @@
-import { Container, DOMAdapter, Graphics, Sprite, Text, type Texture } from 'pixi.js';
+import { Container, DOMAdapter, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
 import type { Point } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
-import { awardFrame, type MatchFrame, type MatchPlayback, scoreAccents, scoreEmphasis, scoreSize } from './matchPlayback';
+import {
+  awardFrame, clamp, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches, type MatchPlayback, scoreEmphasis, scoreSize,
+} from './matchPlayback';
+import { flightPosition, unit } from './movePlayback';
 
 const FONT = 'Reborn Fredoka';
 const CREAM = 0xfff3d1;
 const SCORE_SCALE = 1.32;
+const SPRINKLES = 6;
+const STREAKS = 2;
+const BURST_MS = 142;
 const DONUT_FILLS: Record<string, number> = {
   gold: 0xff861b, red: 0xef3e48, yellow: 0xf6d62b, choco: 0xc97954,
   gray: 0x84929d, purple: 0x9c50ec, blue: 0x3049c8, green: 0x32c96a,
@@ -28,97 +34,102 @@ function deepHue(color: number): number {
   return (red << 16) | (green << 8) | blue;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-interface MatchGeometry {
-  start: Point;
-  landing: Point;
-  width: number;
-  height: number;
-  step: number;
-  viewHeight: number;
+interface Burst {
+  flash: Graphics;
+  fragments: Graphics[];
 }
 
 export class MatchEffect {
   readonly root = new Container();
   private readonly donuts = new Container();
+  private readonly bursts = new Container();
   private readonly award = new Container();
-  private readonly ring = new Graphics();
-  private readonly pieces: Sprite[];
+  private readonly sprinkleShape = new GraphicsContext().roundRect(-4, -1.5, 8, 3, 1.5).fill(0xffffff);
+  private readonly streakShape = new GraphicsContext().poly([-9, 0, 1, -2.4, 7, 0, 1, 2.4]).fill(0xffffff);
+  private readonly flashShape = new GraphicsContext()
+    .poly([0, -22, 3.6, -4, 25, 0, 3.6, 4, 0, 22, -3.6, 4, -25, 0, -3.6, -4]).fill(CREAM)
+    .poly([0, -10, 2, -2.2, 12, 0, 2, 2.2, 0, 10, -2, 2.2, -12, 0, -2, -2.2]).fill(0xffffff);
+  private readonly pieces: Sprite[] = [];
+  private readonly burstPool: Burst[] = [];
   private readonly outline: Text;
   private readonly face: Text;
-  private readonly accents = Array.from({ length: 6 }, () => new Graphics().poly([-2, 0, 0, -5, 2, 0, 0, 5]).fill(0xffffff));
   private origin: Point = { x: 0, y: 0 };
-  private radius: Point = { x: 0, y: 0 };
-  private accentCount = 0;
   private tiltDirection = 1;
-  private current: { playback: MatchPlayback; geometry: MatchGeometry; texture: Texture } | null = null;
+  private current: {
+    playback: MatchPlayback;
+    geometry: MatchGeometry;
+    texture: Texture;
+    launches: ReturnType<typeof matchLaunches>;
+  } | null = null;
 
-  constructor(initialTexture: Texture) {
+  constructor() {
     const style = {
       fontFamily: [FONT, 'Comic Sans MS', 'cursive'],
-      fontSize: 24 * SCORE_SCALE, fontWeight: '600' as const,
+      fontSize: 24 * SCORE_SCALE, fontWeight: '700' as const,
     };
-    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 3.2 * SCORE_SCALE } } });
+    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 4.2 * SCORE_SCALE } } });
     this.face = new Text({ text: '', style: { ...style, stroke: { color: CREAM, width: 1.2 * SCORE_SCALE } } });
     this.outline.anchor.set(0.5);
     this.face.anchor.set(0.5);
-    this.award.addChild(...this.accents, this.outline, this.face);
-    this.donuts.addChild(this.ring);
-    this.pieces = Array.from({ length: 3 }, () => {
-      const piece = new Sprite(initialTexture);
-      piece.anchor.set(0.5, 1);
-      return this.donuts.addChild(piece);
+    this.award.addChild(this.outline, this.face);
+    this.root.addChild(this.donuts, this.bursts, this.award);
+    this.root.once('destroyed', () => {
+      this.sprinkleShape.destroy();
+      this.streakShape.destroy();
+      this.flashShape.destroy();
     });
-    this.root.addChild(this.donuts, this.award);
     this.cancel();
   }
 
   start(playback: MatchPlayback, geometry: MatchGeometry, texture: Texture): void {
-    this.current = { playback, geometry, texture };
+    this.cancel();
+    const launches = playback.reduced ? [] : matchLaunches(playback, geometry);
+    this.current = { playback, geometry, texture, launches };
     const fill = DONUT_FILLS[playback.color] ?? CREAM;
     const size = scoreSize(playback.points) * SCORE_SCALE;
     const emphasis = scoreEmphasis(playback.points);
-    this.accentCount = scoreAccents(playback);
     for (const layer of [this.outline, this.face]) {
       layer.text = `+${number.format(playback.points)}`;
       layer.style.fill = fill;
       layer.style.fontSize = size;
       layer.y = 0;
     }
-    this.outline.style.stroke = { color: deepHue(fill), width: 3.2 * SCORE_SCALE };
+    this.outline.style.stroke = { color: deepHue(fill), width: 4.2 * SCORE_SCALE };
 
     const bounds = this.outline.getLocalBounds();
     this.outline.y = this.face.y = -(bounds.minY + bounds.maxY) / 2;
     const labelWidth = 2 * Math.max(Math.abs(bounds.minX), Math.abs(bounds.maxX));
     const labelHeight = bounds.height;
-    this.radius = { x: labelWidth / 2 + 8, y: labelHeight / 2 + 5 };
-    const spread = this.accentCount ? 32 : 0;
-    const peakX = playback.reduced ? 1 : 1.08 + 0.22 * emphasis;
-    const peakY = playback.reduced ? 1 : 1.08 + 0.32 * emphasis;
-    const tilt = playback.reduced ? 0 : Math.sin(5 * emphasis * Math.PI / 180);
-    const marginX = (labelWidth * peakX + labelHeight * tilt) / 2 + spread + 6;
-    const marginY = (labelHeight * peakY + labelWidth * tilt) / 2 + spread;
+    const peakX = playback.reduced ? 1 : 1.34;
+    const peakY = playback.reduced ? 1 : 1.42;
+    const tilt = playback.reduced ? 0 : 0.09;
+    const marginX = (labelWidth * peakX + labelHeight * tilt) / 2 + 6;
+    const marginY = (labelHeight * peakY + labelWidth * tilt) / 2 + 3;
 
-    const { landing, width, height, viewHeight } = geometry;
+    const { landing, height, viewHeight } = geometry;
+    const lead = launches.at(-1)?.burst;
     const travel = playback.reduced ? 0 : 12 + 6 * emphasis;
     this.origin = {
-      x: clamp(landing.x, marginX, VIEW_WIDTH - marginX),
-      y: clamp(landing.y - height - 20, BOARD_TOP + marginY + travel, viewHeight - BOARD_FOOTER_SPACE - marginY),
+      x: clamp(lead?.x ?? landing.x, marginX, VIEW_WIDTH - marginX),
+      y: clamp(lead ? lead.y - marginY - 9 : landing.y - height - 20,
+        BOARD_TOP + marginY + travel, viewHeight - BOARD_FOOTER_SPACE - marginY),
     };
     this.tiltDirection = landing.x < VIEW_WIDTH / 2 ? 1 : -1;
-    this.accents.forEach((accent, index) => {
-      accent.tint = index % 2 ? CREAM : fill;
-      accent.scale.set(playback.points >= 2500 ? 1.2 : 0.9);
-    });
+    this.prepareBursts(launches.length, fill);
 
-    for (const piece of this.pieces) piece.texture = texture;
-    this.ring.clear().ellipse(0, 0, width * 0.67, height * 0.40)
-      .stroke({ color: CREAM, width: 3 });
+    while (this.pieces.length < playback.runLength) {
+      const piece = new Sprite(texture);
+      piece.anchor.set(0.5, 1);
+      this.pieces.push(this.donuts.addChild(piece));
+    }
+    this.pieces.forEach((piece, index) => {
+      piece.visible = false;
+      if (index < playback.runLength) {
+        piece.texture = texture;
+        piece.tint = 0xffffff;
+      }
+    });
     this.donuts.visible = true;
-    this.award.visible = false;
   }
 
   showPieces(frame: MatchFrame): void {
@@ -128,69 +139,112 @@ export class MatchEffect {
       return;
     }
 
-    const { playback, geometry, texture } = this.current;
+    const { playback, geometry, texture, launches } = this.current;
     const { start, landing, width, height, step } = geometry;
+    const { runLength } = playback;
     const { phase, progress } = frame;
-    this.ring.visible = phase === 'clear';
     if (phase === 'arrival') {
-      const arc = clamp(Math.min(start.y, landing.y) - height - BOARD_TOP, 4, 45);
-      const travel = 1 - (1 - progress) ** 2;
-      const piece = this.pieces[2];
-      this.pieces[0].visible = this.pieces[1].visible = false;
+      const arc = clamp(Math.min(start.y, landing.y) - height - BOARD_TOP, 0, 45);
+      const piece = this.pieces[runLength - 1];
       piece.visible = true;
       piece.alpha = 1;
       piece.rotation = 0;
       piece.scale.set(width / texture.width, height / texture.height);
-      piece.position.set(start.x + (landing.x - start.x) * travel,
-        start.y + (landing.y - start.y) * travel - Math.sin(Math.PI * progress) * arc);
+      piece.position.copyFrom(flightPosition(start, landing, progress, arc));
       return;
     }
 
-    const split = playback.reduced ? 0 : 1 - (1 - clamp(progress / 0.56, 0, 1)) ** 2;
-    const fade = 1 - clamp((progress - 0.48) / 0.52, 0, 1) ** 1.5;
-    const spread = width * 0.5;
-    const fanCenter = clamp(landing.x, width + 6, VIEW_WIDTH - width - 6);
-    const fanOffset = (fanCenter - landing.x) * split;
-    this.pieces.forEach((piece, index) => {
-      const direction = index - 1;
-      const scale = 1 + 0.10 * split;
-      piece.visible = true;
-      piece.alpha = fade;
-      piece.rotation = direction * 0.14 * split;
-      piece.scale.set(scale * width / texture.width, scale * height / texture.height);
-      piece.position.set(landing.x + fanOffset + direction * spread * split,
-        landing.y + (2 - index) * step - (8 + index * 7) * split);
-    });
-    this.ring.position.set(landing.x + fanOffset, landing.y + step - height / 2);
-    this.ring.scale.set(1 + 0.48 * split);
-    this.ring.alpha = 0.84 * fade;
+    const age = progress * playback.clearMs;
+    for (let index = 0; index < runLength; index++) {
+      const piece = this.pieces[index];
+      const pose = playback.reduced ? {
+        x: landing.x, y: landing.y + (runLength - 1 - index) * step,
+        alpha: 1 - unit((age - 48) / (playback.clearMs - 48)), rotation: 0,
+        scaleX: 1, scaleY: 1,
+      } : launchedDonut(launches[index], geometry, age);
+      piece.visible = pose !== null;
+      if (!pose) continue;
+      piece.alpha = pose.alpha;
+      piece.rotation = pose.rotation;
+      piece.scale.set(pose.scaleX * width / texture.width, pose.scaleY * height / texture.height);
+      piece.position.copyFrom(pose);
+      if (playback.reduced) piece.tint = 0xffeac4;
+    }
   }
 
-  showAward(now: number): void {
-    if (!this.current) return;
-    const frame = awardFrame(this.current.playback, now);
+  showTail(now: number): void {
+    const current = this.current;
+    if (!current) return;
+    const { playback, geometry, launches } = current;
+    const age = now - playback.started - playback.arrivalMs;
+    this.bursts.visible = false;
+    launches.forEach(({ pop, burst }, index) => this.showBurst(index, age - pop, burst, geometry));
+
+    const frame = awardFrame(playback, now);
     this.award.visible = frame !== null;
     if (!frame) {
-      if (!this.donuts.visible) this.current = null;
+      if (!this.donuts.visible && !this.bursts.visible) this.current = null;
       return;
     }
     this.award.position.set(this.origin.x, this.origin.y - frame.lift);
     this.award.scale.set(frame.scaleX, frame.scaleY);
     this.award.rotation = this.tiltDirection * frame.rotation;
     this.award.alpha = frame.alpha;
-    this.accents.forEach((accent, index) => {
-      accent.visible = index < this.accentCount && frame.accentProgress < 1;
-      if (!accent.visible) return;
-      const angle = index / this.accentCount * Math.PI * 2 - Math.PI / 2;
-      const spread = 10 * frame.accentProgress;
-      accent.rotation = angle;
-      accent.position.set(Math.cos(angle) * (this.radius.x + spread), Math.sin(angle) * (this.radius.y + spread));
-      accent.alpha = (1 - frame.accentProgress) ** 2;
+  }
+
+  private prepareBursts(count: number, fill: number): void {
+    while (this.burstPool.length < count) {
+      const flash = this.bursts.addChild(new Graphics(this.flashShape));
+      const fragments = Array.from({ length: SPRINKLES + STREAKS }, (_, index) =>
+        this.bursts.addChild(new Graphics(index < SPRINKLES ? this.sprinkleShape : this.streakShape)));
+      this.burstPool.push({ flash, fragments });
+    }
+    this.burstPool.forEach(({ flash, fragments }) => {
+      flash.visible = false;
+      fragments.forEach((fragment, index) => {
+        fragment.visible = false;
+        fragment.tint = index < SPRINKLES - 1 ? fill : CREAM;
+      });
     });
+  }
+
+  private showBurst(index: number, age: number, origin: Point, { width, viewHeight }: MatchGeometry): void {
+    const { flash, fragments } = this.burstPool[index];
+    const active = age >= 0 && age < BURST_MS;
+    flash.visible = active && age < 64;
+    if (flash.visible) {
+      const radius = Math.min(origin.x, VIEW_WIDTH - origin.x, origin.y - BOARD_TOP,
+        viewHeight - BOARD_FOOTER_SPACE - origin.y);
+      const scale = Math.min(radius / 25, 0.56 + 0.46 * unit(age / 28));
+      flash.position.copyFrom(origin);
+      flash.scale.set(scale);
+      flash.alpha = (1 - unit(age / 64)) ** 1.1;
+    }
+
+    fragments.forEach((fragment, particle) => {
+      fragment.visible = active;
+      if (!active) return;
+      const streak = particle >= SPRINKLES;
+      const angle = particle * (2 * Math.PI / fragments.length) + index * 0.73;
+      const progress = age / BURST_MS;
+      const travel = 1 - (1 - progress) ** 2;
+      const reach = Math.max(24, Math.min(46, width * 0.56)) * (0.69 + (particle % 3) * 0.19);
+      const distance = (streak ? 1.27 : 1) * (5 + reach * travel);
+      const edge = streak ? 10 : 6;
+      fragment.position.set(
+        clamp(origin.x + Math.cos(angle) * distance, edge, VIEW_WIDTH - edge),
+        clamp(origin.y + Math.sin(angle) * distance + 12 * progress ** 2,
+          BOARD_TOP + edge, viewHeight - BOARD_FOOTER_SPACE - edge),
+      );
+      fragment.rotation = angle + (streak ? 0 : progress * (particle % 2 ? 1.9 : -1.9));
+      fragment.scale.set(streak ? 0.78 + 0.22 * travel : 0.98 - 0.35 * progress, 1 - 0.68 * progress);
+      fragment.alpha = (1 - progress) ** (streak ? 2 : 0.85);
+    });
+    if (active) this.bursts.visible = true;
   }
 
   cancel(): void {
     this.current = null;
-    this.donuts.visible = this.award.visible = false;
+    this.donuts.visible = this.bursts.visible = this.award.visible = false;
   }
 }

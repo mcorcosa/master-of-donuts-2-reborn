@@ -9,6 +9,13 @@ export interface GameState {
   gameOver: boolean;
 }
 
+export interface DoughInsert {
+  stack: number;
+  /** Bottom-first index just before this donut is inserted. */
+  depth: number;
+  color: string;
+}
+
 const COLORS = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green'];
 const RANKS = [
   'Dough Enthusiast', 'Pastry Pupil', 'Fryer Fighter', 'Batter Boss',
@@ -41,6 +48,12 @@ function topPair(stack: string[]): string | undefined {
   return stack.at(-1) === stack.at(-2) ? stack.at(-1) : undefined;
 }
 
+export function matchedRunLength(destinationBefore: readonly string[], incoming: string): number {
+  let count = 1;
+  for (let i = destinationBefore.length - 1; i >= 0 && destinationBefore[i] === incoming; i--) count++;
+  return count >= 3 ? count : 0;
+}
+
 function totalSpace(stacks: string[][], capacity: number): number {
   return stacks.reduce((free, stack) => free + capacity - stack.length, 0);
 }
@@ -63,10 +76,15 @@ function isGameOver(stacks: string[][], capacity: number): boolean {
   });
 }
 
-function refill(state: RunState, colors: string[], rng: () => number, match?: string): void {
+function insertDough(state: GameState, inserts: DoughInsert[], stack: string[], depth: number, color: string): void {
+  stack.splice(depth, 0, color);
+  inserts.push({ stack: state.stacks.indexOf(stack), depth, color });
+}
+
+function refill(state: GameState, inserts: DoughInsert[], colors: string[], rng: () => number, match?: string): void {
   const { stacks, capacity } = state;
   const insert = (stack: string[], color: string): void => {
-    stack.unshift(color);
+    insertDough(state, inserts, stack, 0, color);
     state.gameOver = isGameOver(stacks, capacity);
   };
 
@@ -92,7 +110,69 @@ function refill(state: RunState, colors: string[], rng: () => number, match?: st
   }
 }
 
-function advanceLevel(state: RunState, colors: string[], rng: () => number): void {
+function hasScoringMove(stacks: string[][], capacity: number): boolean {
+  return stacks.some((target) => {
+    if (target.length >= capacity) return false;
+    const pair = topPair(target);
+    return pair !== undefined && stacks.some((source) => source !== target && source.at(-1) === pair);
+  });
+}
+
+function hasQuickScore({ stacks, capacity, movesLeft }: GameState): boolean {
+  if (hasScoringMove(stacks, capacity)) return true;
+  if (movesLeft <= 1) return false;
+
+  // Check one setup move while it is still safe to miss without a pressure refill.
+  for (const source of stacks) {
+    const incoming = source.at(-1);
+    if (incoming === undefined) continue;
+    for (const target of stacks) {
+      if (source === target || target.length >= capacity) continue;
+      source.pop();
+      target.push(incoming);
+      const canScore = hasScoringMove(stacks, capacity);
+      target.pop();
+      source.push(incoming);
+      if (canScore) return true;
+    }
+  }
+  return false;
+}
+
+function refillLargeMatch(
+  state: GameState, inserts: DoughInsert[], colors: string[], rng: () => number, match: string, from: number, to: number,
+): void {
+  const cleared = state.stacks;
+  state.stacks = cleared.map((stack) => stack.slice());
+  const trial: DoughInsert[] = [];
+  refill(state, trial, colors, rng, match);
+  if (hasQuickScore(state)) {
+    inserts.push(...trial);
+    return;
+  }
+
+  state.stacks = cleared;
+  const empty = cleared.find((stack) => stack.length === 0);
+  const donor = cleared.find((stack) => stack.length > 0);
+  if (empty && donor) {
+    const color = donor.at(-1)!;
+    insertDough(state, inserts, empty, 0, colors.find((other) => other !== color)!);
+    insertDough(state, inserts, empty, 1, color);
+    insertDough(state, inserts, empty, 2, color);
+    return;
+  }
+
+  // Clearing four or more leaves at least four slots in the destination and
+  // moving leaves at least one in the source. The pair and donor give a scoring
+  // move even when the very next miss would trigger a fatal pressure refill.
+  const retainedTop = cleared[to].at(-1);
+  const rescueColor = donor ? colors.find((color) => color !== match && color !== retainedTop)! : match;
+  insertDough(state, inserts, cleared[to], cleared[to].length, rescueColor);
+  insertDough(state, inserts, cleared[to], cleared[to].length, rescueColor);
+  insertDough(state, inserts, cleared[from], cleared[from].length, rescueColor);
+}
+
+function advanceLevel(state: RunState, inserts: DoughInsert[], colors: string[], rng: () => number): void {
   state.level++;
   const { level } = state;
   state.rank = RANKS[Math.min(level, RANKS.length) - 1];
@@ -103,11 +183,11 @@ function advanceLevel(state: RunState, colors: string[], rng: () => number): voi
     state.capacity++;
   } else if (level % 3 === 0) {
     const stack: string[] = [];
+    state.stacks.push(stack);
     for (let i = 0; i < Math.floor(state.capacity * 0.75); i++) {
       const pair = topPair(stack);
-      stack.push(randomColor(colors.filter((color) => color !== pair), rng));
+      insertDough(state, inserts, stack, i, randomColor(colors.filter((color) => color !== pair), rng));
     }
-    state.stacks.push(stack);
   }
 }
 
@@ -148,15 +228,18 @@ export function canMove(state: GameState, from: number, to: number): boolean {
   return source !== undefined && target !== undefined && source.length > 0 && target.length < state.capacity;
 }
 
-export function move(state: GameState, from: number, to: number, rng: () => number = Math.random): GameState {
+export function move(
+  state: GameState, from: number, to: number, rng: () => number = Math.random,
+  onDough?: (inserts: readonly DoughInsert[]) => void,
+): GameState {
   if (!canMove(state, from, to)) return state;
 
   const next: RunState = { ...state, stacks: state.stacks.map((stack) => stack.slice()) };
   const source = next.stacks[from];
   const target = next.stacks[to];
   const color = source.pop()!;
+  const matched = matchedRunLength(target, color);
   target.push(color);
-  const matched = topPair(target) === color && target.at(-3) === color;
   if (!matched) {
     next.movesLeft--;
     if (next.movesLeft > 0) return next;
@@ -168,13 +251,16 @@ export function move(state: GameState, from: number, to: number, rng: () => numb
   const palette = next[paletteKey] ?? [...new Set([...state.stacks.flat(), ...COLORS])];
   const colorCount = Math.min(COLORS.length, 3 + Math.floor((state.level - 1) / 3));
   const colors = palette.slice(0, colorCount);
+  const inserts: DoughInsert[] = [];
   if (matched) {
-    target.splice(-3);
+    target.splice(-matched);
     next.score += 100 + (state.level - 1) * 10;
-    refill(next, colors, rng, color);
-    if (next.score >= next.nextLevelScore) advanceLevel(next, colors, rng);
+    if (matched === 3) refill(next, inserts, colors, rng, color);
+    else refillLargeMatch(next, inserts, colors, rng, color, from, to);
+    if (next.score >= next.nextLevelScore) advanceLevel(next, inserts, colors, rng);
   } else {
-    refill(next, colors, rng);
+    refill(next, inserts, colors, rng);
   }
+  onDough?.(inserts);
   return next;
 }

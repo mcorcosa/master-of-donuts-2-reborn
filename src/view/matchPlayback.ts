@@ -1,9 +1,13 @@
-import type { GameState } from '../game';
+import { type GameState, matchedRunLength } from '../game';
+import type { Point } from './gestures';
+import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
+import { unit } from './movePlayback';
 
 export interface MatchPlayback {
   from: number;
   to: number;
   color: string;
+  runLength: number;
   points: number;
   started: number;
   reduced: boolean;
@@ -16,8 +20,10 @@ export function beginMatch(before: GameState, after: GameState, from: number, to
   const points = after.score - before.score;
   const color = before.stacks[from].at(-1);
   if (points <= 0 || !color) return null;
+  const runLength = matchedRunLength(before.stacks[to], color);
+  if (!runLength) return null;
 
-  return { from, to, color, points, started, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320 };
+  return { from, to, color, runLength, points, started, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320 };
 }
 
 export function matchFrame(match: MatchPlayback, now: number) {
@@ -29,6 +35,122 @@ export function matchFrame(match: MatchPlayback, now: number) {
 }
 
 export type MatchFrame = ReturnType<typeof matchFrame>;
+
+export interface MatchGeometry {
+  start: Point;
+  landing: Point;
+  width: number;
+  height: number;
+  step: number;
+  viewHeight: number;
+}
+
+interface DonutPose extends Point {
+  scaleX: number;
+  scaleY: number;
+  rotation: number;
+}
+
+interface MatchLaunch {
+  seat: Point;
+  apex: DonutPose;
+  burst: Point;
+  takeoff: number;
+  pop: number;
+}
+
+const SNAP_MS = 30;
+
+export function matchPopTime(runLength: number, index: number): number {
+  return 194 + 74 * (runLength - 1 - index) / (runLength - 1);
+}
+
+export function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function fitDonut(pose: DonutPose, { width, height, viewHeight }: MatchGeometry): DonutPose {
+  const sin = Math.abs(Math.sin(pose.rotation));
+  const cos = Math.cos(pose.rotation);
+  const half = width * pose.scaleX / 2;
+  const tall = height * pose.scaleY;
+  const side = half * cos + tall * sin;
+  return {
+    ...pose,
+    x: clamp(pose.x, side + 2, VIEW_WIDTH - side - 2),
+    y: clamp(pose.y, BOARD_TOP + tall * cos + half * sin + 2,
+      viewHeight - BOARD_FOOTER_SPACE - half * sin - 2),
+  };
+}
+
+export function matchLaunches(match: MatchPlayback, geometry: MatchGeometry): MatchLaunch[] {
+  const { runLength } = match;
+  const { landing, width, height, step } = geometry;
+  const columns = runLength <= 4 ? runLength : Math.ceil(runLength / 2);
+  // A full stack near the HUD needs smaller airborne donuts to reserve space for the jump.
+  const headroom = (landing.y - BOARD_TOP - Math.max(17, height * 0.36) - 4) / (height + width * 0.09);
+  const scale = Math.min(0.86, Math.max(0.56, headroom), (VIEW_WIDTH - 34 - (columns - 1) * 5) / (columns * width));
+  const spacing = width * scale + 5;
+  const rowHeight = height * scale;
+  const edge = width * scale / 2 + rowHeight * 0.17 + 4;
+  const jump = Math.min(136, 34 + height * 1.03 + step * 0.45);
+  const crest = Math.max(BOARD_TOP + rowHeight + width * scale * 0.09 + 4, landing.y - jump);
+
+  return Array.from({ length: runLength }, (_, index) => {
+    const order = runLength - 1 - index;
+    const row = Math.floor(order / columns);
+    const size = Math.min(columns, runLength - row * columns);
+    // The top donut leads from the middle, with subsequent donuts spreading left and right.
+    const lane = (order % columns + Math.floor(size / 2)) % size;
+    const side = lane - (size - 1) / 2;
+    const spread = (size - 1) / 2 * spacing;
+    const center = clamp(landing.x, edge + spread, VIEW_WIDTH - edge - spread);
+    const apex = fitDonut({
+      x: center + side * spacing,
+      y: crest + row * (rowHeight + 5) + 6 * Math.abs(side),
+      rotation: side === 0 ? -0.09 : Math.sign(side) * 0.17,
+      scaleX: scale, scaleY: scale,
+    }, geometry);
+    return {
+      seat: { x: landing.x, y: landing.y + order * step },
+      apex,
+      burst: { x: apex.x + Math.sin(apex.rotation) * rowHeight / 2, y: apex.y - Math.cos(apex.rotation) * rowHeight / 2 },
+      takeoff: 49 + 39 * order / (runLength - 1),
+      pop: matchPopTime(runLength, index),
+    };
+  });
+}
+
+export function launchedDonut(launch: MatchLaunch, geometry: MatchGeometry, age: number) {
+  const { seat, apex, burst, takeoff, pop } = launch;
+  const impact = Math.min(geometry.height * 0.18, geometry.step * 0.56);
+  if (age < takeoff) {
+    const squash = unit((age - (takeoff - 43)) / 35);
+    return { ...fitDonut({
+      x: seat.x, y: seat.y + impact * squash, rotation: 0,
+      scaleX: 1 + 0.12 * squash, scaleY: 1 - 0.25 * squash,
+    }, geometry), alpha: 1 };
+  }
+  if (age < pop) {
+    const fraction = unit((age - takeoff) / (pop - takeoff));
+    const rise = 1 - (1 - fraction) ** 2;
+    const stretch = Math.sin(Math.PI * unit(fraction / 0.68));
+    return { ...fitDonut({
+      x: seat.x + (apex.x - seat.x) * rise,
+      y: seat.y + impact + (apex.y - seat.y - impact) * rise,
+      rotation: apex.rotation * rise,
+      scaleX: 1.12 + (apex.scaleX - 1.12) * rise - 0.14 * stretch,
+      scaleY: 0.75 + (apex.scaleY - 0.75) * rise + 0.39 * stretch,
+    }, geometry), alpha: 1 };
+  }
+  const snap = (age - pop) / SNAP_MS;
+  if (snap >= 1) return null;
+  const collapse = (1 - snap) ** 2;
+  return { ...apex,
+    x: burst.x + (apex.x - burst.x) * collapse, y: burst.y + (apex.y - burst.y) * collapse,
+    scaleX: apex.scaleX * collapse, scaleY: apex.scaleY * collapse, alpha: 1 - snap ** 2,
+  };
+}
 
 function scoreRatio(points: number): number {
   return Math.log(Math.max(300, points) / 300) / Math.log(2500 / 300);
@@ -42,33 +164,26 @@ export function scoreSize(points: number): number {
   return Math.min(48, 24 + 20 * scoreRatio(points));
 }
 
-export function scoreAccents(match: MatchPlayback): number {
-  if (match.reduced || match.points < 1000) return 0;
-  return match.points >= 2500 ? 6 : 4;
-}
-
 export function awardFrame(match: MatchPlayback, now: number) {
   const emphasis = scoreEmphasis(match.points);
-  const lifetime = 450 + 150 * emphasis;
-  const age = now - match.started - match.arrivalMs;
+  const lifetime = 420 + 130 * emphasis;
+  const pop = match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1);
+  const age = now - match.started - match.arrivalMs - pop;
   if (age < 0 || age >= lifetime) return null;
 
-  const peakX = 1.08 + 0.22 * emphasis;
-  const peakY = 1.08 + 0.32 * emphasis;
+  const peakX = 1.21 + 0.13 * emphasis;
+  const peakY = 1.29 + 0.13 * emphasis;
   let scaleX = 1;
   let scaleY = 1;
-  if (!match.reduced && age < 70) {
-    const pop = 1 - (1 - age / 70) ** 2;
-    scaleX = 0.85 + 0.1 * emphasis + (peakX - 0.85 - 0.1 * emphasis) * pop;
-    scaleY = 0.85 - 0.2 * emphasis + (peakY - 0.85 + 0.2 * emphasis) * pop;
-  } else if (!match.reduced && age < 120) {
-    const settle = (age - 70) / 50;
-    scaleX = peakX + (1 - 0.08 * emphasis - peakX) * settle;
-    scaleY = peakY + (1 + 0.04 * emphasis - peakY) * settle;
-  } else if (!match.reduced && age < 180) {
-    const settle = (age - 120) / 60;
-    scaleX = 1 - 0.08 * emphasis * (1 - settle);
-    scaleY = 1 + 0.04 * emphasis * (1 - settle);
+  if (!match.reduced && age < 48) {
+    const punch = 1 - (1 - age / 48) ** 2;
+    scaleX = 0.79 + (peakX - 0.79) * punch;
+    scaleY = 0.7 + (peakY - 0.7) * punch;
+  } else if (!match.reduced && age < 149) {
+    const settle = (1 - (age - 48) / 101) ** 2;
+    const recoil = Math.sin(Math.PI * (age - 48) / 101) ** 2;
+    scaleX += (peakX - 1) * settle - 0.07 * recoil;
+    scaleY += (peakY - 1) * settle - 0.04 * recoil;
   }
 
   const drift = Math.max(0, (age - 120) / (lifetime - 120));
@@ -78,9 +193,8 @@ export function awardFrame(match: MatchPlayback, now: number) {
     alpha: (match.reduced ? Math.min(1, age / 50) : 1)
       * (1 - Math.max(0, (age - (lifetime - fade)) / fade) ** 2),
     scaleX, scaleY,
-    rotation: match.reduced || age >= 180 ? 0
-      : 5 * emphasis * Math.PI / 180 * Math.cos(Math.PI * age / 100) * (1 - age / 180),
+    rotation: match.reduced || age >= 149 ? 0
+      : (3 + 2 * emphasis) * Math.PI / 180 * Math.cos(Math.PI * age / 95) * (1 - age / 149),
     lift: travel * (1 - (1 - drift) ** 2),
-    accentProgress: Math.min(1, age / 220),
   };
 }
