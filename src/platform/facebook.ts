@@ -1,7 +1,26 @@
+interface FacebookLeaderboardPlayer {
+  getID?(): string | null;
+  getName(): string;
+}
+
+interface FacebookLeaderboardEntry {
+  getPlayer(): FacebookLeaderboardPlayer;
+  getRank(): number;
+  getScore(): number;
+}
+
+interface FacebookLeaderboard {
+  getConnectedPlayerEntriesAsync?(count: number, offset: number): Promise<readonly FacebookLeaderboardEntry[]>;
+  setScoreAsync?(score: number): Promise<unknown>;
+}
+
 interface FacebookSDK {
   initializeAsync(): Promise<void>;
   setLoadingProgress(progress: number): void;
   startGameAsync(): Promise<void>;
+  getLeaderboardAsync?(name: string): Promise<FacebookLeaderboard>;
+  getSupportedAPIs?(): readonly string[];
+  player?: Pick<FacebookLeaderboardPlayer, 'getID'>;
 }
 
 declare global {

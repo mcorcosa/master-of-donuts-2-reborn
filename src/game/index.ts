@@ -25,9 +25,10 @@ const RANKS = [
   'Master Mixer', 'Fryer Phenom', 'Donut Demigod', 'Master of Donuts',
 ];
 const SCORE_TARGETS = [
-  500, 1500, 2500, 3500, 4500, 6500, 8500, 10500,
-  12500, 14500, 17500, 20500, 23500, 26500, 29500, 34500,
+  500, 1500, 2600, 3700, 4800, 7000, 9200, 11400,
+  13700, 16000, 19400, 22800, 26200, 29600, 33000, 38300,
 ];
+const FALLBACK_SCORE_GAP = 3200;
 const MOVE_LIMIT = 7;
 const paletteKey = Symbol('palette');
 type RunState = GameState & { [paletteKey]?: string[] };
@@ -173,23 +174,28 @@ function refillLargeMatch(
   insertDough(state, inserts, cleared[from], cleared[from].length, rescueColor);
 }
 
-function advanceLevel(state: RunState, inserts: DoughInsert[], colors: string[], rng: () => number): void {
+function advanceLevel(state: RunState, colors: string[], rng: () => number): void {
   state.level++;
   const { level } = state;
   state.rank = RANKS[Math.min(level, RANKS.length) - 1];
-  state.nextLevelScore = SCORE_TARGETS[level - 1] ?? state.nextLevelScore + 3000;
+  state.nextLevelScore = SCORE_TARGETS[level - 1] ?? state.nextLevelScore + FALLBACK_SCORE_GAP;
 
   if (level > RANKS.length) return;
   if (level % 3 === 2) {
     state.capacity++;
   } else if (level % 3 === 0) {
+    // The active palette changes on color unlocks, so the match palette still applies here.
     const stack: string[] = [];
-    state.stacks.push(stack);
-    for (let i = 0; i < Math.floor(state.capacity * 0.75); i++) {
-      const pair = topPair(stack);
-      insertDough(state, inserts, stack, i, randomColor(colors.filter((color) => color !== pair), rng));
+    const count = Math.floor(state.capacity / 2);
+    for (let i = 0; i < count; i++) {
+      const excluded = i === count - 1 ? stack.at(-1) : topPair(stack);
+      stack.push(randomColor(colors.filter((color) => color !== excluded), rng));
     }
+    state.stacks.push(stack);
+  } else {
+    return;
   }
+  state.gameOver = isGameOver(state.stacks, state.capacity);
 }
 
 export function createGame(rng: () => number = Math.random): GameState {
@@ -264,7 +270,7 @@ export function move(
     next.score += adjustedAward + Math.floor(adjustedAward * Math.min(priorCombo, 5) / 10);
     if (matched === 3) refill(next, inserts, colors, rng, color);
     else refillLargeMatch(next, inserts, colors, rng, color, from, to);
-    if (next.score >= next.nextLevelScore) advanceLevel(next, inserts, colors, rng);
+    if (next.score >= next.nextLevelScore) advanceLevel(next, colors, rng);
   } else {
     refill(next, inserts, colors, rng);
   }

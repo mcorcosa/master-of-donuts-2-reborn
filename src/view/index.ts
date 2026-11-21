@@ -1,9 +1,12 @@
 import type { Application } from 'pixi.js';
 import { canMove, createGame, type DoughInsert, type GameState, move } from '../game';
+import { createFriendsScores } from '../platform/friendsScores';
+import { PersonalScores } from '../platform/personalScores';
 import { type Point, StackGestures } from './gestures';
 import { LEVEL_CELEBRATION_MS, type LevelCelebrationDetails } from './levelCelebration';
 import { preloadScoreFont } from './matchEffect';
 import { beginMatch, matchFrame, type MatchPlayback, scoreImpactTime } from './matchPlayback';
+import { ResultsSession } from './resultsSession';
 import { type Feedback, GameScene, loadArt } from './scene';
 import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
 
@@ -49,17 +52,20 @@ export async function mountGame(app: Application): Promise<void> {
   const scene = new GameScene(art);
   const { canvas, renderer, stage, ticker } = app;
   const window = canvas.ownerDocument.defaultView!;
+  const personalScores = new PersonalScores(() => window.localStorage);
   const events = new AbortController();
   const options = { signal: events.signal };
   const touchAction = canvas.style.touchAction;
   canvas.style.touchAction = 'none';
 
   let state = createGame();
+  let bestCombo = 0;
+  let results: ResultsSession | null = null;
   let levelStartScore = 0;
   let displayed = scoreDisplay(state, levelStartScore);
   const credits: ScoreCredit[] = [];
   const levels: LevelReveal[] = [];
-  let refillingLevel: LevelReveal | null = null;
+  let unsettledLevel: LevelReveal | null = null;
   let celebrationEnds = 0;
   const pressureLimit = state.movesLeft;
   let feedback: Feedback | null = null;
@@ -84,25 +90,34 @@ export async function mountGame(app: Application): Promise<void> {
 
   function resetScore(): void {
     credits.length = levels.length = 0;
-    refillingLevel = null;
+    unsettledLevel = null;
     celebrationEnds = 0;
     displayed = scoreDisplay(state, levelStartScore);
     scene.drawScore(displayed);
     scene.cancelScoreEffects();
   }
 
-  function checkRefill(): void {
-    if (!refillingLevel || scene.moveAnimating) return;
-    refillingLevel.settled = true;
-    refillingLevel = null;
+  function checkBoardSettled(): void {
+    if (!unsettledLevel || scene.moveAnimating || scene.stackUnlockAnimating) return;
+    unsettledLevel.settled = true;
+    unsettledLevel = null;
+  }
+
+  function showResultsIfSettled(): void {
+    if (results || !state.gameOver || pending || scene.moveAnimating || scene.stackUnlockAnimating) return;
+    const { score, level } = state;
+    const completed = personalScores.record({ score, level, bestCombo });
+    results = new ResultsSession(completed, createFriendsScores(), view => scene.showResults(view));
+    scene.showResults(results.view);
   }
 
   function advanceScore(now: number): void {
-    if (state.gameOver && !pending && !scene.moveAnimating) {
+    if (state.gameOver && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating) {
       if (credits.length || levels.length || celebrationEnds > now) {
         scene.cancelMatch();
         resetScore();
       }
+      showResultsIfSettled();
       scene.showScoreEffects(now);
       return;
     }
@@ -139,6 +154,7 @@ export async function mountGame(app: Application): Promise<void> {
     arrowPointer = null;
     scene.cancelMatch();
     scene.finishMove();
+    scene.finishStackUnlock();
     resetScore();
   }
 
@@ -147,6 +163,7 @@ export async function mountGame(app: Application): Promise<void> {
     cancelPresentation();
     scene.resize(app.screen.width, app.screen.height);
     draw();
+    showResultsIfSettled();
   }
 
   function hit(event: PointerEvent, mode: 'tap' | 'swipe') {
@@ -160,13 +177,13 @@ export async function mountGame(app: Application): Promise<void> {
   }
 
   function down(event: PointerEvent): void {
-    if (pending || event.button !== 0) return;
+    if (pending || scene.stackUnlockAnimating || event.button !== 0) return;
     const { client, target } = hit(event, 'tap');
-    if (state.gameOver && target !== 'restart') return;
+    if (state.gameOver && (!results || typeof target !== 'string' || target === 'outside')) return;
     const swipeDistance = event.pointerType === 'touch' ? TOUCH_SWIPE_DISTANCE : undefined;
     if (!gestures.start(event.pointerId, client, target, swipeDistance)) return;
     scene.finishMove();
-    checkRefill();
+    checkBoardSettled();
     feedback = null;
     arrowPointer = null;
     updateInteraction();
@@ -178,7 +195,7 @@ export async function mountGame(app: Application): Promise<void> {
   }
 
   function track(event: PointerEvent): void {
-    if (pending) return;
+    if (pending || scene.stackUnlockAnimating) return;
     const held = gestures.owns(event.pointerId);
     const idleMouse = !gestures.active && event.pointerType === 'mouse' && gestures.source !== null;
     if (!held && !idleMouse) return;
@@ -200,11 +217,23 @@ export async function mountGame(app: Application): Promise<void> {
     const action = gestures.finish(event.pointerId, client, target);
     arrowPointer = null;
     if (action?.kind === 'restart') {
+      results?.close();
+      results = null;
+      scene.showResults(null);
       state = createGame();
+      bestCombo = 0;
       levelStartScore = 0;
       cancelPresentation();
       gestures.reset();
       draw();
+      return;
+    }
+    if (action?.kind === 'personal' || action?.kind === 'friends') {
+      results?.select(action.kind);
+      return;
+    }
+    if (action?.kind === 'submit') {
+      void results?.submit();
       return;
     }
     if (action?.kind === 'move') {
@@ -213,6 +242,7 @@ export async function mountGame(app: Application): Promise<void> {
       let inserts: readonly DoughInsert[] = [];
       // Commit once so interrupted playback can immediately draw the resolved board.
       state = move(before, from, to, undefined, dough => { inserts = dough; });
+      bestCombo = Math.max(bestCombo, state.combo ?? 0);
       const started = performance.now();
       const playback = beginMatch(before, state, from, to, started, motion.matches);
       const level = levelReveal(before, state, motion.matches);
@@ -270,13 +300,17 @@ export async function mountGame(app: Application): Promise<void> {
       scene.showMatch(frame);
       if (frame.phase === 'resolved') {
         pending = null;
-        draw();
-        scene.startMove(inserts, now, playback.reduced);
-        refillingLevel = level;
+        if (level?.details.upgrade?.kind === 'stack') {
+          scene.startStackUnlock(state, pressureLimit, inserts, now, playback.reduced);
+        } else {
+          draw();
+          scene.startMove(inserts, now, playback.reduced);
+        }
+        unsettledLevel = level;
       }
     } else if (feedback || scene.selectionAnimating) updateInteraction(now);
     scene.showMove(now);
-    checkRefill();
+    checkBoardSettled();
     advanceScore(now);
     scene.showMatchTail(now);
   };
@@ -288,11 +322,12 @@ export async function mountGame(app: Application): Promise<void> {
   window.addEventListener('pointerup', up, options);
   window.addEventListener('pointercancel', cancel, options);
   window.addEventListener('blur', () => {
-    if (pending) {
+    if (pending || scene.stackUnlockAnimating) {
       cancelPresentation();
       draw();
     } else {
       scene.finishMove();
+      scene.finishStackUnlock();
       scene.cancelMatch();
       resetScore();
       gestures.cancel();
@@ -300,11 +335,13 @@ export async function mountGame(app: Application): Promise<void> {
       arrowPointer = null;
       updateInteraction();
     }
+    showResultsIfSettled();
   }, options);
 
   const close = () => scene.root.destroy({ children: true });
   stage.once('destroyed', close);
   scene.root.once('destroyed', () => {
+    results?.close();
     events.abort();
     canvas.style.touchAction = touchAction;
     renderer.off('resize', resize);

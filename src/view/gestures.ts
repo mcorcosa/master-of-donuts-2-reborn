@@ -3,11 +3,12 @@ export interface Point {
   y: number;
 }
 
-export type Target = number | 'restart' | 'outside' | null;
+export type ResultsAction = 'restart' | 'personal' | 'friends' | 'submit';
+export type Target = number | ResultsAction | 'outside' | null;
 
 export type GestureResult =
   | { kind: 'move' | 'blocked'; from: number; to: number }
-  | { kind: 'restart' };
+  | { kind: ResultsAction };
 
 interface Press {
   id: number;
@@ -91,8 +92,7 @@ export class StackGestures {
     }
 
     const pressed = press.target;
-    if (pressed === 'restart') return target === 'restart' ? { kind: 'restart' } : null;
-    if (typeof pressed !== 'number') return null;
+    if (typeof pressed !== 'number') return pressed !== null && pressed === target ? { kind: pressed } : null;
     if (pressed === this.selection) {
       this.selection = null;
     } else if (this.selection !== null) {

@@ -149,9 +149,8 @@ describe('stack gestures', () => {
       const top = { x: slot.x, y: slot.base - (capacity - 1) * step - donutHeight - STACK_LIFT };
       expect(hits.findIndex(hit => contains(hit, top))).toBe(index);
       expect(hits.findIndex(hit => contains(hit, { x: slot.x, y: slot.base }))).toBe(index);
-      const emptyHit = stackHit(slot, 0, donutHeight, step);
-      expect(emptyHit.height * fit.scale).toBeGreaterThan(44);
-      expect(contains(emptyHit, { x: slot.x, y: slot.base + 11 })).toBe(true);
+      expect(hits[index].height * fit.scale).toBeGreaterThan(44);
+      expect(contains(hits[index], { x: slot.x, y: slot.base + 11 })).toBe(true);
     });
 
     for (const row of [slots.slice(0, lower), slots.slice(lower)].filter(row => row.length > 0)) {

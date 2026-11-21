@@ -59,24 +59,31 @@ export function stackVacancyMask(
 
 export class VacancyArt {
   private readonly mask: Uint8ClampedArray;
-  private readonly textures = new Map<number, Texture>();
-  private step = 0;
+  private readonly textures = new Map<number, Map<number, Texture>>();
 
   constructor(texture: Texture) {
     this.mask = vacancyMask(texture);
   }
 
-  setStride(fractionOfDonutHeight: number): void {
-    const step = fractionOfDonutHeight * HEIGHT;
-    if (Math.abs(step - this.step) < 1e-6) return;
-    this.destroy();
-    this.step = step;
+  keepStrides(...fractionsOfDonutHeight: number[]): void {
+    const steps = fractionsOfDonutHeight.map(fraction => fraction * HEIGHT);
+    for (const [step, textures] of this.textures) {
+      if (steps.includes(step)) continue;
+      for (const texture of textures.values()) texture.destroy(true);
+      this.textures.delete(step);
+    }
   }
 
-  texture(count: number): Texture {
-    const cached = this.textures.get(count);
+  texture(count: number, fractionOfDonutHeight: number): Texture {
+    const step = fractionOfDonutHeight * HEIGHT;
+    let textures = this.textures.get(step);
+    if (!textures) {
+      textures = new Map();
+      this.textures.set(step, textures);
+    }
+    const cached = textures.get(count);
     if (cached) return cached;
-    const alpha = stackVacancyMask(this.mask, WIDTH, HEIGHT, this.step, count);
+    const alpha = stackVacancyMask(this.mask, WIDTH, HEIGHT, step, count);
     const canvas = DOMAdapter.get().createCanvas(WIDTH, alpha.length / WIDTH);
     const context = canvas.getContext('2d')!;
     const image = context.createImageData(canvas.width, canvas.height);
@@ -84,12 +91,11 @@ export class VacancyArt {
     for (let i = 0; i < alpha.length; i++) image.data[i * 4 + 3] = alpha[i];
     context.putImageData(image, 0, 0);
     const texture = new Texture({ source: new CanvasSource({ resource: canvas, autoGenerateMipmaps: true }) });
-    this.textures.set(count, texture);
+    textures.set(count, texture);
     return texture;
   }
 
   destroy(): void {
-    for (const texture of this.textures.values()) texture.destroy(true);
-    this.textures.clear();
+    this.keepStrides();
   }
 }

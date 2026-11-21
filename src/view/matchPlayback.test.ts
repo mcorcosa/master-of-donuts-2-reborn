@@ -2,7 +2,7 @@ import { Bounds, DOMAdapter, Sprite, Text, Texture, TextureSource } from 'pixi.j
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type DoughInsert, type GameState, move } from '../game';
 import { StackGestures } from './gestures';
-import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, stackHit, VIEW_WIDTH } from './layout';
+import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, VIEW_WIDTH } from './layout';
 import { LevelCelebration } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import {
@@ -12,6 +12,7 @@ import {
 import { FLIGHT_MS, LAND_MS } from './movePlayback';
 import { GameScene } from './scene';
 import { ScoreBar } from './scoreBar';
+import { STACK_UNLOCK_MS } from './stackUnlock';
 
 const playback: MatchPlayback = {
   from: 0, to: 1, color: 'red', runLength: 3, points: 110, combo: 0, started: 0, reduced: false, arrivalMs: 220, clearMs: 320,
@@ -28,7 +29,8 @@ function makeScene(): GameScene {
   vi.spyOn(DOMAdapter.get(), 'createCanvas').mockImplementation((width, height) =>
     ({ width, height, getContext: () => context }) as unknown as HTMLCanvasElement);
   vi.spyOn(Texture, 'from').mockReturnValue(new Texture({ source: new TextureSource({ width: 64, height: 64 }) }));
-  const art = new Map(['kitchen', 'logo', 'clear', 'blue', 'red', 'green', 'gold', 'yellow'].map(name => [name, Texture.WHITE]));
+  const art = new Map(['kitchen', 'logo', 'clear', 'strawberry-glaze', 'blue', 'red', 'green', 'gold', 'yellow']
+    .map(name => [name, Texture.WHITE]));
   const scene = new GameScene(art);
   scene.resize(320, 568);
   return scene;
@@ -325,8 +327,8 @@ describe('match presentation', () => {
 
 describe('score and level effects', () => {
   it('fits and punches the exact large score and uses a stationary highlight in reduced motion', () => {
-    vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-210, -14, 0, 14));
-    const bar = new ScoreBar();
+    vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(0, -14, 210, 14));
+    const bar = new ScoreBar(Texture.WHITE);
     const score = 123456789.5;
     bar.draw({ score, level: 8, rank: 'Doughnut Dynamo', nextLevelScore: score * 2, levelStartScore: 0 });
     const digits = bar['score'];
@@ -335,7 +337,10 @@ describe('score and level effects', () => {
     bar.credit(0, false);
     bar.showEffects(36);
     expect(digits.scale.x).toBeCloseTo(fitted * 1.27);
-    expect(digits.getLocalBounds().width * digits.scale.x).toBeLessThan(bar.creditTarget.x);
+    const punchedWidth = digits.getLocalBounds().width * digits.scale.x;
+    expect(digits.x + punchedWidth).toBeLessThan(bar['levelLabel'].x);
+    expect(bar.creditTarget.x).toBeGreaterThan(bar.root.x + digits.x);
+    expect(bar.creditTarget.x).toBeLessThan(bar.root.x + digits.x + punchedWidth);
     expect(bar['glow'].visible).toBe(true);
 
     bar.credit(100, true);
@@ -368,6 +373,130 @@ describe('score and level effects', () => {
     level.show(1040);
     expect(root.visible).toBe(false);
     root.destroy({ children: true });
+  });
+});
+
+describe('new stack layout', () => {
+  function startUnlock(count: number, width: number, reduced: boolean) {
+    const scene = makeScene();
+    const height = width === 320 ? 640 : 700;
+    scene.resize(width, height);
+    const before: GameState = {
+      stacks: [
+        ['blue', 'red'], ['green', 'red', 'red', 'red'], ['gold', 'blue', 'green', 'gold'],
+        ['blue', 'yellow', 'gold', 'green'], ['green', 'yellow', 'blue', 'gold', 'yellow'],
+      ].slice(0, count),
+      score: count === 3 ? 1390 : 10460, level: count === 3 ? 2 : 8, rank: '',
+      capacity: count === 3 ? 6 : 8, nextLevelScore: count === 3 ? 1500 : 10500, movesLeft: 7, gameOver: false,
+    };
+    const inserts: DoughInsert[] = [];
+    const after = move(before, 0, 1, () => 0.2, dough => inserts.push(...dough));
+    const match = beginMatch(before, after, 0, 1, 0, reduced)!;
+    const started = match.arrivalMs + match.clearMs;
+    scene.draw(before, 7);
+    const oldViews = Array.from(scene['stacks']);
+    const survivors = oldViews[2].pieces.slice();
+    const oldLayout = scene['layout'];
+    const newLayout = layoutStacks(scene['fit'].height, count + 1);
+    scene.startMatch(match);
+    scene.showMatch(matchFrame(match, started));
+    scene.startStackUnlock(after, 7, inserts, started, reduced);
+    return { scene, after, inserts, oldLayout, newLayout, oldViews, survivors, started };
+  }
+
+  it.each([[3, 390], [5, 320]])(
+    'morphs %i stacks at %ipx through the old, intermediate and final coordinates while retaining their layers', (count, width) => {
+      const { scene, after, inserts, oldLayout, newLayout, oldViews, survivors, started } = startUnlock(count, width, false);
+      const views = scene['stacks'];
+      const vacancy = oldViews[2].vacancies;
+      const rail = oldViews[2].rail;
+      const [shadow, donut] = survivors[0].children as Sprite[];
+      const retained = () => {
+        for (let index = 0; index < count; index++) expect(views[index].group).toBe(oldViews[index].group);
+        expect(views[2].pieces).toEqual(survivors);
+        expect(views[2].vacancies).toBe(vacancy);
+        expect(views[2].rail).toBe(rail);
+      };
+      const seeded = after.stacks[count];
+      expect(seeded).toHaveLength(Math.floor(after.capacity / 2));
+      expect(new Set(seeded.slice(-2)).size).toBe(2);
+      expect(inserts.length).toBeGreaterThan(0);
+      expect(inserts.every(insert => insert.stack < count)).toBe(true);
+      expect(views[count].pieces).toHaveLength(seeded.length);
+      expect(views[count].group.visible).toBe(false);
+      expect(scene.moveAnimating).toBe(true);
+      expect(scene.stackUnlockAnimating).toBe(true);
+      for (let index = 0; index < count; index++) {
+        const { x, base } = oldLayout.slots[index];
+        expect(views[index].slot).toMatchObject({ x, base });
+        expect(views[index].rail.position).toMatchObject({ x, y: base });
+      }
+      expect(donut.width).toBeCloseTo(oldLayout.donutWidth);
+      expect(scene.hit({ x: oldLayout.slots[0].x, y: oldLayout.slots[0].base - 5 })).toBeNull();
+      retained();
+
+      scene.showMove(started + STACK_UNLOCK_MS / 2);
+      const mid = scene['layout'];
+      expect(mid.step).toBeCloseTo((oldLayout.step + newLayout.step) / 2);
+      expect(mid.donutWidth).toBeCloseTo((oldLayout.donutWidth + newLayout.donutWidth) / 2);
+      expect(donut.width).toBeCloseTo(mid.donutWidth);
+      expect(shadow.width).toBeCloseTo(mid.donutWidth * 1.04);
+      expect(survivors[0].y - survivors[1].y).toBeCloseTo(mid.step);
+      expect(vacancy.width).toBeCloseTo(mid.donutWidth);
+      expect(vacancy.x).toBe(mid.slots[2].x);
+      expect(rail.position).toMatchObject({ x: mid.slots[2].x, y: mid.slots[2].base });
+      expect(views[count].group.visible).toBe(false);
+      if (count === 5) {
+        expect(mid.slots[2].base - mid.slots[3].base).toBeGreaterThan(mid.donutHeight * 2);
+        expect(Math.abs(mid.slots[3].x - oldLayout.slots[3].x))
+          .toBeLessThan(Math.abs(mid.slots[3].x - newLayout.slots[3].x));
+      }
+      expect(scene.hit({ x: newLayout.slots[count].x, y: newLayout.slots[count].base - 5 }, 'swipe')).toBeNull();
+      retained();
+
+      scene.showMove(started + STACK_UNLOCK_MS * 0.82);
+      expect(views[count].group.visible).toBe(true);
+      expect(views[count].group.alpha).toBeGreaterThan(0);
+      expect(views[count].group.alpha).toBeLessThan(1);
+      scene.showMove(started + STACK_UNLOCK_MS);
+      expect(scene.stackUnlockAnimating).toBe(false);
+      expect(scene['layout']).toEqual(newLayout);
+      for (const [index, { x, base }] of newLayout.slots.entries()) {
+        expect(scene.hit({ x, y: base - 5 }, 'swipe')).toBe(index);
+      }
+      const glass = views[count].vacancies;
+      expect(scene.hit({ x: glass.x, y: glass.y - glass.height + 2 })).toBe(count);
+      views[count].pieces.forEach((piece, depth) => {
+        expect(piece.visible).toBe(true);
+        expect(piece.alpha).toBe(1);
+        expect(piece.y).toBeCloseTo(newLayout.slots[count].base - depth * newLayout.step);
+      });
+      retained();
+      scene.root.destroy({ children: true });
+    },
+  );
+
+  it('uses the final geometry immediately with reduced motion', () => {
+    const { scene, after, newLayout, started } = startUnlock(5, 320, true);
+    const view = scene['stacks'][5];
+    const { x, base } = newLayout.slots[5];
+    expect(scene.stackUnlockAnimating).toBe(false);
+    expect(view.group.visible).toBe(true);
+    expect(view.pieces).toHaveLength(after.stacks[5].length);
+    expect(view.pieces.every(piece => piece.visible && piece.alpha === 1)).toBe(true);
+    expect(view.group.scale.x).toBe(1);
+    expect(scene.hit({ x, y: base - 5 }, 'tap')).toBe(5);
+    expect(view.vacancies.visible).toBe(true);
+    expect(view.rail.position).toMatchObject({ x, y: base });
+    scene.showMove(started + 120);
+    expect(view.rail.position).toMatchObject({ x, y: base });
+    const celebrate = vi.spyOn(scene['celebration'], 'start');
+    const details = {
+      level: 9, rank: 'Fryer Freak', upgrade: { kind: 'stack' as const, firstNewStack: 5, stackCount: 6 },
+    };
+    scene.startLevelCelebration(details, started + 245, true);
+    expect(celebrate).toHaveBeenCalledWith(details, [], started + 245, true, scene['fit'].height);
+    scene.root.destroy({ children: true });
   });
 });
 
@@ -494,20 +623,28 @@ describe('move presentation', () => {
     scene.root.destroy({ children: true });
   });
 
-  it.each([[320, 568], [390, 662]])('replays the empty-slot edge tap at %i×%i', (width, height) => {
+  it.each([[320, 568], [390, 662], [900, 760]])('clicks or taps the top glass of an empty stack at %i×%i', (width, height) => {
     const scene = makeScene();
     scene.resize(width, height);
-    scene.draw({ ...state, stacks: [['gold', 'blue', 'red'], [], ['green']] }, 7);
-    const { slots, donutHeight, step } = scene['layout'];
-    const source = { x: slots[0].x, y: slots[0].base - 32 };
-    const nearEmpty = { x: slots[1].x, y: stackHit(slots[1], 0, donutHeight, step).y - 10 };
-    const gestures = new StackGestures(index => index !== 1, () => true);
-    gestures.start(1, source, scene.hit(source, 'tap'));
-    gestures.finish(1, source, scene.hit(source, 'swipe'));
-    expect(gestures.source).toBe(0);
-    expect(scene.hit(nearEmpty)).toBeNull();
-    gestures.start(1, nearEmpty, scene.hit(nearEmpty, 'tap'));
-    expect(gestures.finish(1, nearEmpty, scene.hit(nearEmpty, 'swipe'))).toEqual({ kind: 'move', from: 0, to: 1 });
+    scene.draw({ ...state, capacity: 5, stacks: [['gold', 'blue', 'red'], [], ['green']] }, 7);
+    const [left, empty] = scene['stacks'];
+    const glassTop = ({ x, y, height }: Sprite) => ({ x, y: y - height + 2 });
+    const source = glassTop(left.vacancies);
+    const target = glassTop(empty.vacancies);
+    expect(scene.hit(target)).toBe(1);
+    for (const mode of ['exact', 'tap'] as const) {
+      const release = mode === 'exact' ? 'exact' : 'swipe';
+      const gestures = new StackGestures(index => index !== 1, () => true);
+      gestures.start(1, source, scene.hit(source, mode));
+      gestures.finish(1, source, scene.hit(source, release));
+      expect(gestures.source).toBe(0);
+      gestures.start(1, target, scene.hit(target, mode));
+      expect(gestures.finish(1, target, scene.hit(target, release))).toEqual({ kind: 'move', from: 0, to: 1 });
+      gestures.start(1, target, scene.hit(target, mode));
+      expect(gestures.finish(1, source, scene.hit(source, release))).toBeNull();
+    }
+    const above = { x: target.x, y: empty.hit.y - 24 };
+    expect(scene.hit(above, 'swipe')).toBe(above.y < BOARD_TOP ? 'outside' : null);
     scene.root.destroy({ children: true });
   });
 
@@ -517,13 +654,16 @@ describe('move presentation', () => {
     const stacks = [['gold'], [], ['green'], ['blue'], [], ['red'], Array<string>(10).fill('green'), ['gold']];
     scene.draw({ ...state, capacity: 10, stacks }, 7);
     const [, , , , empty, short, full] = scene['stacks'];
-    const nearShort = { x: short.slot.x, y: short.hit.y - 18 };
-    expect(scene.hit({ ...nearShort, y: short.hit.y - 10 }, 'tap')).toBe(5);
-    expect(scene.hit(nearShort, 'tap')).toBeNull();
+    const nearShort = { x: short.slot.x, y: short.vacancies.y - short.vacancies.height + 2 };
+    expect(scene.hit(nearShort)).toBe(5);
     expect(scene.hit(nearShort, 'swipe')).toBe(5);
     expect(scene.hit({ x: full.hit.x + 1, y: nearShort.y }, 'swipe')).toBe(6);
-    expect(scene.hit({ x: empty.hit.x + empty.hit.width, y: nearShort.y }, 'swipe')).toBeNull();
+    expect(scene.hit({ x: empty.hit.x + empty.hit.width - 1, y: nearShort.y }, 'swipe')).toBe(4);
+    expect(scene.hit({ x: nearShort.x, y: BOARD_TOP - 1 }, 'swipe')).toBe('outside');
     expect(scene.hit({ x: empty.hit.x - 3, y: empty.slot.base }, 'swipe')).toBe('outside');
+    const lower = scene['stacks'][1].hit;
+    const gap = { x: nearShort.x, y: (short.hit.y + short.hit.height + lower.y) / 2 };
+    expect(scene.hit(gap)).toBeNull();
 
     const source = { x: scene['stacks'][0].slot.x, y: scene['stacks'][0].slot.base };
     const gestures = new StackGestures(index => stacks[index].length > 0, (_from, to) => stacks[to].length < 10);
@@ -633,7 +773,7 @@ describe('move presentation', () => {
     scene.root.destroy({ children: true });
   });
 
-  it('reveals top rescue dough in place in reduced motion and shows game over after the cue', () => {
+  it('reveals top rescue dough in place in reduced motion before showing results', () => {
     const scene = makeScene();
     scene.draw({ ...state, gameOver: true, stacks: [['blue'], ['green', 'red', 'red'], []] }, 7);
     const { pieces } = scene['stacks'][1];
@@ -645,8 +785,11 @@ describe('move presentation', () => {
     expect(pieces.map(piece => piece.y)).toEqual(positions);
     expect(pieces.map(piece => piece.scale.y)).toEqual([1, 1, 1]);
     scene.showMove(150);
-    expect(scene['overlay'].visible).toBe(true);
     expect(pieces.map(piece => piece.alpha)).toEqual([1, 1, 1]);
+    expect(scene['overlay'].visible).toBe(false);
+    scene.showResults({ personal: { run: { score: 0, level: 1, bestCombo: 0 }, rows: [], isPersonalBest: false },
+      tab: 'personal', friends: null });
+    expect(scene['overlay'].visible).toBe(true);
     scene.root.destroy({ children: true });
   });
 });

@@ -1,13 +1,19 @@
 import { Assets, Container, DOMAdapter, Graphics, Sprite, Text, Texture } from 'pixi.js';
 import type { DoughInsert, GameState } from '../game';
 import type { Point, StackGestures, Target } from './gestures';
-import { BOARD_TOP, contains, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackSlot, stackTarget, VIEW_WIDTH, viewport } from './layout';
+import {
+  BOARD_TOP, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
+  stackTarget, VIEW_WIDTH, viewport,
+} from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import type { MatchFrame, MatchPlayback } from './matchPlayback';
-import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan } from './movePlayback';
+import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan, unit } from './movePlayback';
+import { ResultsPanel } from './resultsPanel';
+import type { ResultsView } from './resultsSession';
 import { ScoreBar, type ScoreDisplay } from './scoreBar';
 import { type MovePreview, SelectionArrow } from './selectionArrow';
+import { STACK_UNLOCK_MS, stackUnlockFrame } from './stackUnlock';
 import { VacancyArt } from './vacancyArt';
 
 const DONUT_ART = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green'];
@@ -17,14 +23,12 @@ const GOLD = 0xab591a;
 const MINT = 0x237d61;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
-const DIALOG_WIDTH = 288;
-const DIALOG_HEIGHT = 194;
 const REDUCED_PRESSURE_MS = 110;
 const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
 export async function loadArt(): Promise<Map<string, Texture>> {
-  const textures = await Promise.all(['kitchen', 'logo', 'clear', ...DONUT_ART].map(async name => {
+  const textures = await Promise.all(['kitchen', 'logo', 'clear', 'strawberry-glaze', ...DONUT_ART].map(async name => {
     const src = `${import.meta.env.BASE_URL}art/${name}.png`;
     const texture = await Assets.load<Texture>(DONUT_ART.includes(name)
       ? { src, data: { autoGenerateMipmaps: true, scaleMode: 'linear' } }
@@ -58,15 +62,29 @@ interface MovePresentation {
 }
 
 interface StackView {
+  group: Container;
+  rail: Container;
+  railHalf: number;
+  railCount: number;
   slot: StackSlot;
   hit: Rect;
   vacancies: Sprite;
+  alternateVacancies?: Sprite;
   vacancyCount: number;
   pieces: Container[];
   refillCue: Graphics;
+  cueWidth: number;
+  cueHeight: number;
   top?: Container;
   topShadow?: Sprite;
   topY: number;
+}
+
+interface StackUnlock {
+  before: StackLayout;
+  after: StackLayout;
+  started: number;
+  progress: number;
 }
 
 function sprite(parent: Container, texture: Texture, x = 0, y = 0, width?: number, height?: number): Sprite {
@@ -104,10 +122,10 @@ function capacityRail(width: number, capacity: number) {
   return { half, first: 1.5 - half, pitch: (half * 2 - 3) / capacity };
 }
 
-function drawCapacity(group: Container, slot: StackSlot, count: number, capacity: number, width: number): void {
-  const { x, base } = slot;
+function drawCapacity(rail: Container, count: number, capacity: number, width: number): number {
+  for (const child of rail.removeChildren()) child.destroy();
   const { half, first, pitch } = capacityRail(width, capacity);
-  const cue = group.addChild(new Graphics({ x, y: base }));
+  const cue = rail.addChild(new Graphics());
 
   if (count === capacity) {
     cue.roundRect(-half, 5, half * 2, 14, 6).fill(0x562a1e);
@@ -120,8 +138,8 @@ function drawCapacity(group: Container, slot: StackSlot, count: number, capacity
       .moveTo(half - 16, 13).lineTo(half - 11, 8)
       .moveTo(half - 11, 15).lineTo(half - 6, 10)
       .stroke({ color: 0xc6885b, width: 1.2, cap: 'round' });
-    label(group, 'FULL', 10.5, x, base + 11.5, CREAM);
-    return;
+    label(rail, 'FULL', 10.5, 0, 11.5, CREAM);
+    return half;
   }
 
   cue.roundRect(-half, 7, half * 2, 8, 4).fill(0xc48561)
@@ -132,6 +150,7 @@ function drawCapacity(group: Container, slot: StackSlot, count: number, capacity
     cue.roundRect(left, 8.5, pitch - 0.8, 5, 1.6).fill(filled ? 0xe5a02f : 0xffe0b8)
       .roundRect(left + 0.5, 9, pitch - 1.8, 1.5, 0.75).fill(filled ? 0xffd572 : 0xffedcf);
   }
+  return half;
 }
 
 export class GameScene {
@@ -140,7 +159,7 @@ export class GameScene {
   private readonly content = new Container();
   private readonly hud = new Container();
   private readonly board = new Container();
-  private readonly overlay = new Container();
+  private readonly overlay = new Container({ visible: false });
   private readonly flight: Sprite;
   private readonly arrow = new SelectionArrow();
   private readonly selectionCue = new Graphics({ eventMode: 'none', visible: false })
@@ -152,21 +171,19 @@ export class GameScene {
   private readonly celebration = new LevelCelebration();
   private readonly matchEffects = new Container();
   private readonly matchPool: MatchEffect[] = [];
-  private readonly scoreBar = new ScoreBar();
+  private readonly scoreBar: ScoreBar;
   private readonly pressure: Text;
   private readonly beads = new Graphics();
   private readonly status: Text;
-  private readonly result: Text;
-  private readonly scrim = new Graphics();
-  private readonly dialog = new Container();
-  private readonly restart: Rect = { x: 61, y: 126, width: 166, height: 46 };
-  private readonly restartHit: Rect = { ...this.restart, y: this.restart.y - 5, height: this.restart.height + 10 };
+  private readonly results: ResultsPanel;
+  private readonly scrim = new Graphics({ visible: false });
   private stacks: StackView[] = [];
   private fit = viewport(400, 600);
   private layout = layoutStacks(this.fit.height, 3);
   private matchedDestination: readonly Container[] = [];
   private currentMatch: MatchEffect | null = null;
   private movePresentation: MovePresentation | null = null;
+  private stackUnlock: StackUnlock | null = null;
   private gameOver = false;
   private capacity = 0;
   private liftedStack: number | null = null;
@@ -180,7 +197,14 @@ export class GameScene {
     return this.movePresentation !== null;
   }
 
+  get stackUnlockAnimating(): boolean {
+    return this.stackUnlock !== null;
+  }
+
   constructor(private readonly art: Map<string, Texture>) {
+    const companion = this.texture('strawberry-glaze');
+    this.scoreBar = new ScoreBar(companion);
+    this.results = new ResultsPanel(companion);
     this.vacancyArt = new VacancyArt(this.texture('clear'));
     this.root.once('destroyed', () => {
       this.contactTexture.destroy(true);
@@ -202,17 +226,7 @@ export class GameScene {
     this.pressure = label(this.hud, '', 22, CENTER, 0);
     this.status = label(this.hud, '', 15, CENTER, 0);
 
-    this.overlay.addChild(this.dialog);
-    const { x, y, width, height } = this.restart;
-    this.dialog.addChild(new Graphics()
-      .roundRect(0, 6, DIALOG_WIDTH, DIALOG_HEIGHT, 24).fill({ color: 0x682e21, alpha: 0.24 })
-      .roundRect(0, 0, DIALOG_WIDTH, DIALOG_HEIGHT, 24).fill(0xffedda).stroke({ color: 0xfff6e9, width: 1.5 })
-      .roundRect(x, y + 3, width, height, 15).fill(0x873023)
-      .roundRect(x, y, width, height, 15).fill(0xa94130).stroke({ color: 0xb45642, width: 1 }));
-    label(this.dialog, 'Game Over', 31, DIALOG_WIDTH / 2, 38);
-    label(this.dialog, 'Final score', 14, DIALOG_WIDTH / 2, 70);
-    this.result = label(this.dialog, '', 27, DIALOG_WIDTH / 2, 97);
-    label(this.dialog, 'Play Again', 21, x + width / 2, y + height / 2, CREAM);
+    this.overlay.addChild(this.results.root);
   }
 
   private texture(name: string): Texture {
@@ -233,7 +247,12 @@ export class GameScene {
     this.pressure.y = this.fit.height - 56;
     this.beads.position.set(CENTER, this.fit.height - 28);
     this.status.y = this.fit.height - 84;
-    this.dialog.position.set((VIEW_WIDTH - DIALOG_WIDTH) / 2, (this.fit.height - DIALOG_HEIGHT) / 2);
+    this.results.resize(this.fit.height);
+  }
+
+  showResults(view: ResultsView | null): void {
+    this.scrim.visible = this.overlay.visible = view !== null;
+    if (view) this.results.show(view, this.fit.height);
   }
 
   private drawPressure(movesLeft: number, pressureLimit: number): void {
@@ -254,48 +273,162 @@ export class GameScene {
 
   draw(state: GameState, pressureLimit: number): void {
     this.finishMove();
+    this.finishStackUnlock();
     this.hideMoveGuides();
-    this.gameOver = state.gameOver;
     this.capacity = state.capacity;
     for (const child of this.board.removeChildren()) child.destroy({ children: true });
     this.layout = layoutStacks(this.fit.height, state.stacks.length);
-    const { slots, donutWidth, donutHeight, step } = this.layout;
-    this.vacancyArt.setStride(step / donutHeight);
-    this.stacks = state.stacks.map((stack, index) => {
-      const slot = slots[index];
-      const group = this.board.addChild(new Container());
-      drawCapacity(group, slot, stack.length, state.capacity, donutWidth);
-      const vacancies = sprite(group, Texture.EMPTY, slot.x);
-      vacancies.eventMode = 'none';
-      vacancies.anchor.set(0.5, 1);
-      vacancies.visible = false;
-      let topShadow: Sprite | undefined;
-      const pieces = stack.map((color, depth) => {
-        const layer = group.addChild(new Container({ x: slot.x, y: slot.base - depth * step }));
-        const shadowWidth = donutWidth * (depth === 0 ? 1.04 : 0.82);
-        topShadow = sprite(layer, this.contactTexture, 0, -donutHeight * 0.02, shadowWidth, donutHeight * 0.16);
-        topShadow.anchor.set(0.5);
-        const piece = sprite(layer, this.texture(color), 0, 0, donutWidth, donutHeight);
-        piece.anchor.set(0.5, 1);
-        return layer;
+    this.vacancyArt.keepStrides(this.layout.step / this.layout.donutHeight);
+    this.stacks = state.stacks.map((colors, index) => this.createStack(colors, this.layout.slots[index], this.layout));
+    this.updateVacancies();
+    this.drawBoardStatus(state, pressureLimit);
+  }
+
+  private drawBoardStatus(state: GameState, pressureLimit: number): void {
+    this.gameOver = state.gameOver;
+    this.drawPressure(state.movesLeft, pressureLimit);
+  }
+
+  private createDonut(group: Container, color: string): Container {
+    const layer = group.addChild(new Container());
+    sprite(layer, this.contactTexture).anchor.set(0.5);
+    sprite(layer, this.texture(color)).anchor.set(0.5, 1);
+    return layer;
+  }
+
+  private createStack(colors: readonly string[], slot: StackSlot, layout: StackLayout): StackView {
+    const { donutWidth, donutHeight } = layout;
+    const group = this.board.addChild(new Container());
+    const rail = group.addChild(new Container());
+    const railHalf = drawCapacity(rail, colors.length, this.capacity, donutWidth);
+    const vacancies = sprite(group, Texture.EMPTY);
+    vacancies.eventMode = 'none';
+    vacancies.anchor.set(0.5, 1);
+    vacancies.visible = false;
+    const pieces = colors.map(color => this.createDonut(group, color));
+    const top = pieces.at(-1);
+    const refillCue = group.addChild(new Graphics({ visible: false }));
+    const side = donutWidth * 0.44;
+    const y = -donutHeight * 0.21;
+    refillCue.moveTo(-side, y - 5).lineTo(-side - 3, y - 2).lineTo(-side, y + 2)
+      .moveTo(side, y - 5).lineTo(side + 3, y - 2).lineTo(side, y + 2)
+      .stroke({ color: 0xffdfa0, width: 2.6, cap: 'round', join: 'round' });
+    const view: StackView = {
+      group, rail, railHalf, railCount: colors.length, slot, hit: slot.hit,
+      vacancies, vacancyCount: 0, pieces, refillCue, cueWidth: donutWidth, cueHeight: donutHeight,
+      top, topShadow: top?.children[0] as Sprite | undefined, topY: slot.base,
+    };
+    this.placeStack(view, slot, layout);
+    return view;
+  }
+
+  private placeStack(view: StackView, slot: StackSlot, { donutWidth, donutHeight, step }: StackLayout): void {
+    view.slot = slot;
+    view.hit = stackHit(slot, this.capacity, donutHeight, step);
+    view.rail.position.set(slot.x, slot.base);
+    view.rail.scale.x = capacityRail(donutWidth, this.capacity).half / view.railHalf;
+    view.refillCue.scale.set(donutWidth / view.cueWidth, donutHeight / view.cueHeight);
+    view.pieces.forEach((piece, depth) => {
+      piece.position.set(slot.x, slot.base - depth * step);
+      const [shadow, donut] = piece.children as Sprite[];
+      shadow.y = -donutHeight * 0.02;
+      shadow.width = donutWidth * (depth === 0 ? 1.04 : 0.82);
+      shadow.height = donutHeight * 0.16;
+      donut.width = donutWidth;
+      donut.height = donutHeight;
+    });
+    view.topY = view.top?.y ?? slot.base;
+  }
+
+  startStackUnlock(state: GameState, pressureLimit: number, inserts: readonly DoughInsert[], now: number, reduced: boolean): void {
+    const before = this.layout;
+    const after = layoutStacks(this.fit.height, state.stacks.length);
+    const refills = refillPlan(state.stacks.map(stack => stack.length), inserts);
+    this.hideMoveGuides();
+    this.capacity = state.capacity;
+    this.vacancyArt.keepStrides(before.step / before.donutHeight, after.step / after.donutHeight);
+    this.layout = reduced ? after : before;
+    this.stackUnlock = reduced ? null : { before, after, started: now, progress: 0 };
+    this.stacks.forEach((view, index) => {
+      // Refill positions identify new pieces independently of their colors.
+      const remaining = view.pieces.filter(piece => piece.visible);
+      for (const piece of view.pieces) if (!piece.visible) piece.destroy({ children: true });
+      const motions = refills.stacks.get(index);
+      let survivor = 0;
+      view.pieces = state.stacks[index].map((color, depth) => {
+        const piece = motions?.[depth].entry === undefined ? remaining[survivor++] : this.createDonut(view.group, color);
+        return view.group.addChild(piece);
       });
-      const top = pieces.at(-1);
-      const topY = top?.y ?? slot.base;
-      const hit = stackHit(slot, pieces.length, donutHeight, step);
-      const refillCue = group.addChild(new Graphics());
-      const side = donutWidth * 0.44;
-      const y = -donutHeight * 0.21;
-      refillCue.moveTo(-side, y - 5).lineTo(-side - 3, y - 2).lineTo(-side, y + 2)
-        .moveTo(side, y - 5).lineTo(side + 3, y - 2).lineTo(side, y + 2)
-        .stroke({ color: 0xffdfa0, width: 2.6, cap: 'round', join: 'round' });
-      refillCue.visible = false;
-      return { slot, hit, vacancies, vacancyCount: 0, pieces, refillCue, top, topShadow, topY };
+      view.group.addChild(view.refillCue);
+      view.top = view.pieces.at(-1);
+      view.topShadow = view.top?.children[0] as Sprite | undefined;
+      this.placeStack(view, this.layout.slots[index], this.layout);
+      if (reduced) {
+        view.vacancyCount = -1;
+        view.railCount = view.pieces.length;
+        view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth);
+        view.rail.scale.x = 1;
+      }
+    });
+    const firstNewStack = this.stacks.length;
+    for (let index = firstNewStack; index < state.stacks.length; index++) {
+      const added = this.createStack(state.stacks[index], after.slots[index], after);
+      added.group.visible = reduced;
+      this.stacks.push(added);
+    }
+    this.drawBoardStatus(state, pressureLimit);
+    if (inserts.length) this.playMove(refills, now, reduced);
+    else this.showMove(now);
+    if (reduced) {
+      this.updateVacancies();
+      this.vacancyArt.keepStrides(after.step / after.donutHeight);
+    }
+  }
+
+  private showStackUnlock(now: number): void {
+    const unlock = this.stackUnlock;
+    if (!unlock) return;
+    const { before, after, started } = unlock;
+    if (now - started >= STACK_UNLOCK_MS) {
+      this.finishStackUnlock();
+      return;
+    }
+    const frame = stackUnlockFrame(before, after, now - started);
+    unlock.progress = frame.progress;
+    this.layout = frame.layout;
+    frame.layout.slots.forEach((slot, index) => this.placeStack(this.stacks[index], slot, frame.layout));
+    for (const { group, slot } of this.stacks.slice(before.slots.length)) {
+      group.visible = frame.entrance > 0;
+      group.alpha = frame.entrance;
+      group.pivot.set(slot.x, slot.base);
+      group.position.set(slot.x, slot.base + frame.trayOffset);
+      group.scale.set(frame.trayScale);
+    }
+  }
+
+  finishStackUnlock(): void {
+    const unlock = this.stackUnlock;
+    if (!unlock) return;
+    const { after } = unlock;
+    this.stackUnlock = null;
+    this.layout = after;
+    this.stacks.forEach((view, index) => {
+      view.group.visible = true;
+      view.group.alpha = 1;
+      view.group.pivot.set(0);
+      view.group.position.set(0);
+      view.group.scale.set(1);
+      view.alternateVacancies?.destroy();
+      view.alternateVacancies = undefined;
+      view.vacancyCount = -1;
+      const slot = after.slots[index];
+      this.placeStack(view, slot, after);
+      view.railCount = view.pieces.length;
+      view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth);
+      view.rail.scale.x = 1;
     });
     this.updateVacancies();
-
-    this.drawPressure(state.movesLeft, pressureLimit);
-    this.scrim.visible = this.overlay.visible = state.gameOver;
-    if (state.gameOver) this.result.text = state.score.toLocaleString();
+    this.vacancyArt.keepStrides(after.step / after.donutHeight);
   }
 
   drawScore(display: ScoreDisplay): void {
@@ -312,20 +445,14 @@ export class GameScene {
 
   startLevelCelebration(details: LevelCelebrationDetails, now: number, reduced: boolean): void {
     const { upgrade } = details;
-    const { donutWidth, donutHeight, step } = this.layout;
     const markers: Rect[] = [];
     if (upgrade?.kind === 'slots') {
-      const { first, pitch } = capacityRail(donutWidth, this.capacity);
+      const { first, pitch } = capacityRail(this.layout.donutWidth, this.capacity);
       for (const { slot } of this.stacks) {
         markers.push({
           x: slot.x + first + upgrade.previousCapacity * pitch - 1.4, y: slot.base + 7.5,
           width: (upgrade.capacity - upgrade.previousCapacity) * pitch + 2.2, height: 6.8,
         });
-      }
-    } else if (upgrade?.kind === 'stack') {
-      for (const { slot, pieces } of this.stacks.slice(upgrade.firstNewStack, upgrade.stackCount)) {
-        const y = Math.max(BOARD_TOP, slot.base - Math.max(0, pieces.length - 1) * step - donutHeight - 3);
-        markers.push({ x: slot.x - donutWidth / 2 - 4, y, width: donutWidth + 8, height: slot.base + 18 - y });
       }
     }
     this.celebration.start(details, markers, now, reduced, this.fit.height);
@@ -342,24 +469,53 @@ export class GameScene {
   }
 
   private updateVacancies(): void {
-    const { donutWidth, step } = this.layout;
-    for (const stack of this.stacks) {
+    const unlock = this.stackUnlock;
+    for (const [index, stack] of this.stacks.entries()) {
       const { slot, vacancies, pieces } = stack;
+      const moving = unlock && index < unlock.before.slots.length ? unlock : null;
+      const geometry = unlock && !moving ? unlock.after : this.layout;
+      const { donutWidth } = geometry;
       // Count the visible stack while a transfer, clear or refill is playing.
       let occupied = 0;
       for (const piece of pieces) {
         if (piece.visible && piece.alpha > 0) occupied++;
       }
       const count = this.capacity - occupied;
-      if (count === stack.vacancyCount) continue;
+      if (unlock && occupied !== stack.railCount) {
+        stack.railCount = occupied;
+        stack.railHalf = drawCapacity(stack.rail, occupied, this.capacity, donutWidth);
+        stack.rail.scale.x = 1;
+      }
+      if (!moving && count === stack.vacancyCount) continue;
       stack.vacancyCount = count;
       vacancies.visible = count > 0;
+      if (stack.alternateVacancies) stack.alternateVacancies.visible = false;
       if (!count) continue;
-      vacancies.texture = this.vacancyArt.texture(count);
-      vacancies.y = slot.base - occupied * step;
-      vacancies.width = donutWidth;
-      vacancies.height = vacancies.texture.height * donutWidth / vacancies.texture.width;
+      const from = moving?.before ?? geometry;
+      this.placeVacancies(vacancies, count, slot, occupied, geometry, from);
+      const mix = moving && Math.abs(moving.after.step / moving.after.donutHeight - from.step / from.donutHeight) > 1e-6
+        ? moving.progress : 0;
+      vacancies.alpha = 1 - mix;
+      if (moving && mix) {
+        if (!stack.alternateVacancies) {
+          const alternate = new Sprite({ texture: Texture.EMPTY, anchor: { x: 0.5, y: 1 }, eventMode: 'none' });
+          stack.alternateVacancies = stack.group.addChildAt(alternate, stack.group.getChildIndex(vacancies) + 1);
+        }
+        this.placeVacancies(stack.alternateVacancies, count, slot, occupied, geometry, moving.after);
+        stack.alternateVacancies.alpha = mix;
+        stack.alternateVacancies.visible = true;
+      }
     }
+  }
+
+  private placeVacancies(sprite: Sprite, count: number, slot: StackSlot, occupied: number, layout: StackLayout, art: StackLayout): void {
+    const { donutWidth, step } = layout;
+    sprite.texture = this.vacancyArt.texture(count, art.step / art.donutHeight);
+    sprite.position.set(slot.x, slot.base - occupied * step);
+    sprite.width = donutWidth;
+    // Both masks stay in the same footprint as the spacing changes between their two silhouettes.
+    sprite.height = sprite.texture.height * donutWidth / sprite.texture.width +
+      (count - 1) * (step - art.step * donutWidth / art.donutWidth);
   }
 
   toLocal(point: Point): Point {
@@ -367,10 +523,8 @@ export class GameScene {
   }
 
   hit(point: Point, mode: HitMode = 'exact'): Target {
-    if (this.overlay.visible) {
-      const inDialog = { x: point.x - this.dialog.x, y: point.y - this.dialog.y };
-      return contains(this.restartHit, inDialog) ? 'restart' : null;
-    }
+    if (this.stackUnlockAnimating) return null;
+    if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
     return stackTarget(this.stacks, point, this.fit.height, mode);
   }
@@ -406,6 +560,10 @@ export class GameScene {
   startMove(inserts: readonly DoughInsert[], started: number, reduced: boolean, transfer?: Transfer): void {
     if (!inserts.length && (!transfer || reduced)) return;
     const refills = refillPlan(this.stacks.map(stack => stack.pieces.length), inserts);
+    this.playMove(refills, started, reduced, transfer);
+  }
+
+  private playMove(refills: MovePresentation['refills'], started: number, reduced: boolean, transfer?: Transfer): void {
     const pendingPressure = transfer?.pressure;
     const refillDelay = transfer && !reduced ? FLIGHT_MS + LAND_MS : pendingPressure ? REDUCED_PRESSURE_MS : 0;
     this.movePresentation = { started, reduced, refills, refillDelay, pendingPressure };
@@ -418,13 +576,16 @@ export class GameScene {
       this.flight.width = this.layout.donutWidth;
       this.flight.height = this.layout.donutHeight;
     }
-    this.scrim.visible = this.overlay.visible = false;
     this.showMove(started);
   }
 
   showMove(now: number): void {
+    this.showStackUnlock(now);
     const move = this.movePresentation;
-    if (!move) return;
+    if (!move) {
+      if (this.stackUnlock) this.updateVacancies();
+      return;
+    }
     const { started, reduced, refills, refillDelay, transfer } = move;
     const { donutHeight, step } = this.layout;
     const age = now - started;
@@ -444,6 +605,9 @@ export class GameScene {
         piece.y = slot.base - frame.depth * step;
         piece.alpha = frame.alpha;
         piece.scale.set(frame.scaleX, frame.scaleY);
+        if (this.stackUnlock) {
+          (piece.children[0] as Sprite).width = this.layout.donutWidth * (1.04 - 0.22 * unit(frame.depth));
+        }
         if (frame.accent > 0) {
           refillCue.visible = true;
           refillCue.alpha = frame.accent;
@@ -490,7 +654,6 @@ export class GameScene {
       piece.visible = true;
     }
     this.flight.visible = false;
-    this.scrim.visible = this.overlay.visible = this.gameOver;
     this.movePresentation = null;
     this.updateVacancies();
   }
@@ -530,7 +693,7 @@ export class GameScene {
 
   showMatch(frame: MatchFrame): void {
     this.currentMatch?.showPieces(frame);
-    if (frame.phase === 'clear') {
+    if (frame.phase !== 'arrival') {
       for (const piece of this.matchedDestination) piece.visible = false;
       this.updateVacancies();
     }

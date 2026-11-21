@@ -11,6 +11,8 @@ export interface StackSlot {
   hit: Rect;
 }
 
+export type StackLayout = ReturnType<typeof layoutStacks>;
+
 export const VIEW_WIDTH = 400;
 export const BOARD_TOP = 124;
 export const BOARD_FOOTER_SPACE = 94;
@@ -71,10 +73,11 @@ export function layoutStacks(height: number, count: number) {
   return { slots, donutWidth, donutHeight, step };
 }
 
-export function stackHit(slot: StackSlot, count: number, donutHeight: number, step: number): Rect {
-  const top = slot.base - Math.max(0, count - 1) * step;
+export function stackHit(slot: StackSlot, capacity: number, donutHeight: number, step: number): Rect {
+  const top = slot.base - Math.max(0, capacity - 1) * step;
   const y = Math.max(slot.hit.y, Math.min(slot.base - 46, top - donutHeight - STACK_LIFT - 5));
-  return { ...slot.hit, y, height: slot.base + BASE_HIT_DEPTH - y };
+  const bottom = Math.min(slot.hit.y + slot.hit.height, slot.base + BASE_HIT_DEPTH);
+  return { ...slot.hit, y, height: bottom - y };
 }
 
 export function contains(rect: Rect, point: Point): boolean {
