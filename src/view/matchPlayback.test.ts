@@ -1,7 +1,7 @@
 import { Bounds, DOMAdapter, Sprite, Text, Texture, TextureSource } from 'pixi.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type DoughInsert, type GameState, move } from '../game';
-import { StackGestures } from './gestures';
+import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, VIEW_WIDTH } from './layout';
 import { LevelCelebration } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
@@ -647,6 +647,34 @@ describe('move presentation', () => {
     expect(scene.hit(above, 'swipe')).toBe(above.y < BOARD_TOP ? 'outside' : null);
     scene.root.destroy({ children: true });
   });
+
+  it.each([[320, 568, 3, 1], [390, 844, 8, 5]])(
+    'resolves a 13 CSS pixel tap drift on rendered top donuts at %i×%i', (width, height, count, destination) => {
+      const scene = makeScene();
+      scene.resize(width, height);
+      scene.draw({ ...state, capacity: count === 3 ? 5 : 10,
+        stacks: Array.from({ length: count }, () => ['red', 'blue', 'green']) }, 7);
+      const { x, y, scale } = scene['fit'];
+      const topCenter = (index: number) => {
+        const { top } = scene['stacks'][index];
+        return { x: x + top!.x * scale, y: y + (top!.y - scene['layout'].donutHeight * 0.58) * scale };
+      };
+      const source = topCenter(0);
+      const press = topCenter(destination);
+      const drift = { x: press.x + 5, y: press.y + 5 };
+      const release = { x: press.x + 13, y: press.y };
+      const hit = (point: Point, mode: 'tap' | 'swipe') => scene.hit(scene.toLocal(point), mode);
+      expect([hit(source, 'tap'), hit(press, 'tap'), hit(drift, 'swipe'), hit(release, 'swipe')])
+        .toEqual([0, destination, destination, destination]);
+      const gestures = new StackGestures(() => true, () => true);
+      gestures.start(1, source, hit(source, 'tap'), 12);
+      gestures.finish(1, source, hit(source, 'swipe'));
+      gestures.start(1, press, hit(press, 'tap'), 12);
+      gestures.update(1, drift, hit(drift, 'swipe'));
+      expect(gestures.finish(1, release, hit(release, 'swipe'))).toEqual({ kind: 'move', from: 0, to: destination });
+      scene.root.destroy({ children: true });
+    },
+  );
 
   it.each([[320, 568], [390, 662]])('keeps exact targets ahead of nearby snaps in two rows at %i×%i', (width, height) => {
     const scene = makeScene();

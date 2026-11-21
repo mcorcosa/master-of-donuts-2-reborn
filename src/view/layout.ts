@@ -24,7 +24,7 @@ const ROW_PADDING = 5;
 const DONUT_ASPECT = 320 / 430;
 const WIDTH_FIT_STEP_RATIO = 0.28;
 const MAX_STEP_RATIO = 0.52;
-const STEP_SCALE = 0.85;
+const STEP_SCALE = 0.92;
 const TAP_SLOP = 14;
 const SWIPE_SLOP = 22;
 

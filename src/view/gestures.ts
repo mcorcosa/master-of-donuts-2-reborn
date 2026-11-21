@@ -17,7 +17,12 @@ interface Press {
   hover: Target;
   dragged: boolean;
   swipeDistanceSquared: number;
+  destinationDistanceSquared: number;
+  maxDistanceSquared: number;
+  stayedOnTarget: boolean;
 }
+
+const DESTINATION_TAP_GRACE = 6;
 
 export class StackGestures {
   private press: Press | null = null;
@@ -56,9 +61,17 @@ export class StackGestures {
       ? press.target : null;
   }
 
-  start(id: number, point: Point, target: Target, swipeDistance = 10): boolean {
+  start(id: number, point: Point, target: Target, touchSwipeDistance?: number): boolean {
     if (this.press) return false;
-    this.press = { id, origin: point, target, hover: target, dragged: false, swipeDistanceSquared: swipeDistance ** 2 };
+    const swipeDistance = touchSwipeDistance ?? 10;
+    const destinationTap = touchSwipeDistance !== undefined &&
+      this.selection !== null && typeof target === 'number' && target !== this.selection;
+    this.press = {
+      id, origin: point, target, hover: target, dragged: false,
+      swipeDistanceSquared: swipeDistance ** 2,
+      destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
+      maxDistanceSquared: 0, stayedOnTarget: true,
+    };
     return true;
   }
 
@@ -70,7 +83,11 @@ export class StackGestures {
     if (!press.dragged) {
       const dx = point.x - press.origin.x;
       const dy = point.y - press.origin.y;
-      press.dragged = dx * dx + dy * dy >= press.swipeDistanceSquared;
+      press.maxDistanceSquared = Math.max(press.maxDistanceSquared, dx * dx + dy * dy);
+      press.stayedOnTarget &&= target === press.target;
+      // Crossing a target boundary revokes the grace even after returning to the press point.
+      const threshold = press.stayedOnTarget ? press.destinationDistanceSquared : press.swipeDistanceSquared;
+      press.dragged = press.maxDistanceSquared >= threshold;
     }
     press.hover = target;
     return wasDragged !== press.dragged || previous !== target;

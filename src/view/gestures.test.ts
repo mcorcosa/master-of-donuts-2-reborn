@@ -52,6 +52,57 @@ describe('stack gestures', () => {
     expect(gestures.finish(1, drift, null)).toEqual({ kind: 'move', from: 0, to: 1 });
   });
 
+  it('commits the reported touch tap with 13 pixels of drift inside the destination', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, { x: 160, y: 347 }, 1, 12);
+    gestures.update(1, { x: 165, y: 352 }, 1);
+    expect(gestures.finish(1, { x: 173, y: 347 }, 1)).toEqual({ kind: 'move', from: 0, to: 1 });
+  });
+
+  it('treats a longer in-stack excursion as a swipe even if the finger returns to its press point', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, middle, 1, 12);
+    gestures.update(1, { x: middle.x + 18, y: middle.y }, 1);
+    expect(gestures.pressedStack).toBeNull();
+    expect(gestures.finish(1, middle, 1)).toBeNull();
+    expect(gestures.source).toBe(0);
+  });
+
+  it('drops destination grace after crossing another target and previews the real swipe', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, right, 3, 12);
+    gestures.update(1, { x: right.x + 13, y: right.y }, 3);
+    expect(gestures.pressedStack).toBe(3);
+    const neighboring = { x: right.x + 10, y: right.y };
+    gestures.update(1, neighboring, 1);
+    expect(gestures.source).toBe(3);
+    expect(gestures.destination).toBe(1);
+    expect(gestures.finish(1, neighboring, 1)).toEqual({ kind: 'move', from: 3, to: 1 });
+
+    tap(gestures, 0);
+    gestures.start(1, right, 3, 12);
+    gestures.update(1, neighboring, 1);
+    expect(gestures.finish(1, { x: right.x + 13, y: right.y }, 3)).toBeNull();
+    expect(gestures.source).toBe(0);
+  });
+
+  it('preserves full-stack feedback and the original threshold for same-stack cancel and results actions', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, right, 2, 12);
+    expect(gestures.finish(1, { x: right.x + 13, y: right.y }, 2)).toEqual({ kind: 'blocked', from: 0, to: 2 });
+    gestures.start(1, left, 0, 12);
+    expect(gestures.finish(1, { x: left.x + 13, y: left.y }, 0)).toBeNull();
+    expect(gestures.source).toBe(0);
+    tap(gestures, 0);
+    expect(gestures.source).toBeNull();
+    gestures.start(1, left, 'restart', 12);
+    expect(gestures.finish(1, { x: left.x + 13, y: left.y }, 'restart')).toBeNull();
+  });
+
   it('cancels an off-board release even within tap jitter and keeps the prior selection', () => {
     const gestures = fixture();
     tap(gestures, 0);
@@ -177,9 +228,9 @@ describe('stack gestures', () => {
     const late = layoutStacks(viewport(320, 568).height, 8);
     const tallLate = layoutStacks(viewport(320, 720).height, 8);
     expect(opening.donutWidth).toBe(compact.donutWidth);
-    expect(opening.step / opening.donutHeight).toBeCloseTo(0.442);
+    expect(opening.step / opening.donutHeight).toBeCloseTo(0.4784, 4);
     expect(compact.step).toBeLessThan(opening.step);
-    expect(late.step / late.donutHeight).toBeCloseTo(0.238);
+    expect(late.step / late.donutHeight).toBeCloseTo(0.2576, 4);
     expect(tallLate.step).toBeGreaterThan(late.step);
   });
 });
