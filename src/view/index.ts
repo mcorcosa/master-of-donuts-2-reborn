@@ -6,6 +6,7 @@ import type { FriendsScores } from '../platform/friendsScores';
 import type { PersonalScores } from '../platform/personalScores';
 import { GameOverPresentation } from './gameOverPresentation';
 import { type Point, StackGestures } from './gestures';
+import { VIEW_WIDTH } from './layout';
 import { LEVEL_CELEBRATION_MS, type LevelCelebrationDetails } from './levelCelebration';
 import { preloadScoreFont } from './matchEffect';
 import { beginMatch, matchFrame, type MatchPlayback, scoreImpactTime } from './matchPlayback';
@@ -13,7 +14,7 @@ import { ResultsSession } from './resultsSession';
 import { type Feedback, GameScene, loadArt } from './scene';
 import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
 
-const TOUCH_SWIPE_DISTANCE = 12;
+const MOUSE_BOARD_EDGE_SLOP = 6;
 const BROWSER_CHROME_HEIGHT_CHANGE = 96;
 const MIN_CREDIT_SPACING_MS = 55;
 const HINT_STATUS_MS = 1500;
@@ -363,7 +364,13 @@ export async function mountGame(app: Application, {
       y: (client.y - rect.top) * app.screen.height / (rect.height || 1),
     });
     const touch = event.pointerType === 'touch';
-    const target = scene.hit(local, touch ? mode : 'exact', touch || event.pointerType === 'mouse');
+    const mouse = event.pointerType === 'mouse';
+    let target = scene.hit(local, touch ? mode : 'exact', touch || mouse);
+    if (mouse && target === 'outside' && !state.gameOver && !scene.stackUnlockAnimating) {
+      const inward = local.x < VIEW_WIDTH / 2 ? MOUSE_BOARD_EDGE_SLOP : -MOUSE_BOARD_EDGE_SLOP;
+      const edgeStack = scene.hit({ x: local.x + inward, y: local.y });
+      if (typeof edgeStack === 'number') target = edgeStack;
+    }
     return { client, local, target };
   }
 
@@ -375,8 +382,7 @@ export async function mountGame(app: Application, {
     if (locked && typeof target !== 'number') return;
     if (state.gameOver && (!results || typeof target !== 'string' || target === 'outside')) return;
     if (target === 'hint' && !syncHintAvailability()) return;
-    const swipeDistance = event.pointerType === 'touch' ? TOUCH_SWIPE_DISTANCE : undefined;
-    if (!gestures.start(event.pointerId, client, target, swipeDistance)) return;
+    if (!gestures.start(event.pointerId, client, target, event.pointerType)) return;
     tapOnlyPress = locked;
     if (!locked) {
       if (target !== 'hint') clearHint();

@@ -760,9 +760,9 @@ describe('move presentation', () => {
       expect([hit(source, 'tap'), hit(press, 'tap'), hit(drift, 'swipe'), hit(release, 'swipe')])
         .toEqual([0, destination, destination, destination]);
       const gestures = new StackGestures(() => true, () => true);
-      gestures.start(1, source, hit(source, 'tap'), 12);
+      gestures.start(1, source, hit(source, 'tap'), 'touch');
       gestures.finish(1, source, hit(source, 'swipe'));
-      gestures.start(1, press, hit(press, 'tap'), 12);
+      gestures.start(1, press, hit(press, 'tap'), 'touch');
       gestures.update(1, drift, hit(drift, 'swipe'));
       expect(gestures.finish(1, release, hit(release, 'swipe'))).toEqual({ kind: 'move', from: 0, to: destination });
       scene.root.destroy({ children: true });

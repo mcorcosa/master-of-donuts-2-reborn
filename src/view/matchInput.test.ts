@@ -9,6 +9,7 @@ import { browserScoreStorage, type CompletedResults, PERSONAL_SCORES_KEY, Person
 import { GAME_OVER_CUE_MS, GAME_OVER_HOLD_MS, GAME_OVER_RECORD_LIMIT_MS } from './gameOverPresentation';
 import type { Point, StackGestures } from './gestures';
 import { mountGame } from './index';
+import { layoutStacks, stackHit, stackTarget } from './layout';
 import { refillDuration, refillPlan } from './movePlayback';
 import type { ResultsView } from './resultsSession';
 import type { ScoreDisplay } from './scoreBar';
@@ -139,8 +140,8 @@ async function setup(reduced = false, search = '', devicePixelRatio = 1, scores?
     onPause(callback) { pause = callback; return () => { pause = () => {}; }; },
   });
 
-  const pointer = (type: string, clientX: number, pointerId = 1, pointerType = 'mouse', buttons = 0) => {
-    const event = Object.assign(new Event(type), { button: 0, buttons, pointerId, pointerType, clientX, clientY: 200 });
+  const pointer = (type: string, clientX: number, pointerId = 1, pointerType = 'mouse', buttons = 0, clientY = 200) => {
+    const event = Object.assign(new Event(type), { button: 0, buttons, pointerId, pointerType, clientX, clientY });
     (['pointerdown', 'pointerleave', 'lostpointercapture'].includes(type) ? canvas : window).dispatchEvent(event);
   };
   const tap = (x: number) => { pointer('pointerdown', x); pointer('pointerup', x); };
@@ -448,6 +449,35 @@ describe('game view match playback', () => {
     expect(move).not.toHaveBeenCalled();
   });
 
+  it.each([3, 4, 5, 6, 7, 8])('accepts two moving mouse clicks between every pair on a %i-stack board', async count => {
+    const height = 540;
+    const capacity = Math.min(10, count + 3);
+    const { slots, donutHeight, step } = layoutStacks(height, count, capacity);
+    const cells = slots.map(slot => ({ hit: stackHit(slot, capacity, donutHeight, step) }));
+    scene.hit.mockImplementation((p, mode = 'exact') => stackTarget(cells, p, height, mode));
+    for (let from = 0; from < count; from++) {
+      for (let to = 0; to < count; to++) {
+        if (from === to) continue;
+        vi.mocked(createGame).mockReturnValueOnce({
+          ...initial, capacity, stacks: Array.from({ length: count }, () => ['blue', 'green']),
+        });
+        const { pointer } = await setup(true);
+        const clickAcrossCell = (index: number) => {
+          const { x, y, width, height } = cells[index].hit;
+          pointer('pointerdown', x + width * 0.25, 1, 'mouse', 1, y + height * 0.5);
+          pointer('pointermove', x + width * 0.7, 1, 'mouse', 1, y + height * 0.55);
+          pointer('pointerup', x + width * 0.75, 1, 'mouse', 0, y + height * 0.6);
+        };
+        vi.mocked(move).mockClear();
+        clickAcrossCell(from);
+        expect(scene.showInteraction.mock.lastCall?.[0].source).toBe(from);
+        clickAcrossCell(to);
+        expect(move).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual([from, to]);
+      }
+    }
+  });
+
   it('keeps a touch tap pressed through 11 CSS pixels even if release hits an adjacent stack', async () => {
     scene.hit.mockImplementation(({ x }: Point) => x < 100 ? 0 : x <= 150 ? 1 : 2);
     const { pointer } = await setup();
@@ -459,6 +489,53 @@ describe('game view match playback', () => {
     pointer('pointerup', 161, 1, 'touch');
     expect(move).toHaveBeenCalledTimes(1);
     expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual([0, 1]);
+  });
+
+  it.each([
+    { label: '18.7px of same-stack drift', travel: [166, 168.7], expectedMove: [0, 1] },
+    { label: '25.3px of same-stack drift', travel: [173.3, 175.3], expectedMove: [0, 1] },
+    { label: 'an in-stack excursion', travel: [193, 151], expectedMove: [0, 1] },
+    { label: 'a swipe that leaves the stack', travel: [183, 225, 250], expectedMove: [1, 2] },
+    { label: 'a swipe that returns to its starting stack', travel: [225, 151], expectedMove: null },
+  ])('handles a mouse press on a selected donut’s destination with $label', async ({ travel, expectedMove }) => {
+    const { tap, pointer } = await setup();
+    tap(50);
+    pointer('pointerdown', 150, 1, 'mouse', 1);
+    for (const x of travel.slice(0, -1)) pointer('pointermove', x, 1, 'mouse', 1);
+    pointer('pointerup', travel.at(-1)!);
+
+    if (expectedMove) {
+      expect(move).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual(expectedMove);
+    } else {
+      expect(move).not.toHaveBeenCalled();
+      expect(scene.showInteraction.mock.lastCall?.[0].source).toBe(0);
+    }
+  });
+
+  it.each([
+    { label: 'a near-left release', source: 337, down: 60.2, drift: 10.2, up: 9.8, expectedMove: [2, 0] },
+    { label: 'a near-right press', source: 82, down: 391.5, drift: 387.3, up: 387.3, expectedMove: [0, 2] },
+    { label: 'a release farther off-board', source: 337, down: 60.2, drift: 1, up: 0, expectedMove: null },
+    { label: 'a press farther off-board', source: 82, down: 396, drift: 387.3, up: 387.3, expectedMove: null },
+  ])('handles $label on a mouse destination click', async ({ source, down, drift, up, expectedMove }) => {
+    scene.hit.mockImplementation(({ x }: Point) => {
+      if (x < 12 || x >= 388) return 'outside';
+      return x < 138 ? 0 : x < 262 ? 1 : 2;
+    });
+    const { tap, pointer } = await setup();
+    tap(source);
+    pointer('pointerdown', down, 1, 'mouse', 1);
+    pointer('pointermove', drift, 1, 'mouse', 1);
+    pointer('pointerup', up);
+
+    if (expectedMove) {
+      expect(move).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual(expectedMove);
+    } else {
+      expect(move).not.toHaveBeenCalled();
+      expect(scene.showInteraction.mock.lastCall?.[0].source).toBe(source > 262 ? 2 : 0);
+    }
   });
 
   it('uses the same touch snap at preview and release while ignoring another pointer', async () => {

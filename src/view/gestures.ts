@@ -17,6 +17,7 @@ interface Press {
   target: Target;
   hover: Target;
   dragged: boolean;
+  mouseStackPress: boolean;
   swipeDistanceSquared: number;
   destinationDistanceSquared: number;
   maxDistanceSquared: number;
@@ -63,13 +64,14 @@ export class StackGestures {
       ? press.target : null;
   }
 
-  start(id: number, point: Point, target: Target, touchSwipeDistance?: number): boolean {
+  start(id: number, point: Point, target: Target, pointerType = 'mouse'): boolean {
     if (this.press) return false;
-    const swipeDistance = touchSwipeDistance ?? 10;
-    const destinationTap = touchSwipeDistance !== undefined &&
+    const swipeDistance = pointerType === 'touch' ? 12 : 10;
+    const destinationTap = pointerType === 'touch' &&
       this.selection !== null && typeof target === 'number' && target !== this.selection;
     this.press = {
       id, origin: point, target, hover: target, dragged: false,
+      mouseStackPress: pointerType === 'mouse' && typeof target === 'number',
       swipeDistanceSquared: swipeDistance ** 2,
       destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
       maxDistanceSquared: 0, neighbor: null, destinationGrace: destinationTap,
@@ -85,7 +87,8 @@ export class StackGestures {
     if (!press.dragged) {
       const dx = point.x - press.origin.x;
       const dy = point.y - press.origin.y;
-      press.maxDistanceSquared = Math.max(press.maxDistanceSquared, dx * dx + dy * dy);
+      const distanceSquared = dx * dx + dy * dy;
+      press.maxDistanceSquared = Math.max(press.maxDistanceSquared, distanceSquared);
       if (press.destinationGrace) {
         // Allow one nearby boundary crossing, but drop grace on an out-and-back or a gap.
         if (target === press.target) press.destinationGrace = press.neighbor === null;
@@ -94,7 +97,11 @@ export class StackGestures {
         } else press.neighbor = target;
       }
       const threshold = press.destinationGrace ? press.destinationDistanceSquared : press.swipeDistanceSquared;
-      press.dragged = press.maxDistanceSquared >= threshold;
+      // A mouse can travel the width of a stack while clicking it. Only leaving
+      // that stack beyond ordinary pointer jitter can turn its press into a drag.
+      press.dragged = press.mouseStackPress
+        ? target !== press.target && distanceSquared >= threshold
+        : press.maxDistanceSquared >= threshold;
     }
     press.hover = target;
     return wasDragged !== press.dragged || previous !== target;
