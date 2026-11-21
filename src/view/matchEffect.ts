@@ -1,8 +1,9 @@
 import { Container, DOMAdapter, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
 import type { Point } from './gestures';
+import type { JokerArt } from './jokerArt';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
 import {
-  awardFrame, clamp, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches, type MatchPlayback,
+  awardFrame, clamp, clearStart, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches, type MatchPlayback,
   scoreFlightFrame, scoreFlightPosition, scoreSize,
 } from './matchPlayback';
 import { flightPosition, unit } from './movePlayback';
@@ -41,6 +42,8 @@ interface Burst {
   fragments: Graphics[];
 }
 
+type JokerMatchArt = Pick<JokerArt, 'texture' | 'morph'>;
+
 export class MatchEffect {
   readonly root = new Container();
   private readonly donuts = new Container();
@@ -67,6 +70,7 @@ export class MatchEffect {
     playback: MatchPlayback;
     geometry: MatchGeometry;
     texture: Texture;
+    joker?: JokerMatchArt;
     launches: ReturnType<typeof matchLaunches>;
   } | null = null;
 
@@ -97,10 +101,10 @@ export class MatchEffect {
     return this.current !== null;
   }
 
-  start(playback: MatchPlayback, geometry: MatchGeometry, texture: Texture): void {
+  start(playback: MatchPlayback, geometry: MatchGeometry, texture: Texture, joker?: JokerMatchArt): void {
     this.cancel();
     const launches = playback.reduced ? [] : matchLaunches(playback, geometry);
-    this.current = { playback, geometry, texture, launches };
+    this.current = { playback, geometry, texture, launches, joker };
     const fill = DONUT_FILLS[playback.color] ?? CREAM;
     const size = scoreSize(playback.points) * SCORE_SCALE;
     for (const layer of [this.outline, this.face]) {
@@ -169,17 +173,18 @@ export class MatchEffect {
       return;
     }
 
-    const { playback, geometry, texture, launches } = this.current;
+    const { playback, geometry, texture, launches, joker } = this.current;
     const { start, landing, width, height, step } = geometry;
-    const { runLength } = playback;
+    const { runLength, jokerIndex } = playback;
     const { phase, progress } = frame;
     if (phase === 'arrival') {
       const arc = clamp(Math.min(start.y, landing.y) - height - BOARD_TOP, 0, 45);
       const piece = this.pieces[runLength - 1];
+      piece.texture = jokerIndex === runLength - 1 && joker ? joker.texture : texture;
       piece.visible = true;
       piece.alpha = 1;
       piece.rotation = 0;
-      piece.scale.set(width / texture.width, height / texture.height);
+      piece.scale.set(width / piece.texture.width, height / piece.texture.height);
       piece.position.copyFrom(flightPosition(start, landing, progress, arc));
       return;
     }
@@ -187,16 +192,17 @@ export class MatchEffect {
     const age = progress * playback.clearMs;
     for (let index = 0; index < runLength; index++) {
       const piece = this.pieces[index];
-      const pose = playback.reduced ? {
+      piece.texture = phase === 'morph' && index === jokerIndex && joker ? joker.morph(texture, progress) : texture;
+      const pose = phase === 'morph' || playback.reduced ? {
         x: landing.x, y: landing.y + (runLength - 1 - index) * step,
-        alpha: 1 - unit((age - 48) / (playback.clearMs - 48)), rotation: 0,
+        alpha: phase === 'morph' ? 1 : 1 - unit((age - 48) / (playback.clearMs - 48)), rotation: 0,
         scaleX: 1, scaleY: 1,
       } : launchedDonut(launches[index], geometry, age);
       piece.visible = pose !== null;
       if (!pose) continue;
       piece.alpha = pose.alpha;
       piece.rotation = pose.rotation;
-      piece.scale.set(pose.scaleX * width / texture.width, pose.scaleY * height / texture.height);
+      piece.scale.set(pose.scaleX * width / piece.texture.width, pose.scaleY * height / piece.texture.height);
       piece.position.copyFrom(pose);
       if (playback.reduced) piece.tint = 0xffeac4;
     }
@@ -206,7 +212,7 @@ export class MatchEffect {
     const current = this.current;
     if (!current) return;
     const { playback, geometry, launches } = current;
-    const age = now - playback.started - playback.arrivalMs;
+    const age = now - clearStart(playback);
     this.bursts.visible = false;
     launches.forEach(({ pop, burst }, index) => this.showBurst(index, age - pop, burst, geometry));
 

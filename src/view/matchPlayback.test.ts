@@ -1,6 +1,6 @@
 import { Bounds, DOMAdapter, Sprite, Text, Texture, TextureSource } from 'pixi.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type DoughInsert, type GameState, move } from '../game';
+import { type DoughInsert, type GameState, JOKER, move } from '../game';
 import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, VIEW_WIDTH } from './layout';
 import { LevelCelebration } from './levelCelebration';
@@ -39,6 +39,68 @@ function makeScene(): GameScene {
 afterEach(() => vi.restoreAllMocks());
 
 describe('match presentation', () => {
+  it.each([
+    { stacks: [[JOKER], ['blue', 'blue'], ['red']], jokerIndex: 2 },
+    { stacks: [['blue'], ['blue', JOKER], ['red']], jokerIndex: 1 },
+    { stacks: [['blue'], [JOKER, 'blue'], ['red']], jokerIndex: 0 },
+  ])('morphs only Joker seat $jokerIndex at landing, before any collect or score motion', ({ stacks, jokerIndex }) => {
+    vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
+    const before: GameState = {
+      stacks, score: 0, level: 1, rank: 'Dough Enthusiast', capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
+    };
+    const after = move(before, 0, 1, () => 0);
+    const match = beginMatch(before, after, 0, 1, 0, false)!;
+    expect(match).toMatchObject({ color: 'blue', runLength: 3, jokerIndex, morphMs: 110 });
+    const joker = { texture: new Texture({ source: Texture.WHITE.source }), morph: vi.fn(() => Texture.EMPTY) };
+    const effect = new MatchEffect();
+    const [donuts, bursts, award] = effect.root.children;
+    const pieces = () => donuts.children as Sprite[];
+    const geometry = { start: { x: 70, y: 350 }, landing: { x: 200, y: 325 }, width: 100, height: 75, step: 24, viewHeight: 700 };
+    const tick = (time: number) => {
+      effect.showPieces(matchFrame(match, time));
+      effect.showTail(time, counter);
+    };
+    effect.start(match, geometry, Texture.WHITE, joker);
+
+    tick(110);
+    expect(pieces().filter(piece => piece.visible).map(piece => piece.texture))
+      .toEqual([jokerIndex === 2 ? joker.texture : Texture.WHITE]);
+    tick(275);
+    expect(matchFrame(match, 275)).toEqual({ phase: 'morph', progress: 0.5 });
+    expect(joker.morph).toHaveBeenCalledExactlyOnceWith(Texture.WHITE, 0.5);
+    expect(pieces().map(piece => piece.texture)).toEqual(
+      Array.from({ length: 3 }, (_, index) => index === jokerIndex ? Texture.EMPTY : Texture.WHITE),
+    );
+    expect(pieces()[jokerIndex].y).toBe(geometry.landing.y + (2 - jokerIndex) * geometry.step);
+    expect(pieces().every(piece => piece.visible && piece.rotation === 0 && piece.alpha === 1)).toBe(true);
+    expect(bursts.visible).toBe(false);
+    expect(award.visible).toBe(false);
+    tick(330);
+    expect(matchFrame(match, 330)).toEqual({ phase: 'clear', progress: 0 });
+    expect(pieces().every(piece => piece.texture === Texture.WHITE)).toBe(true);
+    tick(523);
+    expect(bursts.visible).toBe(false);
+    expect(award.visible).toBe(false);
+    tick(524);
+    expect(bursts.visible).toBe(true);
+    expect(award.visible).toBe(true);
+    expect(scoreFlightFrame(match, 689)).toBeNull();
+    expect(scoreFlightFrame(match, 690)).toBe(0);
+    expect(scoreImpactTime(match)).toBe(960);
+    expect(matchFrame(match, 650).phase).toBe('resolved');
+
+    const reduced = beginMatch(before, after, 0, 1, 0, true)!;
+    expect(matchFrame(reduced, 0)).toEqual({ phase: 'clear', progress: 0 });
+    expect(scoreImpactTime(reduced)).toBe(230);
+    joker.morph.mockClear();
+    effect.start(reduced, geometry, Texture.WHITE, joker);
+    effect.showPieces(matchFrame(reduced, 100));
+    expect(joker.morph).not.toHaveBeenCalled();
+    expect(pieces().every(piece => piece.texture === Texture.WHITE && piece.rotation === 0 && piece.alpha < 1)).toBe(true);
+    effect.root.destroy({ children: true });
+    joker.texture.destroy();
+  });
+
   it('compresses, launches and pops all three, with the award and fragments starting at the first pop', () => {
     vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
     const effect = new MatchEffect();
@@ -507,6 +569,35 @@ describe('move presentation', () => {
     stacks: [['blue'], ['green', 'red'], ['red']], score: 0, level: 5, rank: 'Glaze Guru',
     capacity: 7, nextLevelScore: 4500, movesLeft: 1, gameOver: false,
   };
+
+  it('hits the visible Hint footer separately and anchors the static arrow to the receiving seat', () => {
+    const scene = makeScene();
+    scene.draw(state);
+    const { x, y, width, height } = scene['hintBounds'];
+    const button = { x: x + width / 2, y: y + height / 2 };
+    expect(scene.hit(button, 'tap')).toBe('outside');
+    scene.setHintAvailable(true);
+    for (const mode of ['exact', 'tap', 'swipe'] as const) expect(scene.hit(button, mode)).toBe('hint');
+    expect(scene.hit({ x: 200, y: button.y }, 'tap')).toBe('outside');
+
+    const arrow = scene['hintArrow'];
+    const renderArrow = vi.spyOn(arrow, 'show');
+    scene.showHint({ from: 0, to: 1 });
+    const { slot, pieces } = scene['stacks'][1];
+    const { donutHeight, step } = scene['layout'];
+    expect(renderArrow).toHaveBeenCalledExactlyOnceWith(
+      scene['guidePoint'](0), { x: slot.x, y: slot.base - pieces.length * step - donutHeight * 0.58 }, 'hint',
+    );
+    expect(arrow.root.visible).toBe(true);
+    expect(arrow.root.eventMode).toBe('none');
+    expect(scene['arrow'].root.visible).toBe(false);
+    scene.showHint(null);
+    expect(arrow.root.visible).toBe(false);
+    expect(scene['hintStatus'].text).toBe('No verified hint');
+    scene.resize(390, 844);
+    expect(scene['hintStatus'].text).toBe('');
+    scene.root.destroy({ children: true });
+  });
 
   it('presses before selection and keeps the release hit area stable', () => {
     const scene = makeScene();

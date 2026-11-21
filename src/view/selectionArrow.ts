@@ -7,12 +7,13 @@ export interface MovePreview {
   blocked: boolean;
 }
 
-type ArrowTone = 'move' | 'gap' | 'blocked';
+type ArrowTone = 'move' | 'gap' | 'blocked' | 'hint';
 
 const ARROW_COLORS = {
   move: { fill: 0xffdf86, outline: 0x713a20 },
   gap: { fill: 0xffedd6, outline: 0x7b503e },
   blocked: { fill: 0xff8e8d, outline: 0x7e2631 },
+  hint: { fill: 0xa6fff0, outline: 0x164c48 },
 };
 
 export class SelectionArrow {
@@ -62,10 +63,11 @@ export class SelectionArrow {
     };
     stroke(outline, tone === 'gap' ? 5.5 : 7.5);
     stroke(fill, tone === 'gap' ? 2.8 : 4.5);
-    if (tone === 'move') {
+    if (tone === 'move' || tone === 'hint') {
       this.root.poly([to.x, to.y, left.x, left.y, right.x, right.y])
         .fill(fill).stroke({ color: outline, width: 2, join: 'round' });
     }
+    if (tone === 'hint') this.root.circle(from.x, from.y, 5).fill(fill).stroke({ color: outline, width: 2 });
   }
 
   hide(): void {

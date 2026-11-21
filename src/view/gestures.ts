@@ -4,11 +4,12 @@ export interface Point {
 }
 
 export type ResultsAction = 'restart' | 'personal' | 'friends' | 'submit';
-export type Target = number | ResultsAction | 'outside' | null;
+type ButtonAction = ResultsAction | 'hint';
+export type Target = number | ButtonAction | 'outside' | null;
 
 export type GestureResult =
   | { kind: 'move' | 'blocked'; from: number; to: number }
-  | { kind: ResultsAction };
+  | { kind: ButtonAction };
 
 interface Press {
   id: number;
@@ -104,7 +105,7 @@ export class StackGestures {
     if (!press || press.id !== id) return null;
     this.update(id, point, target);
     this.press = null;
-    if (target === 'outside') return null;
+    if (target === 'outside' || (target === 'hint' && press.target !== 'hint')) return null;
 
     if (press.dragged) {
       const from = press.target;

@@ -194,6 +194,17 @@ describe('stack gestures', () => {
     expect(tap(gestures, 'restart')).toEqual({ kind: 'restart' });
   });
 
+  it('activates Hint only from its own complete press without stealing a stack gesture', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, middle, 1, 12);
+    expect(gestures.finish(1, { x: middle.x + 2, y: middle.y }, 'hint')).toBeNull();
+    expect(gestures.source).toBe(0);
+    gestures.start(1, middle, 'hint', 12);
+    expect(gestures.finish(1, { x: middle.x + 13, y: middle.y }, 'hint')).toBeNull();
+    expect(tap(gestures, 'hint', middle)).toEqual({ kind: 'hint' });
+  });
+
   it.each([
     { count: 3, lower: 3, capacity: 6 },
     { count: 4, lower: 4, capacity: 7 },

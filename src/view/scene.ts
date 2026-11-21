@@ -1,8 +1,9 @@
 import { Assets, Container, DOMAdapter, Graphics, Sprite, Text, Texture } from 'pixi.js';
-import type { DoughInsert, GameState } from '../game';
+import { type DoughInsert, type GameState, JOKER } from '../game';
 import type { Point, StackGestures, Target } from './gestures';
+import { JokerArt } from './jokerArt';
 import {
-  BOARD_FOOTER_SPACE, BOARD_TOP, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
+  BOARD_FOOTER_SPACE, BOARD_TOP, contains, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
   stackTarget, VIEW_WIDTH, viewport,
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
@@ -28,8 +29,8 @@ const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
 export async function loadArt(): Promise<Map<string, Texture>> {
-  const textures = await Promise.all(['kitchen', 'logo', 'clear', 'strawberry-glaze', ...DONUT_ART].map(async name => {
-    const src = `${import.meta.env.BASE_URL}art/${name}.png`;
+  const textures = await Promise.all(['kitchen', 'logo', 'clear', 'strawberry-glaze', ...DONUT_ART, JOKER].map(async name => {
+    const src = `${import.meta.env.BASE_URL}art/${name}.${name === JOKER ? 'webp' : 'png'}`;
     const texture = await Assets.load<Texture>(DONUT_ART.includes(name)
       ? { src, data: { autoGenerateMipmaps: true, scaleMode: 'linear' } }
       : src);
@@ -160,6 +161,10 @@ export class GameScene {
   private readonly overlay = new Container({ visible: false });
   private readonly flight: Sprite;
   private readonly arrow = new SelectionArrow();
+  private readonly hintArrow = new SelectionArrow();
+  private readonly hintButton = new Container({ visible: false });
+  private readonly hintBounds = { x: VIEW_WIDTH - 106, y: 0, width: 90, height: BOARD_FOOTER_SPACE };
+  private readonly hintStatus: Text;
   private readonly selectionCue = new Graphics({ eventMode: 'none', visible: false })
     .circle(0, 0, 4).fill(0xffdf86).stroke({ color: GOLD, width: 1.5 });
   private readonly feedbackCue = new Graphics({ eventMode: 'none', visible: false })
@@ -184,6 +189,7 @@ export class GameScene {
   private capacity = 0;
   private liftedStack: number | null = null;
   private liftStarted: number | null = null;
+  private joker?: JokerArt;
 
   get selectionAnimating(): boolean {
     return this.liftStarted !== null;
@@ -205,6 +211,7 @@ export class GameScene {
     this.root.once('destroyed', () => {
       this.contactTexture.destroy(true);
       this.vacancyArt.destroy();
+      this.joker?.destroy();
     });
     this.kitchen = sprite(this.root, this.texture('kitchen'));
     this.kitchen.anchor.set(0.5);
@@ -213,23 +220,39 @@ export class GameScene {
     this.flight = sprite(this.content, Texture.EMPTY);
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
-    this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.celebration.root, this.hud, this.matchEffects);
+    this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
+      this.celebration.root, this.hud, this.matchEffects);
 
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
     logo.anchor.set(0.5);
     logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
     this.hud.addChild(this.scoreBar.root);
     this.status = label(this.hud, '', 15, CENTER, 0);
+    this.hintStatus = label(this.hud, '', 15, CENTER, 0);
+    const { width, height } = this.hintBounds;
+    this.hintButton.addChild(new Graphics().roundRect(0, 2, width, height - 4, 12)
+      .fill(0x164c48).stroke({ color: 0xa6fff0, width: 1.5 }));
+    label(this.hintButton, 'Hint', 18, width / 2, height / 2, '#effffb');
+    this.hud.addChild(this.hintButton);
 
     this.overlay.addChild(this.results.root);
   }
 
   private texture(name: string): Texture {
+    if (name === JOKER) {
+      this.joker ??= new JokerArt(this.art.get(JOKER)!);
+      return this.joker.texture;
+    }
     return this.art.get(name)!;
+  }
+
+  showJoker(now: number, reduced: boolean): void {
+    this.joker?.update(now, reduced);
   }
 
   resize(width: number, height: number): void {
     this.hideMoveGuides();
+    this.clearHint();
     this.fit = viewport(width, height);
     for (const layer of [this.content, this.overlay]) {
       layer.position.set(this.fit.x, this.fit.y);
@@ -240,12 +263,39 @@ export class GameScene {
     this.kitchen.position.set(width / 2, height / 2);
     this.scrim.clear().rect(0, 0, width, height).fill({ color: 0x4e2019, alpha: 0.6 });
     this.status.y = this.fit.height - BOARD_FOOTER_SPACE / 2;
+    this.hintStatus.y = this.status.y;
+    this.hintBounds.y = this.fit.height - BOARD_FOOTER_SPACE;
+    this.hintButton.position.set(this.hintBounds.x, this.hintBounds.y);
     this.results.resize(this.fit.height);
   }
 
   showResults(view: ResultsView | null): void {
     this.scrim.visible = this.overlay.visible = view !== null;
-    if (view) this.results.show(view, this.fit.height);
+    if (view) {
+      this.setHintAvailable(false);
+      this.clearHint();
+      this.results.show(view, this.fit.height);
+    }
+  }
+
+  setHintAvailable(available: boolean): void {
+    this.hintButton.visible = available;
+  }
+
+  showHint(move: { from: number; to: number } | null): void {
+    this.clearHint();
+    if (!move) {
+      this.hintStatus.text = 'No verified hint';
+      return;
+    }
+    const { slot, pieces } = this.stacks[move.to];
+    const landing = slot.base - pieces.length * this.layout.step - this.layout.donutHeight * 0.58;
+    this.hintArrow.show(this.guidePoint(move.from), { x: slot.x, y: landing }, 'hint');
+  }
+
+  clearHint(): void {
+    this.hintArrow.hide();
+    this.hintStatus.text = '';
   }
 
   draw(state: GameState): void {
@@ -498,6 +548,7 @@ export class GameScene {
     if (this.stackUnlockAnimating) return null;
     if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
+    if (this.hintButton.visible && contains(this.hintBounds, point)) return 'hint';
     return stackTarget(this.stacks, point, this.fit.height, mode);
   }
 
@@ -644,7 +695,7 @@ export class GameScene {
       height: donutHeight,
       step,
       viewHeight: this.fit.height,
-    }, this.texture(match.color));
+    }, this.texture(match.color), match.jokerIndex === undefined ? undefined : this.joker);
     this.matchedDestination = target.pieces.slice(-(match.runLength - 1));
     this.stacks[match.from].top!.visible = false;
     this.updateVacancies();

@@ -1,5 +1,5 @@
 import type { Application } from 'pixi.js';
-import { canMove, createGame, type DoughInsert, type GameState, move } from '../game';
+import { canMove, canRequestSetupHint, createGame, type DoughInsert, findSetupHint, type GameState, JOKER, move } from '../game';
 import { createFriendsScores } from '../platform/friendsScores';
 import { PersonalScores } from '../platform/personalScores';
 import { type Point, StackGestures } from './gestures';
@@ -13,6 +13,7 @@ import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
 const TOUCH_SWIPE_DISTANCE = 12;
 const BROWSER_CHROME_HEIGHT_CHANGE = 96;
 const MIN_CREDIT_SPACING_MS = 55;
+const HINT_STATUS_MS = 1500;
 
 interface LevelReveal {
   details: LevelCelebrationDetails;
@@ -53,13 +54,18 @@ export async function mountGame(app: Application): Promise<void> {
   const scene = new GameScene(art);
   const { canvas, renderer, stage, ticker } = app;
   const window = canvas.ownerDocument.defaultView!;
-  const personalScores = new PersonalScores(() => window.localStorage);
+  const jokerPlaytest = import.meta.env.DEV && new URLSearchParams(window.location?.search).get('playtest') === 'joker';
+  const createRun = jokerPlaytest ? (): GameState => ({
+    stacks: [[JOKER], ['red', 'blue'], ['red', 'blue']],
+    score: 0, combo: 0, level: 1, rank: 'Dough Enthusiast', capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
+  }) : createGame;
+  const personalScores = new PersonalScores(() => jokerPlaytest ? window.sessionStorage : window.localStorage);
   const events = new AbortController();
   const options = { signal: events.signal };
   const touchAction = canvas.style.touchAction;
   canvas.style.touchAction = 'none';
 
-  let state = createGame();
+  let state = createRun();
   let bestCombo = 0;
   let results: ResultsSession | null = null;
   let levelStartScore = 0;
@@ -72,8 +78,27 @@ export async function mountGame(app: Application): Promise<void> {
   let renderedSize: { width: number; height: number } | null = null;
   let pending: { playback: MatchPlayback; level: LevelReveal | null; inserts: readonly DoughInsert[] } | null = null;
   let arrowPointer: { point: Point; destination: number | null } | null = null;
+  let hintCache: { state: GameState; eligible: boolean; result?: ReturnType<typeof findSetupHint> } | null = null;
+  let hintAvailable = false;
+  let hintStatusUntil = 0;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const gestures = new StackGestures(index => state.stacks[index].length > 0, (from, to) => canMove(state, from, to));
+
+  function syncHintAvailability(): boolean {
+    const settled = !state.gameOver && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
+    if (settled && hintCache?.state !== state) hintCache = { state, eligible: canRequestSetupHint(state) };
+    const available = settled && hintCache?.eligible === true;
+    if (available !== hintAvailable) {
+      hintAvailable = available;
+      scene.setHintAvailable(available);
+    }
+    return available;
+  }
+
+  function clearHint(): void {
+    hintStatusUntil = 0;
+    scene.clearHint();
+  }
 
   function updateInteraction(now = performance.now()): void {
     if (feedback && now - feedback.started >= feedback.duration) feedback = null;
@@ -108,7 +133,7 @@ export async function mountGame(app: Application): Promise<void> {
     if (results || !state.gameOver || pending || scene.moveAnimating || scene.stackUnlockAnimating) return;
     const { score, level } = state;
     const completed = personalScores.record({ score, level, bestCombo });
-    results = new ResultsSession(completed, createFriendsScores(), view => scene.showResults(view));
+    results = new ResultsSession(completed, jokerPlaytest ? null : createFriendsScores(), view => scene.showResults(view));
     scene.showResults(results.view);
   }
 
@@ -150,6 +175,7 @@ export async function mountGame(app: Application): Promise<void> {
   }
 
   function cancelPresentation(): void {
+    clearHint();
     pending = null;
     feedback = null;
     arrowPointer = null;
@@ -170,6 +196,7 @@ export async function mountGame(app: Application): Promise<void> {
     cancelPresentation();
     scene.resize(width, height);
     draw();
+    syncHintAvailability();
     showResultsIfSettled();
   }
 
@@ -187,8 +214,10 @@ export async function mountGame(app: Application): Promise<void> {
     if (pending || scene.stackUnlockAnimating || event.button !== 0) return;
     const { client, target } = hit(event, 'tap');
     if (state.gameOver && (!results || typeof target !== 'string' || target === 'outside')) return;
+    if (target === 'hint' && !syncHintAvailability()) return;
     const swipeDistance = event.pointerType === 'touch' ? TOUCH_SWIPE_DISTANCE : undefined;
     if (!gestures.start(event.pointerId, client, target, swipeDistance)) return;
+    if (target !== 'hint') clearHint();
     scene.finishMove();
     checkBoardSettled();
     feedback = null;
@@ -223,16 +252,27 @@ export async function mountGame(app: Application): Promise<void> {
     const { client, target } = hit(event, 'swipe');
     const action = gestures.finish(event.pointerId, client, target);
     arrowPointer = null;
+    if (action?.kind === 'hint') {
+      if (syncHintAvailability() && hintCache) {
+        if (hintCache.result === undefined) hintCache.result = findSetupHint(state);
+        gestures.reset();
+        updateInteraction();
+        scene.showHint(hintCache.result);
+        hintStatusUntil = hintCache.result ? 0 : performance.now() + HINT_STATUS_MS;
+      }
+      return;
+    }
     if (action?.kind === 'restart') {
       results?.close();
       results = null;
       scene.showResults(null);
-      state = createGame();
+      state = createRun();
       bestCombo = 0;
       levelStartScore = 0;
       cancelPresentation();
       gestures.reset();
       draw();
+      syncHintAvailability();
       return;
     }
     if (action?.kind === 'personal' || action?.kind === 'friends') {
@@ -256,6 +296,7 @@ export async function mountGame(app: Application): Promise<void> {
       if (level) levelStartScore = level.levelStartScore;
       if (playback) {
         pending = { playback, level, inserts };
+        syncHintAvailability();
         if (level) levels.push(level);
         // A reduced-motion match can resolve ahead of a flight already in progress.
         const previous = credits.at(-1);
@@ -273,6 +314,7 @@ export async function mountGame(app: Application): Promise<void> {
       feedback = { target: to, started, duration: 280, color };
       draw();
       scene.startMove(inserts, started, motion.matches, { to, start, color });
+      syncHintAvailability();
       return;
     }
     if (action?.kind === 'blocked') {
@@ -299,6 +341,9 @@ export async function mountGame(app: Application): Promise<void> {
   renderer.on('resize', resize);
   const tick = () => {
     const now = performance.now();
+    if (state.stacks.some(stack => stack.includes(JOKER)) || pending?.playback.jokerIndex !== undefined) {
+      scene.showJoker(now, motion.matches);
+    }
     if (pending) {
       const { playback, level, inserts } = pending;
       const frame = matchFrame(playback, now);
@@ -315,6 +360,8 @@ export async function mountGame(app: Application): Promise<void> {
       }
     } else if (feedback || scene.selectionAnimating) updateInteraction(now);
     scene.showMove(now);
+    syncHintAvailability();
+    if (hintStatusUntil && now >= hintStatusUntil) clearHint();
     checkBoardSettled();
     advanceScore(now);
     scene.showMatchTail(now);
@@ -327,6 +374,7 @@ export async function mountGame(app: Application): Promise<void> {
   window.addEventListener('pointerup', up, options);
   window.addEventListener('pointercancel', cancel, options);
   window.addEventListener('blur', () => {
+    clearHint();
     if (pending || scene.stackUnlockAnimating) {
       cancelPresentation();
       draw();
@@ -340,6 +388,7 @@ export async function mountGame(app: Application): Promise<void> {
       arrowPointer = null;
       updateInteraction();
     }
+    syncHintAvailability();
     showResultsIfSettled();
   }, options);
 

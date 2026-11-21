@@ -1,4 +1,4 @@
-import { type GameState, matchedRunLength } from '../game';
+import { type GameState, resolveMatch } from '../game';
 import type { Point } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
 import { unit } from './movePlayback';
@@ -8,32 +8,42 @@ export interface MatchPlayback {
   to: number;
   color: string;
   runLength: number;
+  jokerIndex?: number;
   points: number;
   combo: number;
   started: number;
   reduced: boolean;
   arrivalMs: number;
+  morphMs?: number;
   clearMs: number;
 }
 
 export function beginMatch(before: GameState, after: GameState, from: number, to: number,
   started: number, reduced: boolean): MatchPlayback | null {
   const points = after.score - before.score;
-  const color = before.stacks[from].at(-1);
-  if (points <= 0 || !color) return null;
-  const runLength = matchedRunLength(before.stacks[to], color);
-  if (!runLength) return null;
+  const incoming = before.stacks[from].at(-1);
+  if (points <= 0 || !incoming) return null;
+  const match = resolveMatch(before.stacks[to], incoming);
+  if (!match) return null;
 
   return {
-    from, to, color, runLength, points, combo: after.combo ?? 0,
+    ...match, from, to, points, combo: after.combo ?? 0,
+    morphMs: match.jokerIndex !== undefined && !reduced ? 110 : 0,
     started, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320,
   };
+}
+
+export function clearStart(match: MatchPlayback): number {
+  return match.started + match.arrivalMs + (match.morphMs ?? 0);
 }
 
 export function matchFrame(match: MatchPlayback, now: number) {
   const age = Math.max(0, now - match.started);
   if (age < match.arrivalMs) return { phase: 'arrival', progress: age / match.arrivalMs } as const;
-  const clear = age - match.arrivalMs;
+  const morph = match.morphMs ?? 0;
+  const arrived = age - match.arrivalMs;
+  if (arrived < morph) return { phase: 'morph', progress: arrived / morph } as const;
+  const clear = arrived - morph;
   if (clear < match.clearMs) return { phase: 'clear', progress: clear / match.clearMs } as const;
   return { phase: 'resolved', progress: 1 } as const;
 }
@@ -171,11 +181,11 @@ export function scoreSize(points: number): number {
 }
 
 function flightStart(match: MatchPlayback): number {
-  return match.started + match.arrivalMs + match.clearMs + AWARD_HOLD_MS;
+  return clearStart(match) + match.clearMs + AWARD_HOLD_MS;
 }
 
 export function scoreImpactTime(match: MatchPlayback): number {
-  return match.reduced ? match.started + match.clearMs : flightStart(match) + SCORE_FLIGHT_MS;
+  return match.reduced ? clearStart(match) + match.clearMs : flightStart(match) + SCORE_FLIGHT_MS;
 }
 
 export function scoreFlightFrame(match: MatchPlayback, now: number): number | null {
@@ -196,8 +206,8 @@ export function scoreFlightPosition(start: Point, target: Point, progress: numbe
 export function awardFrame(match: MatchPlayback, now: number) {
   const emphasis = scoreEmphasis(match.points);
   const pop = match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1);
-  const age = now - match.started - match.arrivalMs - pop;
-  const end = match.reduced ? match.started + 420 + 130 * emphasis : flightStart(match);
+  const age = now - clearStart(match) - pop;
+  const end = match.reduced ? clearStart(match) + 420 + 130 * emphasis : flightStart(match);
   if (age < 0 || now >= end) return null;
 
   const peakX = 1.21 + 0.13 * emphasis;

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Application } from 'pixi.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createGame, type DoughInsert, type GameState, move } from '../game';
+import { createGame, type DoughInsert, findSetupHint, type GameState, JOKER, move } from '../game';
 import { createFriendsScores } from '../platform/friendsScores';
 import { PERSONAL_SCORES_KEY } from '../platform/personalScores';
 import type { Point } from './gestures';
@@ -24,7 +24,8 @@ const scene = vi.hoisted(() => ({
   startMove: vi.fn(), showMove: vi.fn(), finishMove: vi.fn(), moveAnimating: false,
   startStackUnlock: vi.fn<(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
   finishStackUnlock: vi.fn(), stackUnlockAnimating: false,
-  showInteraction: vi.fn(), topPosition: vi.fn(),
+  showInteraction: vi.fn(), showJoker: vi.fn(), topPosition: vi.fn(),
+  setHintAvailable: vi.fn(), showHint: vi.fn(), clearHint: vi.fn(),
 }));
 
 vi.mock('./scene', () => ({ GameScene: class { constructor() { return scene; } }, loadArt: async () => new Map() }));
@@ -32,7 +33,7 @@ vi.mock('./matchEffect', () => ({ preloadScoreFont: async () => {} }));
 vi.mock('../platform/friendsScores', () => ({ createFriendsScores: vi.fn() }));
 vi.mock('../game', async importOriginal => {
   const game = await importOriginal<typeof import('../game')>();
-  return { ...game, createGame: vi.fn(), move: vi.fn(game.move) };
+  return { ...game, createGame: vi.fn(), move: vi.fn(game.move), findSetupHint: vi.fn(game.findSetupHint) };
 });
 
 const initial: GameState = {
@@ -46,12 +47,13 @@ beforeEach(() => {
   vi.mocked(createFriendsScores).mockReturnValue(null);
   scene.hit.mockImplementation(({ x }: Point) => {
     if (scene.draw.mock.lastCall?.[0].gameOver) return x === 300 ? 'restart' : null;
+    if (x === 398) return 'hint';
     return Math.floor(x / 100);
   });
 });
 afterEach(() => vi.restoreAllMocks());
 
-async function setup(reduced = false) {
+async function setup(reduced = false, search = '') {
   let now = 0;
   let refillEnds = 0;
   let unlockEnds = 0;
@@ -78,7 +80,8 @@ async function setup(reduced = false) {
   vi.spyOn(performance, 'now').mockImplementation(() => now);
   const motion = { matches: reduced };
   const localStorage = { getItem: vi.fn((): string | null => null), setItem: vi.fn() };
-  const window = Object.assign(new EventTarget(), { matchMedia: () => motion, localStorage });
+  const sessionStorage = { getItem: vi.fn((): string | null => null), setItem: vi.fn() };
+  const window = Object.assign(new EventTarget(), { matchMedia: () => motion, location: { search }, localStorage, sessionStorage });
   const canvas = Object.assign(new EventTarget(), {
     ownerDocument: { defaultView: window }, style: {}, setPointerCapture: vi.fn(),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 700 }),
@@ -95,11 +98,142 @@ async function setup(reduced = false) {
   const tap = (x: number) => { pointer('pointerdown', x); pointer('pointerup', x); };
   const match = () => { tap(50); tap(150); };
   const tick = (age: number) => { now = age; ticker.add.mock.lastCall![0](); };
-  return { window, renderer, screen: app.screen, pointer, tap, match, tick, motion, localStorage,
+  return { window, renderer, screen: app.screen, pointer, tap, match, tick, motion, localStorage, sessionStorage,
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
 
 describe('game view match playback', () => {
+  const hintState: GameState = {
+    ...initial, movesLeft: 3, capacity: 5,
+    stacks: [['green', 'red', 'blue', 'green', 'green'], ['blue', 'red', 'green', 'red'], ['blue', 'blue', 'blue', 'red']],
+  };
+
+  it('searches only on a completed Hint press, caches the verified transfer and spends no move', async () => {
+    vi.mocked(createGame).mockReturnValueOnce(hintState);
+    const before = structuredClone(hintState);
+    const { pointer, tap, tick, renderer, window } = await setup();
+    expect(scene.setHintAvailable).toHaveBeenLastCalledWith(true);
+    tick(16);
+    pointer('pointerdown', 398, 1, 'touch');
+    expect(findSetupHint).not.toHaveBeenCalled();
+    pointer('pointerup', 150, 1, 'touch');
+    expect(findSetupHint).not.toHaveBeenCalled();
+
+    tap(398);
+    expect(scene.showHint).toHaveBeenLastCalledWith({ from: 1, to: 2 });
+    expect(findSetupHint).toHaveBeenCalledExactlyOnceWith(hintState);
+    expect(move).not.toHaveBeenCalled();
+    expect(hintState).toEqual(before);
+    for (const dismiss of [() => tap(150), () => renderer.emit('resize'), () => window.dispatchEvent(new Event('blur'))]) {
+      scene.clearHint.mockClear();
+      dismiss();
+      expect(scene.clearHint).toHaveBeenCalled();
+      tap(398);
+      expect(scene.showHint).toHaveBeenLastCalledWith({ from: 1, to: 2 });
+    }
+    expect(findSetupHint).toHaveBeenCalledTimes(1);
+    tap(150);
+    tap(250);
+    expect(move).toHaveBeenCalledTimes(1);
+    const after = scene.draw.mock.lastCall![0];
+    expect(after.movesLeft).toBe(2);
+    tap(398);
+    expect(findSetupHint).toHaveBeenCalledTimes(2);
+    expect(findSetupHint).toHaveBeenLastCalledWith(after);
+  });
+
+  it('caches a null hint and dismisses its message without spending pressure', async () => {
+    const state = { ...hintState,
+      stacks: [['red', 'green', 'red', 'green', 'green'], ['red', 'blue', 'red', 'blue'], ['green', 'blue', 'blue', 'red']] };
+    vi.mocked(createGame).mockReturnValueOnce(state);
+    const { tap, tick } = await setup(true);
+    tap(398);
+    tap(398);
+    expect(findSetupHint).toHaveBeenCalledExactlyOnceWith(state);
+    expect(scene.showHint).toHaveBeenLastCalledWith(null);
+    scene.clearHint.mockClear();
+    tick(1499);
+    expect(scene.clearHint).not.toHaveBeenCalled();
+    tick(1500);
+    expect(scene.clearHint).toHaveBeenCalledOnce();
+    expect(move).not.toHaveBeenCalled();
+    expect(state.movesLeft).toBe(3);
+  });
+
+  it('rejects Hint while playback is active and on a board with an immediate match', async () => {
+    vi.mocked(createGame).mockReturnValueOnce(hintState);
+    const { tap, tick } = await setup();
+    scene.moveAnimating = true;
+    tap(398);
+    expect(scene.setHintAvailable).toHaveBeenLastCalledWith(false);
+    expect(findSetupHint).not.toHaveBeenCalled();
+    tick(20);
+    expect(scene.setHintAvailable).toHaveBeenLastCalledWith(true);
+    const immediate = await setup();
+    immediate.tap(398);
+    expect(findSetupHint).not.toHaveBeenCalled();
+  });
+  it('plays the Joker fixture through the miss, morph, collect and score credit, then restarts the same fixture', async () => {
+    const { tap, tick, localStorage, sessionStorage } = await setup(false, '?playtest=joker');
+    const opening = scene.draw.mock.lastCall![0];
+    expect(opening.stacks).toEqual([[JOKER], ['red', 'blue'], ['red', 'blue']]);
+    tap(150);
+    tap(50);
+    expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ stacks: [[JOKER, 'blue'], ['red'], ['red', 'blue']], movesLeft: 6 });
+    expect(scene.startMatch).not.toHaveBeenCalled();
+    tick(400);
+    expect(scene.showJoker).toHaveBeenLastCalledWith(400, false);
+    tap(250);
+    tap(50);
+    expect(scene.startMatch).toHaveBeenCalledWith(expect.objectContaining({ color: 'blue', jokerIndex: 0, points: 100 }));
+
+    tick(620);
+    expect(scene.showMatch.mock.lastCall?.[0]).toEqual({ phase: 'morph', progress: 0 });
+    expect(scene.showJoker).toHaveBeenLastCalledWith(620, false);
+    tap(150);
+    tap(250);
+    expect(move).toHaveBeenCalledTimes(2);
+    tick(730);
+    expect(scene.showMatch.mock.lastCall?.[0]).toEqual({ phase: 'clear', progress: 0 });
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(0);
+    tick(1050);
+    expect(scene.draw.mock.lastCall?.[0].stacks[0]).not.toContain(JOKER);
+    tick(1359);
+    expect(scene.creditScore).not.toHaveBeenCalled();
+    tick(1360);
+    expect(scene.creditScore).toHaveBeenCalledExactlyOnceWith(1360, false);
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(100);
+
+    const resolved = scene.draw.mock.lastCall![0];
+    vi.mocked(move).mockReturnValueOnce({ ...resolved, gameOver: true });
+    tap(50);
+    tap(150);
+    tick(1370);
+    expect(localStorage.setItem).not.toHaveBeenCalled();
+    expect(sessionStorage.setItem).toHaveBeenCalledTimes(1);
+    expect(createFriendsScores).not.toHaveBeenCalled();
+    tap(300);
+    expect(scene.draw.mock.lastCall?.[0]).toEqual(opening);
+    expect(scene.draw.mock.lastCall?.[0]).not.toBe(opening);
+  });
+
+  it('settles a committed Joker match on resize during the morph', async () => {
+    vi.mocked(createGame).mockReturnValueOnce({
+      ...initial, score: 0, stacks: [[JOKER], ['blue', 'blue'], ['red']],
+    });
+    const { match, tick, renderer } = await setup();
+    match();
+    tick(275);
+    expect(scene.showMatch.mock.lastCall?.[0].phase).toBe('morph');
+    renderer.emit('resize');
+    expect(scene.cancelMatch).toHaveBeenCalled();
+    expect(scene.draw.mock.lastCall?.[0].stacks.flat()).not.toContain(JOKER);
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(110);
+    tick(1000);
+    expect(scene.creditScore).not.toHaveBeenCalled();
+    expect(move).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps an idle selection through a height-only viewport change between touches', async () => {
     const { pointer, renderer, screen } = await setup();
     pointer('pointerdown', 50, 1, 'touch');
@@ -389,6 +523,7 @@ describe('game view match playback', () => {
     pointer('pointerdown', 50);
     expect(scene.showInteraction.mock.lastCall?.[0].pressedStack).toBe(0);
     pointer('pointermove', 250);
+    vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.5);
     pointer('pointerup', 250);
     expect(scene.startMove).toHaveBeenCalledWith(
       [expect.objectContaining({ stack: 0, depth: 0 })], 0, false,
@@ -460,7 +595,14 @@ describe('game view match playback', () => {
   it('records the best combo from earlier matches after an actual terminal refill, once across resize and replay', async () => {
     const game = await vi.importActual<typeof import('../game')>('../game');
     let seed = 9;
-    const rng = () => ((seed = (Math.imul(1664525, seed) + 1013904223) >>> 0) / 2 ** 32);
+    let draws = 0;
+    // Keep the opening and five pressure refills on the fixture's seven-miss cadence.
+    const intervalDraws = new Set([16, 18, 20, 24, 26, 28]);
+    const rng = () => {
+      if (intervalDraws.has(++draws)) return 0.5;
+      seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+      return seed / 2 ** 32;
+    };
     vi.mocked(createGame).mockReturnValueOnce(game.createGame(rng));
     vi.mocked(move).mockImplementation((state, from, to, _rng, onDough) => game.move(state, from, to, rng, onDough));
     const { tap, tick, renderer, window, localStorage } = await setup(true);
