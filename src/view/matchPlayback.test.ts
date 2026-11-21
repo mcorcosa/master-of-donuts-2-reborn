@@ -252,7 +252,7 @@ describe('match presentation', () => {
     };
     const match = beginMatch(before, { ...before, score: 500 }, 0, 1, 0, false)!;
     expect(match).toMatchObject({ runLength: 4, combo: 0, points: 110 });
-    scene.draw(before, 7);
+    scene.draw(before);
     const gestures = new StackGestures(() => true, () => true);
     const point = scene.topPosition(0);
     gestures.start(1, point, 0);
@@ -307,10 +307,10 @@ describe('match presentation', () => {
       stacks: [['red'], ['red', 'red'], ['blue']], score: 0, level: 1, rank: 'Dough Enthusiast',
       capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
     };
-    scene.draw(board, 7);
+    scene.draw(board);
     scene.startMatch(playback);
     scene.showMatch(matchFrame(playback, 540));
-    scene.draw(board, 7);
+    scene.draw(board);
     const next = { ...playback, started: 540 };
     scene.startMatch(next);
     scene.showMatch(matchFrame(next, 700));
@@ -386,25 +386,27 @@ describe('new stack layout', () => {
         ['blue', 'red'], ['green', 'red', 'red', 'red'], ['gold', 'blue', 'green', 'gold'],
         ['blue', 'yellow', 'gold', 'green'], ['green', 'yellow', 'blue', 'gold', 'yellow'],
       ].slice(0, count),
-      score: count === 3 ? 1390 : 10460, level: count === 3 ? 2 : 8, rank: '',
-      capacity: count === 3 ? 6 : 8, nextLevelScore: count === 3 ? 1500 : 10500, movesLeft: 7, gameOver: false,
+      score: count === 3 ? 1390 : count === 4 ? 4400 : 10460,
+      level: count === 3 ? 2 : count === 4 ? 5 : 8, rank: '',
+      capacity: count + 3, nextLevelScore: count === 3 ? 1500 : count === 4 ? 4500 : 10500,
+      movesLeft: 7, gameOver: false,
     };
     const inserts: DoughInsert[] = [];
     const after = move(before, 0, 1, () => 0.2, dough => inserts.push(...dough));
     const match = beginMatch(before, after, 0, 1, 0, reduced)!;
     const started = match.arrivalMs + match.clearMs;
-    scene.draw(before, 7);
+    scene.draw(before);
     const oldViews = Array.from(scene['stacks']);
     const survivors = oldViews[2].pieces.slice();
     const oldLayout = scene['layout'];
-    const newLayout = layoutStacks(scene['fit'].height, count + 1);
+    const newLayout = layoutStacks(scene['fit'].height, count + 1, after.capacity);
     scene.startMatch(match);
     scene.showMatch(matchFrame(match, started));
-    scene.startStackUnlock(after, 7, inserts, started, reduced);
+    scene.startStackUnlock(after, inserts, started, reduced);
     return { scene, after, inserts, oldLayout, newLayout, oldViews, survivors, started };
   }
 
-  it.each([[3, 390], [5, 320]])(
+  it.each([[3, 390], [4, 390], [5, 320]])(
     'morphs %i stacks at %ipx through the old, intermediate and final coordinates while retaining their layers', (count, width) => {
       const { scene, after, inserts, oldLayout, newLayout, oldViews, survivors, started } = startUnlock(count, width, false);
       const views = scene['stacks'];
@@ -437,8 +439,8 @@ describe('new stack layout', () => {
 
       scene.showMove(started + STACK_UNLOCK_MS / 2);
       const mid = scene['layout'];
-      expect(mid.step).toBeCloseTo((oldLayout.step + newLayout.step) / 2);
-      expect(mid.donutWidth).toBeCloseTo((oldLayout.donutWidth + newLayout.donutWidth) / 2);
+      expect(mid.step).toBeCloseTo(count === 4 ? newLayout.step : (oldLayout.step + newLayout.step) / 2);
+      expect(mid.donutWidth).toBeCloseTo(count === 4 ? newLayout.donutWidth : (oldLayout.donutWidth + newLayout.donutWidth) / 2);
       expect(donut.width).toBeCloseTo(mid.donutWidth);
       expect(shadow.width).toBeCloseTo(mid.donutWidth * 1.04);
       expect(survivors[0].y - survivors[1].y).toBeCloseTo(mid.step);
@@ -508,7 +510,7 @@ describe('move presentation', () => {
 
   it('presses before selection and keeps the release hit area stable', () => {
     const scene = makeScene();
-    scene.draw(state, 7);
+    scene.draw(state);
     const gestures = new StackGestures(() => true, () => true);
     const stack = scene['stacks'][0];
     const point = { x: stack.slot.x, y: stack.slot.base };
@@ -535,7 +537,7 @@ describe('move presentation', () => {
 
   it('anchors the arrow to the lifted source and visible top or first empty seat', () => {
     const scene = makeScene();
-    scene.draw({ ...state, stacks: [['blue', 'red', 'green'], ['red'], []] }, 7);
+    scene.draw({ ...state, stacks: [['blue', 'red', 'green'], ['red'], []] });
     const arrow = scene['arrow'];
     const show = vi.spyOn(arrow, 'show');
     const [source, target, empty] = scene['stacks'];
@@ -593,7 +595,7 @@ describe('move presentation', () => {
 
   it('keeps wiggling after pointer cancellation and restores artwork on deselection or resize', () => {
     const scene = makeScene();
-    scene.draw(state, 7);
+    scene.draw(state);
     const gestures = new StackGestures(() => true, () => true);
     const stack = scene['stacks'][0];
     const point = scene.topPosition(0);
@@ -626,7 +628,7 @@ describe('move presentation', () => {
   it.each([[320, 568], [390, 662], [900, 760]])('clicks or taps the top glass of an empty stack at %i×%i', (width, height) => {
     const scene = makeScene();
     scene.resize(width, height);
-    scene.draw({ ...state, capacity: 5, stacks: [['gold', 'blue', 'red'], [], ['green']] }, 7);
+    scene.draw({ ...state, capacity: 5, stacks: [['gold', 'blue', 'red'], [], ['green']] });
     const [left, empty] = scene['stacks'];
     const glassTop = ({ x, y, height }: Sprite) => ({ x, y: y - height + 2 });
     const source = glassTop(left.vacancies);
@@ -653,7 +655,7 @@ describe('move presentation', () => {
       const scene = makeScene();
       scene.resize(width, height);
       scene.draw({ ...state, capacity: count === 3 ? 5 : 10,
-        stacks: Array.from({ length: count }, () => ['red', 'blue', 'green']) }, 7);
+        stacks: Array.from({ length: count }, () => ['red', 'blue', 'green']) });
       const { x, y, scale } = scene['fit'];
       const topCenter = (index: number) => {
         const { top } = scene['stacks'][index];
@@ -680,7 +682,7 @@ describe('move presentation', () => {
     const scene = makeScene();
     scene.resize(width, height);
     const stacks = [['gold'], [], ['green'], ['blue'], [], ['red'], Array<string>(10).fill('green'), ['gold']];
-    scene.draw({ ...state, capacity: 10, stacks }, 7);
+    scene.draw({ ...state, capacity: 10, stacks });
     const [, , , , empty, short, full] = scene['stacks'];
     const nearShort = { x: short.slot.x, y: short.vacancies.y - short.vacancies.height + 2 };
     expect(scene.hit(nearShort)).toBe(5);
@@ -702,15 +704,15 @@ describe('move presentation', () => {
     scene.root.destroy({ children: true });
   });
 
-  it('lands before a pressure refill pushes the receiving stack upward and settles', () => {
+  it('lands before a refill pushes the receiving stack upward and settles', () => {
     const scene = makeScene();
     const before = { ...state, stacks: [['blue', 'red', 'green', 'blue'], ['green'], ['red', 'green', 'red', 'green']] };
-    scene.draw(before, 7);
+    scene.draw(before);
     const start = scene.topPosition(0);
     let inserts: readonly DoughInsert[] = [];
     const resolved = move(before, 0, 1, () => 0, dough => { inserts = dough; });
     expect(inserts.map(insert => insert.stack)).toEqual([1, 0]);
-    scene.draw(resolved, 7);
+    scene.draw(resolved);
     const target = scene['stacks'][1];
     const [newDough, formerBase] = target.pieces;
     const top = target.top!;
@@ -719,12 +721,11 @@ describe('move presentation', () => {
     const step = scene['layout'].step;
     const atCapacity = { x: target.slot.x, y: base + 10 };
 
-    scene.startMove(inserts, 0, false, { to: 1, start, color: 'blue', pressure: { movesLeft: 7, limit: 7 } });
+    scene.startMove(inserts, 0, false, { to: 1, start, color: 'blue' });
     expect(scene['flight'].visible).toBe(true);
     expect(top.visible).toBe(false);
     expect(newDough.alpha).toBe(0);
     expect(formerBase.y).toBe(base);
-    expect(scene['pressure'].text).toBe('New dough');
 
     scene.showMove(FLIGHT_MS + 27);
     expect(scene['flight'].visible).toBe(false);
@@ -732,14 +733,12 @@ describe('move presentation', () => {
     expect(top.y).toBeCloseTo(finalY + step);
     expect(top.scale.y).toBeCloseTo(0.88);
     expect(newDough.alpha).toBe(0);
-    expect(scene['pressure'].text).toBe('New dough');
 
     scene.showMove(FLIGHT_MS + LAND_MS + 42);
     expect(newDough.alpha).toBeGreaterThan(0);
     expect(newDough.y).toBe(base);
     expect(formerBase.y).toBeLessThan(base);
     expect(target.refillCue.visible).toBe(true);
-    expect(scene['pressure'].text).toBe('New dough in 7');
     expect(scene.hit(atCapacity)).toBe(1);
 
     scene.finishMove();
@@ -752,26 +751,24 @@ describe('move presentation', () => {
     scene.root.destroy({ children: true });
   });
 
-  it('shows a stationary full pressure rail before the refill and resets it if play interrupts', () => {
+  it('delays a reduced-motion transfer refill, then fades it in or settles on interruption', () => {
     const scene = makeScene();
     const inserts = [{ stack: 1, depth: 0, color: 'red' }];
-    const transfer = { to: 1, start: { x: 100, y: 200 }, color: 'blue', pressure: { movesLeft: 7, limit: 7 } };
-    scene.draw({ ...state, movesLeft: 7 }, 7);
-    const { pieces } = scene['stacks'][1];
+    const transfer = { to: 1, start: { x: 100, y: 200 }, color: 'blue' };
+    scene.draw({ ...state, movesLeft: 7 });
+    const { pieces, refillCue } = scene['stacks'][1];
     const positions = pieces.map(piece => piece.y);
 
     scene.startMove(inserts, 0, true, transfer);
     scene.showMove(60);
-    expect(scene['pressure'].text).toBe('New dough');
     expect(scene['flight'].visible).toBe(false);
     expect(pieces[0].alpha).toBe(0);
     scene.finishMove();
-    expect(scene['pressure'].text).toBe('New dough in 7');
     expect(pieces.map(piece => piece.y)).toEqual(positions);
 
     scene.startMove(inserts, 100, true, transfer);
     scene.showMove(215);
-    expect(scene['pressure'].text).toBe('New dough in 7');
+    expect(refillCue.visible).toBe(true);
     expect(pieces.map(piece => piece.y)).toEqual(positions);
     expect(pieces.map(piece => piece.scale.y)).toEqual([1, 1]);
     expect(pieces[0].alpha).toBeGreaterThan(0.6);
@@ -781,7 +778,7 @@ describe('move presentation', () => {
   it('introduces repeated bottom inserts separately even when the donuts share a color', () => {
     const scene = makeScene();
     const inserts = [{ stack: 1, depth: 0, color: 'red' }, { stack: 1, depth: 0, color: 'red' }];
-    scene.draw({ ...state, stacks: [['blue'], ['red', 'red', 'red'], []] }, 7);
+    scene.draw({ ...state, stacks: [['blue'], ['red', 'red', 'red'], []] });
     const { pieces: [second, first, original], slot } = scene['stacks'][1];
 
     scene.startMove(inserts, 0, false);
@@ -803,7 +800,7 @@ describe('move presentation', () => {
 
   it('reveals top rescue dough in place in reduced motion before showing results', () => {
     const scene = makeScene();
-    scene.draw({ ...state, gameOver: true, stacks: [['blue'], ['green', 'red', 'red'], []] }, 7);
+    scene.draw({ ...state, gameOver: true, stacks: [['blue'], ['green', 'red', 'red'], []] });
     const { pieces } = scene['stacks'][1];
     const positions = pieces.map(piece => piece.y);
     scene.startMove([{ stack: 1, depth: 1, color: 'red' }, { stack: 1, depth: 2, color: 'red' }], 0, true);

@@ -15,14 +15,14 @@ const scene = vi.hoisted(() => ({
   root: { once: vi.fn() },
   toLocal: (point: Point) => point,
   hit: vi.fn(),
-  draw: vi.fn<(state: GameState, pressureLimit: number) => void>(),
+  draw: vi.fn<(state: GameState) => void>(),
   showResults: vi.fn<(view: ResultsView | null) => void>(),
   drawScore: vi.fn<(display: ScoreDisplay) => void>(),
   creditScore: vi.fn(), reachScoreGoal: vi.fn(), startLevelCelebration: vi.fn(),
   showScoreEffects: vi.fn(), cancelScoreEffects: vi.fn(),
   resize: vi.fn(), startMatch: vi.fn(), showMatch: vi.fn(), showMatchTail: vi.fn(), cancelMatch: vi.fn(),
   startMove: vi.fn(), showMove: vi.fn(), finishMove: vi.fn(), moveAnimating: false,
-  startStackUnlock: vi.fn<(state: GameState, pressureLimit: number, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
+  startStackUnlock: vi.fn<(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
   finishStackUnlock: vi.fn(), stackUnlockAnimating: false,
   showInteraction: vi.fn(), topPosition: vi.fn(),
 }));
@@ -64,7 +64,7 @@ async function setup(reduced = false) {
   };
   scene.startMove.mockImplementation((inserts: readonly DoughInsert[], started: number, reduced: boolean) =>
     startRefills(scene.draw.mock.lastCall![0], inserts, started, reduced));
-  scene.startStackUnlock.mockImplementation((state, _limit, inserts, now, reduced) => {
+  scene.startStackUnlock.mockImplementation((state, inserts, now, reduced) => {
     unlockEnds = now + (reduced ? 0 : STACK_UNLOCK_MS);
     scene.stackUnlockAnimating = !reduced;
     startRefills(state, inserts, now, reduced);
@@ -95,11 +95,38 @@ async function setup(reduced = false) {
   const tap = (x: number) => { pointer('pointerdown', x); pointer('pointerup', x); };
   const match = () => { tap(50); tap(150); };
   const tick = (age: number) => { now = age; ticker.add.mock.lastCall![0](); };
-  return { window, renderer, pointer, tap, match, tick, motion, localStorage,
+  return { window, renderer, screen: app.screen, pointer, tap, match, tick, motion, localStorage,
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
 
 describe('game view match playback', () => {
+  it('keeps an idle selection through a height-only viewport change between touches', async () => {
+    const { pointer, renderer, screen } = await setup();
+    pointer('pointerdown', 50, 1, 'touch');
+    pointer('pointerup', 50, 1, 'touch');
+    screen.height -= 57;
+    renderer.emit('resize');
+    pointer('pointerdown', 250, 1, 'touch');
+    pointer('pointerup', 250, 1, 'touch');
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual([0, 2]);
+  });
+
+  it.each(['active touch', 'width change', 'large height change'])('cancels input on resize with %s', async scenario => {
+    const { pointer, renderer, screen } = await setup();
+    const touch = (type: string, x: number) => pointer(type, x, 1, 'touch');
+    touch('pointerdown', 50);
+    touch('pointerup', 50);
+    if (scenario === 'active touch') touch('pointerdown', 250);
+    if (scenario === 'width change') screen.width += 20;
+    screen.height -= scenario === 'large height change' ? 120 : 57;
+    renderer.emit('resize');
+    expect(scene.showInteraction.mock.lastCall?.[0].source).toBeNull();
+    if (scenario !== 'active touch') touch('pointerdown', 250);
+    touch('pointerup', 250);
+    expect(move).not.toHaveBeenCalled();
+  });
+
   it('guides idle mouse hover and clears on the source, offboard, canvas leave, blur, resize and explicit cancel', async () => {
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, stacks: [...initial.stacks.slice(0, 2), Array<string>(6).fill('blue')] });
     scene.hit.mockImplementation(({ x }: Point) => x > 400 ? 'outside' : x === 190 ? null : Math.floor(x / 100));
@@ -214,7 +241,7 @@ describe('game view match playback', () => {
 
     tick(540);
     expect(scene.showMatch.mock.lastCall?.[0].phase).toBe('resolved');
-    const [resolved, , inserts, now, reduced] = scene.startStackUnlock.mock.lastCall!;
+    const [resolved, inserts, now, reduced] = scene.startStackUnlock.mock.lastCall!;
     expect(resolved).toMatchObject({ score: 1555, level: 3 });
     expect(resolved.stacks[3]).toHaveLength(Math.floor(resolved.capacity / 2));
     expect(new Set(resolved.stacks[3].slice(-2)).size).toBe(2);
@@ -353,10 +380,10 @@ describe('game view match playback', () => {
     match();
     expect(scene.startMatch).not.toHaveBeenCalled();
     expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ score: initial.score, movesLeft: 6 });
-    expect(scene.startMove).toHaveBeenCalledWith([], 0, false, expect.objectContaining({ pressure: undefined }));
+    expect(scene.startMove).toHaveBeenCalledWith([], 0, false, expect.objectContaining({ to: 1 }));
   });
 
-  it('starts pressure playback on the triggering transfer and accepts the next move before it finishes', async () => {
+  it('starts refill playback on the triggering transfer and accepts the next move before it finishes', async () => {
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, movesLeft: 1 });
     const { pointer, tap, tick } = await setup();
     pointer('pointerdown', 50);
@@ -365,8 +392,9 @@ describe('game view match playback', () => {
     pointer('pointerup', 250);
     expect(scene.startMove).toHaveBeenCalledWith(
       [expect.objectContaining({ stack: 0, depth: 0 })], 0, false,
-      expect.objectContaining({ to: 2, pressure: { movesLeft: 7, limit: 1 } }),
+      expect.objectContaining({ to: 2 }),
     );
+    expect(scene.draw.mock.lastCall?.[0].movesLeft).toBe(7);
     tick(50);
     scene.finishMove.mockClear();
     tap(250);

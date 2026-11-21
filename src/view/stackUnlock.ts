@@ -14,16 +14,25 @@ function mix(from: number, to: number, t: number): number {
 
 export function stackUnlockFrame(before: StackLayout, after: StackLayout, age: number) {
   const time = unit(age / STACK_UNLOCK_MS);
-  const progress = ease(time);
-  const splitsRows = before.slots.length === 5 && after.slots.length === 6;
-  // Open the gap between the two rows before sliding stacks across one another.
-  const across = splitsRows ? ease((time - 0.12) / 0.88) : progress;
-  const down = splitsRows ? ease(time / 0.79) : progress;
-  const slots = before.slots.map((slot, index) => ({
-    ...slot, x: mix(slot.x, after.slots[index].x, across), base: mix(slot.base, after.slots[index].base, down),
-  }));
-  // Give the neighboring stack time to clear the space occupied by the new tray.
-  const entrance = ease((time - 0.63) / 0.34);
+  const splitsRows = before.slots.length === 4 && after.slots.length === 5;
+  const movesLeftStackDown = before.slots.length === 5 && after.slots.length === 6;
+  const progress = splitsRows ? ease(time / 0.5) : ease(time);
+  const slots = before.slots.map((slot, index) => {
+    let across = progress;
+    let vertical = progress;
+    if (splitsRows) {
+      // Separate the rows first so the lateral moves have room.
+      across = ease((time - 0.5) / 0.34);
+    } else if (movesLeftStackDown) {
+      // Open the lower-left slot, move stack zero down, then slide the upper row left.
+      if (index === 0) vertical = ease((time - 0.17) / 0.49);
+      else if (index <= 2) across = ease(time / 0.36);
+      else across = ease((time - 0.6) / 0.26);
+    }
+    return { ...slot, x: mix(slot.x, after.slots[index].x, across),
+      base: mix(slot.base, after.slots[index].base, vertical) };
+  });
+  const entrance = splitsRows || movesLeftStackDown ? ease((time - 0.8) / 0.19) : ease((time - 0.63) / 0.34);
   return {
     layout: {
       donutWidth: mix(before.donutWidth, after.donutWidth, progress),

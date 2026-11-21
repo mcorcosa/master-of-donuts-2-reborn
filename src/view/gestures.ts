@@ -19,7 +19,8 @@ interface Press {
   swipeDistanceSquared: number;
   destinationDistanceSquared: number;
   maxDistanceSquared: number;
-  stayedOnTarget: boolean;
+  neighbor: number | null;
+  destinationGrace: boolean;
 }
 
 const DESTINATION_TAP_GRACE = 6;
@@ -70,7 +71,7 @@ export class StackGestures {
       id, origin: point, target, hover: target, dragged: false,
       swipeDistanceSquared: swipeDistance ** 2,
       destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
-      maxDistanceSquared: 0, stayedOnTarget: true,
+      maxDistanceSquared: 0, neighbor: null, destinationGrace: destinationTap,
     };
     return true;
   }
@@ -84,9 +85,14 @@ export class StackGestures {
       const dx = point.x - press.origin.x;
       const dy = point.y - press.origin.y;
       press.maxDistanceSquared = Math.max(press.maxDistanceSquared, dx * dx + dy * dy);
-      press.stayedOnTarget &&= target === press.target;
-      // Crossing a target boundary revokes the grace even after returning to the press point.
-      const threshold = press.stayedOnTarget ? press.destinationDistanceSquared : press.swipeDistanceSquared;
+      if (press.destinationGrace) {
+        // Allow one nearby boundary crossing, but drop grace on an out-and-back or a gap.
+        if (target === press.target) press.destinationGrace = press.neighbor === null;
+        else if (typeof target !== 'number' || (press.neighbor !== null && press.neighbor !== target)) {
+          press.destinationGrace = false;
+        } else press.neighbor = target;
+      }
+      const threshold = press.destinationGrace ? press.destinationDistanceSquared : press.swipeDistanceSquared;
       press.dragged = press.maxDistanceSquared >= threshold;
     }
     press.hover = target;

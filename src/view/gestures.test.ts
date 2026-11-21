@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { StackGestures, type Target } from './gestures';
 import { contains, layoutStacks, stackHit, STACK_LIFT, viewport } from './layout';
+import { STACK_UNLOCK_MS, stackUnlockFrame } from './stackUnlock';
 
 const left = { x: 48, y: 100 };
 const middle = { x: 150, y: 100 };
@@ -70,13 +71,24 @@ describe('stack gestures', () => {
     expect(gestures.source).toBe(0);
   });
 
-  it('drops destination grace after crossing another target and previews the real swipe', () => {
+  it.each([2, 3])('keeps the destination tap after 13px of boundary drift into stack %i', neighbor => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    const press = { x: 150, y: 228 };
+    const release = { x: 163, y: 228 };
+    gestures.start(1, press, 1, 12);
+    gestures.update(1, release, neighbor);
+    expect(gestures.dragSource).toBeNull();
+    expect(gestures.finish(1, release, neighbor)).toEqual({ kind: 'move', from: 0, to: 1 });
+  });
+
+  it('previews a longer cross-stack swipe and cancels an out-and-back swipe', () => {
     const gestures = fixture();
     tap(gestures, 0);
     gestures.start(1, right, 3, 12);
     gestures.update(1, { x: right.x + 13, y: right.y }, 3);
     expect(gestures.pressedStack).toBe(3);
-    const neighboring = { x: right.x + 10, y: right.y };
+    const neighboring = { x: right.x + 19, y: right.y };
     gestures.update(1, neighboring, 1);
     expect(gestures.source).toBe(3);
     expect(gestures.destination).toBe(1);
@@ -84,7 +96,7 @@ describe('stack gestures', () => {
 
     tap(gestures, 0);
     gestures.start(1, right, 3, 12);
-    gestures.update(1, neighboring, 1);
+    gestures.update(1, { x: right.x + 13, y: right.y }, 1);
     expect(gestures.finish(1, { x: right.x + 13, y: right.y }, 3)).toBeNull();
     expect(gestures.source).toBe(0);
   });
@@ -185,7 +197,7 @@ describe('stack gestures', () => {
   it.each([
     { count: 3, lower: 3, capacity: 6 },
     { count: 4, lower: 4, capacity: 7 },
-    { count: 5, lower: 5, capacity: 8 },
+    { count: 5, lower: 2, capacity: 8 },
     { count: 6, lower: 3, capacity: 9 },
     { count: 7, lower: 3, capacity: 10 },
     { count: 8, lower: 4, capacity: 10 },
@@ -204,33 +216,85 @@ describe('stack gestures', () => {
       expect(contains(hits[index], { x: slot.x, y: slot.base + 11 })).toBe(true);
     });
 
-    for (const row of [slots.slice(0, lower), slots.slice(lower)].filter(row => row.length > 0)) {
+    const lowerBase = Math.max(...slots.map(slot => slot.base));
+    const lowerRow = slots.filter(slot => slot.base === lowerBase);
+    const upperRow = slots.filter(slot => slot.base < lowerBase);
+    expect(lowerRow).toHaveLength(lower);
+    for (const row of [lowerRow, upperRow].filter(row => row.length > 0)) {
       expect((row[0].x + row.at(-1)!.x) / 2).toBeCloseTo(200);
       expect(new Set(row.map(slot => slot.base)).size).toBe(1);
       expect(row.map(slot => slot.x)).toEqual(row.map(slot => slot.x).sort((a, b) => a - b));
     }
-    if (lower < count) expect(slots[lower].base).toBeLessThan(slots[0].base);
   });
+
+  it('centers the five-stack pair and keeps identities when the left stack moves down at six', () => {
+    const { height } = viewport(390, 662);
+    const five = layoutStacks(height, 5, 7);
+    const expanded = layoutStacks(height, 5, 8);
+    const six = layoutStacks(height, 6, 8);
+    expect(five.slots.map(slot => slot.x)).toEqual(expanded.slots.map(slot => slot.x));
+    expect(five.donutWidth).toBeGreaterThan(expanded.donutWidth);
+    expect(five.slots[0].base).toBeLessThan(five.slots[1].base);
+    expect(five.slots[1].base).toBe(five.slots[2].base);
+    expect(five.slots[0].base).toBe(five.slots[3].base);
+    expect(five.slots[3].base).toBe(five.slots[4].base);
+    expect(five.slots[0].x).toBe(six.slots[0].x);
+    expect(six.slots[0].base).toBe(six.slots[1].base);
+  });
+
+  it.each([[320, 568], [390, 662], [390, 844]])(
+    'keeps full columns from crossing during both split unlocks at %i × %i', (width, height) => {
+      const fit = viewport(width, height);
+      for (const [count, capacity] of [[4, 7], [5, 8]]) {
+        const before = layoutStacks(fit.height, count, capacity);
+        const after = layoutStacks(fit.height, count + 1, capacity);
+        for (let age = 0; age <= STACK_UNLOCK_MS; age += 2) {
+          const { layout, entrance, trayScale, trayOffset } = stackUnlockFrame(before, after, age);
+          const footprint = (x: number, base: number, width: number, donutHeight: number, step: number, depth: number) => ({
+            left: x - width * 0.52, right: x + width * 0.52,
+            top: base - donutHeight - (depth - 1) * step, bottom: base + 20,
+          });
+          const columns = layout.slots.map(({ x, base }) =>
+            footprint(x, base, layout.donutWidth, layout.donutHeight, layout.step, capacity));
+          if (entrance) {
+            const { x, base } = after.slots[count];
+            columns.push(footprint(x, base + trayOffset, after.donutWidth * trayScale,
+              after.donutHeight * trayScale, after.step * trayScale, Math.floor(capacity / 2)));
+          }
+          for (const [index, a] of columns.entries()) {
+            for (const b of columns.slice(index + 1)) {
+              const overlaps = a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+              expect(overlaps, `${count}→${count + 1} at ${age} ms`).toBe(false);
+            }
+          }
+        }
+      }
+    },
+  );
 
   it('uses the extra horizontal room available to formations with fewer columns', () => {
     const { height } = viewport(390, 662);
     const widths = [3, 4, 5, 6, 7, 8].map(count => layoutStacks(height, count).donutWidth);
     expect(widths[0]).toBeGreaterThan(widths[1]);
     expect(widths[1]).toBeGreaterThan(widths[2]);
-    expect(widths[3]).toBeGreaterThan(widths[2]);
+    expect(widths[3]).toBeLessThan(widths[2]);
     expect(widths[3]).toBeGreaterThan(widths[4]);
     expect(widths[4]).toEqual(widths[5]);
   });
 
-  it('reveals more pastry in tall or sparse formations while keeping dense stacks seated', () => {
-    const opening = layoutStacks(viewport(390, 662).height, 3);
-    const compact = layoutStacks(viewport(390, 540).height, 3);
-    const late = layoutStacks(viewport(320, 568).height, 8);
-    const tallLate = layoutStacks(viewport(320, 720).height, 8);
-    expect(opening.donutWidth).toBe(compact.donutWidth);
-    expect(opening.step / opening.donutHeight).toBeCloseTo(0.4784, 4);
-    expect(compact.step).toBeLessThan(opening.step);
-    expect(late.step / late.donutHeight).toBeCloseTo(0.2576, 4);
-    expect(tallLate.step).toBeGreaterThan(late.step);
-  });
+  it.each([[390, 540], [390, 662], [320, 568], [320, 720]])(
+    'keeps the same donut proportions and fits the full stack at %i × %i', (width, height) => {
+      const fit = viewport(width, height);
+      for (const count of [3, 4, 5, 6, 7, 8]) {
+        const { slots, donutHeight, step } = layoutStacks(fit.height, count);
+        const capacity = Math.min(10, count + 3);
+        expect(step / donutHeight).toBeCloseTo(0.4784, 8);
+        for (const slot of slots) {
+          const crown = slot.base - (capacity - 1) * step - donutHeight - STACK_LIFT;
+          expect(crown - slot.hit.y).toBeGreaterThanOrEqual(4.9999);
+          expect(slot.hit.y + slot.hit.height - (slot.base + 20)).toBeGreaterThanOrEqual(4.9999);
+        }
+      }
+    },
+  );
 });

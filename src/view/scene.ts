@@ -2,7 +2,7 @@ import { Assets, Container, DOMAdapter, Graphics, Sprite, Text, Texture } from '
 import type { DoughInsert, GameState } from '../game';
 import type { Point, StackGestures, Target } from './gestures';
 import {
-  BOARD_TOP, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
+  BOARD_FOOTER_SPACE, BOARD_TOP, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
   stackTarget, VIEW_WIDTH, viewport,
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
@@ -23,7 +23,7 @@ const GOLD = 0xab591a;
 const MINT = 0x237d61;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
-const REDUCED_PRESSURE_MS = 110;
+const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
 const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
@@ -49,7 +49,6 @@ interface Transfer {
   to: number;
   start: Point;
   color: string;
-  pressure?: { movesLeft: number; limit: number };
 }
 
 interface MovePresentation {
@@ -57,7 +56,6 @@ interface MovePresentation {
   reduced: boolean;
   refills: ReturnType<typeof refillPlan>;
   refillDelay: number;
-  pendingPressure?: Transfer['pressure'];
   transfer?: Transfer & { landing: Point };
 }
 
@@ -172,8 +170,6 @@ export class GameScene {
   private readonly matchEffects = new Container();
   private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar: ScoreBar;
-  private readonly pressure: Text;
-  private readonly beads = new Graphics();
   private readonly status: Text;
   private readonly results: ResultsPanel;
   private readonly scrim = new Graphics({ visible: false });
@@ -222,8 +218,7 @@ export class GameScene {
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
     logo.anchor.set(0.5);
     logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
-    this.hud.addChild(this.scoreBar.root, this.beads);
-    this.pressure = label(this.hud, '', 22, CENTER, 0);
+    this.hud.addChild(this.scoreBar.root);
     this.status = label(this.hud, '', 15, CENTER, 0);
 
     this.overlay.addChild(this.results.root);
@@ -244,9 +239,7 @@ export class GameScene {
     this.kitchen.scale.set(cover);
     this.kitchen.position.set(width / 2, height / 2);
     this.scrim.clear().rect(0, 0, width, height).fill({ color: 0x4e2019, alpha: 0.6 });
-    this.pressure.y = this.fit.height - 56;
-    this.beads.position.set(CENTER, this.fit.height - 28);
-    this.status.y = this.fit.height - 84;
+    this.status.y = this.fit.height - BOARD_FOOTER_SPACE / 2;
     this.results.resize(this.fit.height);
   }
 
@@ -255,38 +248,17 @@ export class GameScene {
     if (view) this.results.show(view, this.fit.height);
   }
 
-  private drawPressure(movesLeft: number, pressureLimit: number): void {
-    this.pressure.text = movesLeft === 0 ? 'New dough' : `New dough in ${movesLeft}`;
-    const rail = 188;
-    this.beads.clear()
-      .roundRect(-rail / 2, -2.5, rail, 6, 3).fill(0xac6045)
-      .roundRect(-rail / 2, -2.5, rail, 2, 1).fill(0xe5936d);
-    for (let index = 0; index < pressureLimit; index++) {
-      const x = -rail / 2 + index * rail / (pressureLimit - 1);
-      const filled = index < pressureLimit - movesLeft;
-      this.beads.circle(x, 1.5, 7).fill({ color: 0x993f29, alpha: 0.22 })
-        .circle(x, 0, 6.8).fill(filled ? 0xf6ae15 : 0xf2ba9e)
-        .stroke({ color: filled ? 0xb66b15 : 0xb77861, width: 1 })
-        .ellipse(x - 1, -2.2, 3.4, 1.6).fill(filled ? 0xffdc62 : 0xffdcc2);
-    }
-  }
-
-  draw(state: GameState, pressureLimit: number): void {
+  draw(state: GameState): void {
     this.finishMove();
     this.finishStackUnlock();
     this.hideMoveGuides();
     this.capacity = state.capacity;
     for (const child of this.board.removeChildren()) child.destroy({ children: true });
-    this.layout = layoutStacks(this.fit.height, state.stacks.length);
+    this.layout = layoutStacks(this.fit.height, state.stacks.length, state.capacity);
     this.vacancyArt.keepStrides(this.layout.step / this.layout.donutHeight);
     this.stacks = state.stacks.map((colors, index) => this.createStack(colors, this.layout.slots[index], this.layout));
     this.updateVacancies();
-    this.drawBoardStatus(state, pressureLimit);
-  }
-
-  private drawBoardStatus(state: GameState, pressureLimit: number): void {
     this.gameOver = state.gameOver;
-    this.drawPressure(state.movesLeft, pressureLimit);
   }
 
   private createDonut(group: Container, color: string): Container {
@@ -340,9 +312,9 @@ export class GameScene {
     view.topY = view.top?.y ?? slot.base;
   }
 
-  startStackUnlock(state: GameState, pressureLimit: number, inserts: readonly DoughInsert[], now: number, reduced: boolean): void {
+  startStackUnlock(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean): void {
     const before = this.layout;
-    const after = layoutStacks(this.fit.height, state.stacks.length);
+    const after = layoutStacks(this.fit.height, state.stacks.length, state.capacity);
     const refills = refillPlan(state.stacks.map(stack => stack.length), inserts);
     this.hideMoveGuides();
     this.capacity = state.capacity;
@@ -376,7 +348,7 @@ export class GameScene {
       added.group.visible = reduced;
       this.stacks.push(added);
     }
-    this.drawBoardStatus(state, pressureLimit);
+    this.gameOver = state.gameOver;
     if (inserts.length) this.playMove(refills, now, reduced);
     else this.showMove(now);
     if (reduced) {
@@ -564,10 +536,9 @@ export class GameScene {
   }
 
   private playMove(refills: MovePresentation['refills'], started: number, reduced: boolean, transfer?: Transfer): void {
-    const pendingPressure = transfer?.pressure;
-    const refillDelay = transfer && !reduced ? FLIGHT_MS + LAND_MS : pendingPressure ? REDUCED_PRESSURE_MS : 0;
-    this.movePresentation = { started, reduced, refills, refillDelay, pendingPressure };
-    if (pendingPressure) this.drawPressure(0, pendingPressure.limit);
+    const transferDelay = reduced ? REDUCED_TRANSFER_REFILL_DELAY_MS : FLIGHT_MS + LAND_MS;
+    const refillDelay = transfer ? transferDelay : 0;
+    this.movePresentation = { started, reduced, refills, refillDelay };
     if (transfer && !reduced) {
       const { slot, pieces } = this.stacks[transfer.to];
       const depth = refills.stacks.get(transfer.to)?.at(-1)?.depth ?? pieces.length - 1;
@@ -590,7 +561,6 @@ export class GameScene {
     const { donutHeight, step } = this.layout;
     const age = now - started;
     const refillAge = age - refillDelay;
-    if (move.pendingPressure && refillAge >= 0) this.resetPressure(move);
     if (refillAge >= refillDuration(refills.duration, reduced)) {
       this.finishMove();
       return;
@@ -638,7 +608,6 @@ export class GameScene {
   finishMove(): void {
     const move = this.movePresentation;
     if (!move) return;
-    this.resetPressure(move);
     for (const index of move.refills.stacks.keys()) {
       const { slot, pieces, refillCue } = this.stacks[index];
       refillCue.visible = false;
@@ -656,13 +625,6 @@ export class GameScene {
     this.flight.visible = false;
     this.movePresentation = null;
     this.updateVacancies();
-  }
-
-  private resetPressure(move: MovePresentation): void {
-    const pressure = move.pendingPressure;
-    if (!pressure) return;
-    this.drawPressure(pressure.movesLeft, pressure.limit);
-    move.pendingPressure = undefined;
   }
 
   startMatch(match: MatchPlayback): void {

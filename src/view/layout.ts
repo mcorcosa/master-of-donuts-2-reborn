@@ -15,16 +15,14 @@ export type StackLayout = ReturnType<typeof layoutStacks>;
 
 export const VIEW_WIDTH = 400;
 export const BOARD_TOP = 124;
-export const BOARD_FOOTER_SPACE = 94;
+export const BOARD_FOOTER_SPACE = 36;
 export const STACK_LIFT = 6;
 
 const BOARD_INSET = 12;
 const BASE_HIT_DEPTH = 20;
 const ROW_PADDING = 5;
 const DONUT_ASPECT = 320 / 430;
-const WIDTH_FIT_STEP_RATIO = 0.28;
-const MAX_STEP_RATIO = 0.52;
-const STEP_SCALE = 0.92;
+const DONUT_STEP_RATIO = 0.52 * 0.92;
 const TAP_SLOP = 14;
 const SWIPE_SLOP = 22;
 
@@ -41,23 +39,22 @@ export function viewport(width: number, height: number) {
   };
 }
 
-export function layoutStacks(height: number, count: number) {
-  // The game numbers the lower row first when it splits a formation.
-  const rows = count < 6 ? [count] : [Math.floor(count / 2), Math.ceil(count / 2)];
+export function layoutStacks(height: number, count: number, capacity = Math.min(10, count + 3)) {
+  // Compute two-row formations from the lower row up.
+  const rows = count < 5 ? [count] : [Math.floor(count / 2), Math.ceil(count / 2)];
   const rowHeight = (height - BOARD_TOP - BOARD_FOOTER_SPACE) / rows.length;
   const cellWidth = (VIEW_WIDTH - BOARD_INSET * 2) / Math.max(...rows);
-  // Reserve the last capacity reached at this stack count to keep upgrades stable.
-  const maxCapacity = Math.min(10, count + 3);
-  const stackHeightRatio = DONUT_ASPECT * (1 + (maxCapacity - 1) * WIDTH_FIT_STEP_RATIO);
+  // Five stacks use their current capacity. Other formations reserve their next capacity.
+  const maxCapacity = count === 5 ? capacity : Math.min(10, count + 3);
+  const stackHeightRatio = DONUT_ASPECT * (1 + (maxCapacity - 1) * DONUT_STEP_RATIO);
   const usableRowHeight = rowHeight - ROW_PADDING * 2 - STACK_LIFT - BASE_HIT_DEPTH;
   const donutWidth = Math.min(cellWidth - 8, usableRowHeight / stackHeightRatio);
   const donutHeight = donutWidth * DONUT_ASPECT;
-  const availableStep = (usableRowHeight - donutHeight) / (maxCapacity - 1);
-  const step = STEP_SCALE * Math.min(donutHeight * MAX_STEP_RATIO, availableStep);
+  const step = donutHeight * DONUT_STEP_RATIO;
   const stackHeight = donutHeight + (maxCapacity - 1) * step;
   const typicalStackHeight = donutHeight + (stackHeight - donutHeight) * 0.75;
   const centeredBase = (rowHeight + typicalStackHeight + STACK_LIFT - BASE_HIT_DEPTH) / 2;
-  const slots: StackSlot[] = rows.flatMap((columns, index) => {
+  const rowSlots: StackSlot[] = rows.flatMap((columns, index) => {
     const rowTop = BOARD_TOP + (rows.length - 1 - index) * rowHeight;
     const base = rowTop + Math.max(centeredBase, ROW_PADDING + STACK_LIFT + stackHeight);
     const rowLeft = (VIEW_WIDTH - columns * cellWidth) / 2;
@@ -70,6 +67,8 @@ export function layoutStacks(height: number, count: number) {
       };
     });
   });
+  // Give stack zero the leftmost column in both formations so it can move down at six.
+  const slots = count === 5 ? [rowSlots[2], rowSlots[0], rowSlots[1], rowSlots[3], rowSlots[4]] : rowSlots;
   return { slots, donutWidth, donutHeight, step };
 }
 

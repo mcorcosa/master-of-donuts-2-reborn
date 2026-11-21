@@ -11,6 +11,7 @@ import { type Feedback, GameScene, loadArt } from './scene';
 import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
 
 const TOUCH_SWIPE_DISTANCE = 12;
+const BROWSER_CHROME_HEIGHT_CHANGE = 96;
 const MIN_CREDIT_SPACING_MS = 55;
 
 interface LevelReveal {
@@ -67,8 +68,8 @@ export async function mountGame(app: Application): Promise<void> {
   const levels: LevelReveal[] = [];
   let unsettledLevel: LevelReveal | null = null;
   let celebrationEnds = 0;
-  const pressureLimit = state.movesLeft;
   let feedback: Feedback | null = null;
+  let renderedSize: { width: number; height: number } | null = null;
   let pending: { playback: MatchPlayback; level: LevelReveal | null; inserts: readonly DoughInsert[] } | null = null;
   let arrowPointer: { point: Point; destination: number | null } | null = null;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -84,7 +85,7 @@ export async function mountGame(app: Application): Promise<void> {
   }
 
   function draw(): void {
-    scene.draw(state, pressureLimit);
+    scene.draw(state);
     updateInteraction();
   }
 
@@ -159,9 +160,15 @@ export async function mountGame(app: Application): Promise<void> {
   }
 
   function resize(): void {
-    gestures.reset();
+    const { width, height } = app.screen;
+    const heightChange = renderedSize ? Math.abs(height - renderedSize.height) : 0;
+    const canRetainSelection = renderedSize?.width === width && heightChange > 0 &&
+      heightChange <= BROWSER_CHROME_HEIGHT_CHANGE && !gestures.active && !pending &&
+      !scene.moveAnimating && !scene.stackUnlockAnimating;
+    if (!canRetainSelection) gestures.reset();
+    renderedSize = { width, height };
     cancelPresentation();
-    scene.resize(app.screen.width, app.screen.height);
+    scene.resize(width, height);
     draw();
     showResultsIfSettled();
   }
@@ -263,11 +270,9 @@ export async function mountGame(app: Application): Promise<void> {
       if (state.score !== before.score || level) resetScore();
       const start = scene.topPosition(from);
       const color = before.stacks[from].at(-1)!;
-      const pressure = inserts.length && state.movesLeft > before.movesLeft
-        ? { movesLeft: state.movesLeft, limit: pressureLimit } : undefined;
       feedback = { target: to, started, duration: 280, color };
       draw();
-      scene.startMove(inserts, started, motion.matches, { to, start, color, pressure });
+      scene.startMove(inserts, started, motion.matches, { to, start, color });
       return;
     }
     if (action?.kind === 'blocked') {
@@ -301,7 +306,7 @@ export async function mountGame(app: Application): Promise<void> {
       if (frame.phase === 'resolved') {
         pending = null;
         if (level?.details.upgrade?.kind === 'stack') {
-          scene.startStackUnlock(state, pressureLimit, inserts, now, playback.reduced);
+          scene.startStackUnlock(state, inserts, now, playback.reduced);
         } else {
           draw();
           scene.startMove(inserts, now, playback.reduced);
