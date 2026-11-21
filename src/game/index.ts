@@ -324,8 +324,8 @@ function isGameOver(state: RunState): boolean {
   return space <= count + 1 && !canEscapePressure(state, space, count);
 }
 
-function hasQuickScore({ stacks, capacity, movesLeft }: GameState): boolean {
-  if (hasScoringMove(stacks, capacity)) return true;
+function hasQuickScore<T>(stacks: T[][], capacity: number, movesLeft: number, canScore: () => boolean): boolean {
+  if (canScore()) return true;
   if (movesLeft <= 1) return false;
 
   // Check one setup move while it is still safe to miss without a pressure refill.
@@ -336,13 +336,82 @@ function hasQuickScore({ stacks, capacity, movesLeft }: GameState): boolean {
       if (source === target || target.length >= capacity) continue;
       source.pop();
       target.push(incoming);
-      const canScore = hasScoringMove(stacks, capacity);
+      const scoring = canScore();
       target.pop();
       source.push(incoming);
-      if (canScore) return true;
+      if (scoring) return true;
     }
   }
   return false;
+}
+
+type FreshDough = { color: string; matchColor?: string };
+type RefillPiece = string | FreshDough;
+
+function completesScoringMove(stacks: RefillPiece[][], capacity: number, colors: string[], match: string): boolean {
+  for (const target of stacks) {
+    if (target.length < 2 || target.length >= capacity) continue;
+    const lower = target[target.length - 2];
+    const upper = target[target.length - 1];
+    const lowerColor = typeof lower === 'string' && lower !== JOKER ? lower : undefined;
+    const upperColor = typeof upper === 'string' && upper !== JOKER ? upper : undefined;
+    if (lowerColor !== undefined && upperColor !== undefined && lowerColor !== upperColor) continue;
+    for (const source of stacks) {
+      const incoming = source.at(-1);
+      if (source === target || incoming === undefined) continue;
+      const donorColor = typeof incoming === 'string' && incoming !== JOKER ? incoming : undefined;
+      const color = lowerColor ?? upperColor ?? donorColor ?? match;
+      if (donorColor !== undefined && donorColor !== color) continue;
+      const fresh = [lower, upper, incoming].filter(piece => typeof piece !== 'string');
+      if (fresh.length && !colors.includes(color)) continue;
+      const pair = [typeof lower === 'string' ? lower : color, typeof upper === 'string' ? upper : color];
+      if (resolveMatch(pair, typeof incoming === 'string' ? incoming : color) === null) continue;
+      for (const piece of fresh) piece.matchColor = color;
+      return true;
+    }
+  }
+  return false;
+}
+
+function findBottomRefill(state: GameState, trial: DoughInsert[], colors: string[], match: string): DoughInsert[] | null {
+  const { capacity, movesLeft } = state;
+  const stacks: RefillPiece[][] = state.stacks.map(stack => stack.slice());
+  const dough: FreshDough[] = trial.map(({ color }) => ({ color: color === JOKER ? match : color }));
+  const placements = trial.map(({ stack }) => stack);
+
+  // Each layout needs a single color decision for the fresh pieces in the scoring triple.
+  // Search stack placements independently of the palette, then color only the pieces the route needs.
+  const canScore = () => completesScoringMove(stacks, capacity, colors, match);
+  for (const [index, stack] of placements.entries()) stacks[stack].unshift(dough[index]);
+  const samePlacement = canScore();
+  for (const stack of placements) stacks[stack].shift();
+
+  const search = (depth: number, firstStack: number, budget: number): boolean => {
+    if (depth === dough.length) return hasQuickScore(stacks, capacity, budget, canScore);
+    for (let index = firstStack; index < stacks.length; index++) {
+      const stack = stacks[index];
+      if (stack.length === capacity) continue;
+      placements[depth] = index;
+      stack.unshift(dough[depth]);
+      const found = search(depth + 1, index, budget);
+      stack.shift();
+      if (found) return true;
+    }
+    return false;
+  };
+
+  if (!samePlacement && !search(0, 0, 1) && (movesLeft <= 1 || !search(0, 0, movesLeft))) return null;
+  for (const [index, stack] of placements.entries()) stacks[stack].unshift(dough[index]);
+  // Vary any spare dough that would complete a resting triple in a rebuilt stack.
+  for (const stack of stacks) {
+    const top = stack.slice(-3);
+    const spare = top.find(piece => typeof piece !== 'string' && piece.matchColor === undefined);
+    if (!spare || typeof spare === 'string' || top.length < 3) continue;
+    const [lower, upper, incoming] = top.map(piece => typeof piece === 'string' ? piece : piece.matchColor ?? piece.color);
+    const match = resolveMatch([lower, upper], incoming);
+    if (match) spare.color = colors.find(color => color !== match.color) ?? spare.color;
+  }
+  return dough.map(({ color, matchColor }, index) => ({ stack: placements[index], depth: 0, color: matchColor ?? color }));
 }
 
 function refillWithContinuation(
@@ -354,13 +423,37 @@ function refillWithContinuation(
   const trial: RunState = { ...state, stacks: cleared.map((stack) => stack.slice()) };
   const trialInserts: DoughInsert[] = [];
   refill(trial, trialInserts, colors, rng, match, jokerTriple);
-  if (hasQuickScore(trial)) {
+  if (hasQuickScore(trial.stacks, trial.capacity, trial.movesLeft, () => hasScoringMove(trial.stacks, trial.capacity))) {
     state.stacks = trial.stacks;
     if (trial[jokerRefillsKey] !== undefined) state[jokerRefillsKey] = trial[jokerRefillsKey];
     inserts.push(...trialInserts);
     return;
   }
 
+  const empty = cleared.find((stack) => stack.length === 0);
+  const donor = cleared.find((stack) => stack.length > 0);
+  if (!jokerTriple && empty) {
+    if (donor) {
+      const top = donor.at(-1)!;
+      const color = top === JOKER ? match : top;
+      insertDough(state, inserts, empty, 0, color);
+      insertDough(state, inserts, empty, 0, color);
+      insertDough(state, inserts, empty, 0, colors.find((other) => other !== color)!);
+    } else {
+      insertDough(state, inserts, cleared[to], 0, match);
+      insertDough(state, inserts, cleared[to], 0, match);
+      insertDough(state, inserts, cleared[from], 0, match);
+    }
+    return;
+  }
+
+  const bottom = findBottomRefill(state, trialInserts, colors, match);
+  if (bottom) {
+    for (const { stack, depth, color } of bottom) insertDough(state, inserts, cleared[stack], depth, color);
+    return;
+  }
+
+  // Keep the emergency scoring move when bottom placement cannot provide a quick continuation.
   if (jokerTriple) {
     const source = cleared[from];
     const target = cleared[to];
@@ -375,22 +468,11 @@ function refillWithContinuation(
     return;
   }
 
-  const empty = cleared.find((stack) => stack.length === 0);
-  const donor = cleared.find((stack) => stack.length > 0);
-  if (empty && donor) {
-    const top = donor.at(-1)!;
-    const color = top === JOKER ? match : top;
-    insertDough(state, inserts, empty, 0, colors.find((other) => other !== color)!);
-    insertDough(state, inserts, empty, 1, color);
-    insertDough(state, inserts, empty, 2, color);
-    return;
-  }
-
   // Clearing four or more leaves at least four slots in the destination and
   // moving leaves at least one in the source. The pair and donor give a scoring
   // move even when the very next miss would trigger a fatal pressure refill.
   const retainedTop = cleared[to].at(-1);
-  const rescueColor = donor ? colors.find((color) => color !== match && color !== retainedTop)! : match;
+  const rescueColor = colors.find((color) => color !== match && color !== retainedTop)!;
   insertDough(state, inserts, cleared[to], cleared[to].length, rescueColor);
   insertDough(state, inserts, cleared[to], cleared[to].length, rescueColor);
   insertDough(state, inserts, cleared[from], cleared[from].length, rescueColor);

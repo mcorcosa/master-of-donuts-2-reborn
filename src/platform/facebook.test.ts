@@ -1,70 +1,115 @@
+import { createBrowserPersistence, createWebPlatform } from '@playbridge/web';
 import { afterEach, expect, test, vi } from 'vitest';
-import { startFacebookGame } from './facebook';
+import { createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './facebook';
+import { startGame } from './startup';
 
 afterEach(() => vi.unstubAllGlobals());
 
+const storage = { getItem: () => null, setItem: () => {} };
+const persistence = createBrowserPersistence(storage);
+
 function mockSDK() {
-  const sdk = {
+  return {
     initializeAsync: vi.fn(async () => {}),
     setLoadingProgress: vi.fn(),
     startGameAsync: vi.fn(async () => {}),
-  };
-  vi.stubGlobal('window', { FBInstant: sdk });
-  return sdk;
+    onPause: vi.fn(),
+    logEvent: vi.fn(),
+    player: { getDataAsync: vi.fn(), setDataAsync: vi.fn(), flushDataAsync: vi.fn() },
+  } satisfies FacebookHostSDK;
 }
 
-test('starts Facebook only after the first playable frame is ready', async () => {
+test('starts Facebook only after the first playable frame is ready, with host binding intact', async () => {
   const sdk = mockSDK();
-  let initialized = false;
-  sdk.initializeAsync.mockImplementation(async () => {
+  const hostCalls: (string | number)[] = [];
+  sdk.initializeAsync.mockImplementation(async function (this: FacebookHostSDK) {
+    expect(this).toBe(sdk);
     await Promise.resolve();
-    initialized = true;
+    hostCalls.push('initialized');
   });
-  let playable = false;
-  const prepareGame = vi.fn(async () => {
-    expect(initialized).toBe(true);
-    expect(sdk.setLoadingProgress.mock.calls).toEqual([[0]]);
+  sdk.setLoadingProgress.mockImplementation(function (this: FacebookHostSDK, progress: number) {
+    expect(this).toBe(sdk);
+    hostCalls.push(progress);
+  });
+  sdk.startGameAsync.mockImplementation(async function (this: FacebookHostSDK) {
+    expect(this).toBe(sdk);
+    hostCalls.push('started');
+  });
+  const { services } = createRebornFacebookPlatform(async () => sdk, '', persistence);
+
+  await startGame(services, async () => {
+    expect(hostCalls).toEqual(['initialized', 0]);
     await Promise.resolve();
-    playable = true;
-  });
-  sdk.startGameAsync.mockImplementation(async () => {
-    expect(playable).toBe(true);
+    hostCalls.push('rendered');
   });
 
-  await startFacebookGame(prepareGame);
-
-  expect(prepareGame).toHaveBeenCalledOnce();
-  expect(sdk.setLoadingProgress.mock.calls).toEqual([[0], [100]]);
-  expect(sdk.setLoadingProgress.mock.invocationCallOrder[1])
-    .toBeLessThan(sdk.startGameAsync.mock.invocationCallOrder[0]);
-  expect(sdk.startGameAsync).toHaveBeenCalledOnce();
+  expect(hostCalls).toEqual(['initialized', 0, 'rendered', 100, 'started']);
+  expect(sdk.onPause).toHaveBeenCalledOnce();
 });
 
 test('waits for the SDK script to finish loading', async () => {
-  const sdk = mockSDK();
-  const browser = { FBInstant: undefined as typeof sdk | undefined, setTimeout, clearTimeout };
-  vi.stubGlobal('window', browser);
+  let sdk: FacebookHostSDK | undefined;
+  const host = mockSDK();
+  vi.stubGlobal('window', { setTimeout, clearTimeout });
   const script = new EventTarget();
   const getElementById = vi.fn(() => script);
   vi.stubGlobal('document', { getElementById });
+  const { services } = createRebornFacebookPlatform(() => loadFacebookSDK(() => sdk), '', persistence);
 
-  const startup = startFacebookGame(async () => {});
+  const startup = startGame(services, async () => {});
   expect(getElementById).toHaveBeenCalledWith('facebook-sdk');
-  expect(sdk.initializeAsync).not.toHaveBeenCalled();
+  expect(host.initializeAsync).not.toHaveBeenCalled();
 
-  browser.FBInstant = sdk;
+  sdk = host;
   script.dispatchEvent(new Event('load'));
   await startup;
 
-  expect(sdk.startGameAsync).toHaveBeenCalledOnce();
+  expect(host.startGameAsync).toHaveBeenCalledOnce();
+});
+
+test('surfaces SDK download errors before game preparation', async () => {
+  vi.stubGlobal('window', { setTimeout, clearTimeout });
+  const script = new EventTarget();
+  vi.stubGlobal('document', { getElementById: () => script });
+  const prepare = vi.fn();
+  const { services } = createRebornFacebookPlatform(() => loadFacebookSDK(() => undefined), '', persistence);
+
+  const startup = startGame(services, prepare);
+  script.dispatchEvent(new Event('error'));
+
+  await expect(startup).rejects.toThrow('Facebook SDK download failed.');
+  expect(prepare).not.toHaveBeenCalled();
 });
 
 test('leaves startup incomplete when preparing the game fails', async () => {
   const sdk = mockSDK();
   const error = new Error('Legacy textures failed to load');
+  const { services } = createRebornFacebookPlatform(async () => sdk, '', persistence);
 
-  await expect(startFacebookGame(async () => { throw error; })).rejects.toBe(error);
-
+  await expect(startGame(services, async () => { throw error; })).rejects.toBe(error);
   expect(sdk.setLoadingProgress.mock.calls).toEqual([[0]]);
   expect(sdk.startGameAsync).not.toHaveBeenCalled();
+});
+
+test('surfaces SDK initialize and start failures at their corresponding stages', async () => {
+  const sdk = mockSDK();
+  const error = new Error('Host failure');
+  const prepare = vi.fn(async () => {});
+  const { services } = createRebornFacebookPlatform(async () => sdk, '', persistence);
+  sdk.initializeAsync.mockRejectedValueOnce(error);
+  await expect(startGame(services, prepare)).rejects.toBe(error);
+  expect(sdk.setLoadingProgress).not.toHaveBeenCalled();
+  expect(prepare).not.toHaveBeenCalled();
+
+  sdk.startGameAsync.mockRejectedValueOnce(error);
+  await expect(startGame(services, prepare)).rejects.toBe(error);
+  expect(sdk.setLoadingProgress.mock.calls).toEqual([[0], [100]]);
+  expect(prepare).toHaveBeenCalledOnce();
+});
+
+test('prepares the web game with no SDK', async () => {
+  vi.stubGlobal('window', undefined);
+  const prepareGame = vi.fn(async () => {});
+  await startGame(createWebPlatform(storage), prepareGame);
+  expect(prepareGame).toHaveBeenCalledOnce();
 });

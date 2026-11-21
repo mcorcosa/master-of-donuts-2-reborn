@@ -1,0 +1,3 @@
+[submodule "vendor/playbridge"]
+	path = vendor/playbridge
+	url = https://github.com/mcorcosa/playbridge.git

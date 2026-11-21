@@ -43,6 +43,10 @@ export class LevelCelebration {
   private readonly stars: Graphics[];
   private active: { started: number; reduced: boolean; height: number; y: number } | null = null;
 
+  get animating(): boolean {
+    return this.active !== null;
+  }
+
   constructor() {
     this.root.addChild(this.focus, this.rays, this.sugar, this.hero);
     this.hero.addChild(this.plaque, this.heading, this.rank, this.upgrade);

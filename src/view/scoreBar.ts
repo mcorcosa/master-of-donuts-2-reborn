@@ -75,6 +75,10 @@ export class ScoreBar {
     return { x: this.root.x + this.score.x + 7 * this.scoreScale, y: this.root.y + this.score.y };
   }
 
+  get animating(): boolean {
+    return this.glow.visible || this.goalGleam.visible;
+  }
+
   draw({ score, level, rank, nextLevelScore, levelStartScore }: ScoreDisplay): void {
     const formatted = number.format(score);
     if (formatted !== this.score.text) {

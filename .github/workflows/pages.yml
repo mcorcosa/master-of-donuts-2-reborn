@@ -23,9 +23,13 @@ jobs:
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
+      - run: git submodule update --init --recursive
+      - run: npm --prefix vendor/playbridge ci --include=dev
+      - run: npm --prefix vendor/playbridge run build
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: npm run build:facebook
       - uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: dist

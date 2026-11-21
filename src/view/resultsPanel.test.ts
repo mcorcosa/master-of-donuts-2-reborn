@@ -27,6 +27,25 @@ function center(panel: ResultsPanel, id: string) {
 }
 
 describe('Pixi results panel', () => {
+  it('prepares common labels without a hittable panel and reuses them with changing results and height', () => {
+    const panel = new ResultsPanel(Texture.WHITE);
+    const prepared = [...panel.warmup()];
+    const restart = getText(panel, 'result-restart');
+    expect(prepared).toContain(restart);
+    expect(panel.hit(center(panel, 'result-restart'))).toBeNull();
+    const view: ResultsView = { personal, tab: 'personal', friends: null };
+    panel.show(view, 600);
+    const firstY = panel.root.y;
+    const currentRow = panel.root.getChildByLabel('leaderboard-current-score');
+    panel.show({ ...view, personal: { ...personal, run: { score: 100, level: 1, bestCombo: 1 } } }, 700);
+    expect(panel.root.y).toBe(firstY + 50);
+    expect(getText(panel, 'result-restart')).toBe(restart);
+    expect(getText(panel, 'result-score-value').text).toBe('100');
+    expect(panel.root.getChildByLabel('leaderboard-current-score')).toBe(currentRow);
+    expect(panel.hit(center(panel, 'result-restart'))).toBe('restart');
+    panel.root.destroy({ children: true });
+  });
+
   it('fits five rows and safe-integer scores, level and combo at 320 × 568 and keeps Play Again hittable after resize', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     const fit = viewport(320, 568);
@@ -54,6 +73,7 @@ describe('Pixi results panel', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     const friends: ResultsView['friends'] = { list: { status: 'ready', scores: [] }, submission: 'idle' };
     const view: ResultsView = { personal: { ...personal, isPersonalBest: false }, tab: 'friends', friends };
+    panel.show({ ...view, tab: 'personal' }, viewport(320, 568).height);
     panel.show(view, viewport(320, 568).height);
     expect(getText(panel, 'friends-list-status').text).toBe('No friends scores yet.');
     expect(getText(panel, 'friends-submit-disclosure').text).toContain('Facebook friends leaderboard');

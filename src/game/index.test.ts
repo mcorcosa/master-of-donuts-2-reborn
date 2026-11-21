@@ -138,6 +138,7 @@ describe('Joker', () => {
     expect(after.stacks.flat()).toHaveLength(6);
     expect(bruteCanScore(after.stacks, after.capacity, after.movesLeft), JSON.stringify(after.stacks)).toBe(true);
     expect(onDough.mock.lastCall?.[0]).toHaveLength(3);
+    expect(onDough.mock.lastCall?.[0].every(dough => dough.depth === 0)).toBe(true);
     expect(rng).toHaveBeenCalledTimes(1);
   });
 
@@ -166,13 +167,31 @@ describe('Joker', () => {
     expect(move(after, 3, 2, lowest).score).toBe(210);
   });
 
+  it('redistributes the bottom refill to leave room for a setup after a Joker clear', () => {
+    const before = board([
+      ['yellow', 'red', 'yellow', 'red', 'gold', 'blue'],
+      ['yellow', 'red', 'gold', JOKER, 'blue'],
+      ['red', 'yellow', 'red', 'red', 'gold'],
+    ], { capacity: 6, level: 2, score: 500, nextLevelScore: 1500, movesLeft: 2 });
+    const onDough = vi.fn<(inserts: readonly DoughInsert[]) => void>();
+    const after = move(before, 0, 1, lowest, onDough);
+
+    expect(onDough.mock.lastCall?.[0].map(dough => dough.depth)).toEqual([0, 0, 0]);
+    expect(bruteCanScore(after.stacks, after.capacity, 1)).toBe(false);
+    const setup = move(after, 0, 1, lowest);
+    expect(setup).toMatchObject({ score: 610, movesLeft: 1, gameOver: false });
+    expect(move(setup, 2, 1, lowest)).toMatchObject({ score: 720, movesLeft: 1 });
+  });
+
   it('spends a miss on the first Blue and stays free to score Blue or another flavor', () => {
     const opening = board([[JOKER], ['red', 'blue'], ['red', 'blue']]);
     const covered = move(opening, 1, 0, lowest);
     expect(covered).toMatchObject({ stacks: [[JOKER, 'blue'], ['red'], ['red', 'blue']], score: 0, combo: 0, movesLeft: 6 });
     const onDough = vi.fn();
-    expect(move(covered, 2, 0, lowest, onDough)).toMatchObject({ score: 100, combo: 1, movesLeft: 6 });
-    expect(onDough.mock.lastCall?.[0].slice(0, 2).map((dough: DoughInsert) => dough.color)).toEqual(['blue', 'blue']);
+    const blueMatch = move(covered, 2, 0, lowest, onDough);
+    expect(blueMatch).toMatchObject({ score: 100, combo: 1, movesLeft: 6 });
+    expect(onDough.mock.lastCall?.[0].map((dough: DoughInsert) => dough.depth)).toEqual([0, 0, 0]);
+    expect(move(blueMatch, 2, 0, lowest).score).toBe(210);
 
     const uncovered = move(covered, 0, 2, lowest);
     const withRed = move(uncovered, 1, 0, lowest);
@@ -243,7 +262,7 @@ describe('Joker', () => {
 
     const rescue = move({ ...initial, stacks: [['red'], ['red', 'red', 'red'], [JOKER]] }, 0, 1, highest, onDough);
     expect(rescue.stacks.flat().filter(color => color === JOKER)).toHaveLength(1);
-    expect(onDough.mock.lastCall?.[0].map((dough: DoughInsert) => dough.depth)).toEqual([0, 1, 2]);
+    expect(onDough.mock.lastCall?.[0].map((dough: DoughInsert) => dough.depth)).toEqual([0, 0, 0]);
     expect(move(rescue, 2, 0, lowest).score).toBe(260);
   });
 
@@ -425,6 +444,18 @@ describe('Master of Donuts 2 rules', () => {
     expect(move(next, 1, 0, highest).score).toBe(260);
   });
 
+  it('finds a scoring bottom refill when the ordinary refill leaves no match', () => {
+    const game = board([['gold', 'red'], ['gold', 'red', 'red', 'red'], ['yellow']], { movesLeft: 1 });
+    const onDough = vi.fn<(inserts: readonly DoughInsert[]) => void>();
+    const next = move(game, 0, 1, lowest, onDough);
+
+    expect(onDough).toHaveBeenCalledTimes(1);
+    expect(onDough.mock.lastCall?.[0].map(dough => dough.depth)).toEqual([0, 0, 0]);
+    expect(next.stacks.map(stack => stack.at(-1))).toEqual(['gold', 'gold', 'yellow']);
+    expect(next).toMatchObject({ score: 150, combo: 1, movesLeft: 1, gameOver: false });
+    expect(bruteCanScore(next.stacks, next.capacity, 1)).toBe(true);
+  });
+
   it('keeps ordinary bottom refill when a legal setup miss can unlock the next score', () => {
     const game = board([
       ['gold', 'gold', 'red'], ['yellow', 'red', 'red', 'red'], ['gold', 'yellow'],
@@ -453,13 +484,15 @@ describe('Master of Donuts 2 rules', () => {
     const game = board([
       ['yellow', 'red'], ['red', 'gold', 'red', 'red', 'red', 'red'], ['gold'], ['blue'],
     ], { capacity: 7, level: 5, score: 3700, nextLevelScore: 4800, movesLeft: 1 });
-    const next = move(game, 0, 1, lowest);
+    const onDough = vi.fn<(inserts: readonly DoughInsert[]) => void>();
+    const next = move(game, 0, 1, lowest, onDough);
 
-    expect(next.stacks[1]).toEqual(['red', 'gold', 'yellow', 'yellow']);
+    expect(next.stacks[1]).toEqual(['red', 'gold']);
+    expect(onDough.mock.lastCall?.[0].map(dough => dough.depth)).toEqual([0, 0, 0]);
     expect(next.stacks.flat()).toHaveLength(game.stacks.flat().length - 5 + 3);
     expect(next.score).toBe(3980);
-    expect(canMove(next, 0, 1)).toBe(true);
-    expect(move(next, 0, 1, highest).score).toBe(4134);
+    expect(canMove(next, 1, 2)).toBe(true);
+    expect(move(next, 1, 2, highest).score).toBe(4134);
   });
 
   it('clears a ten-donut run at maximum capacity, scores once, and preserves an existing scoring move', () => {

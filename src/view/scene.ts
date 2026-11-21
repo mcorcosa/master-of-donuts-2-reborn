@@ -1,4 +1,4 @@
-import { Assets, Container, DOMAdapter, Graphics, Sprite, Text, Texture } from 'pixi.js';
+import { Assets, Container, DOMAdapter, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
 import { type DoughInsert, type GameState, JOKER } from '../game';
 import type { Point, StackGestures, Target } from './gestures';
 import { JokerArt } from './jokerArt';
@@ -177,6 +177,7 @@ export class GameScene {
   private readonly scoreBar: ScoreBar;
   private readonly status: Text;
   private readonly results: ResultsPanel;
+  private readonly preparedText = new Map<string, () => void>();
   private readonly scrim = new Graphics({ visible: false });
   private stacks: StackView[] = [];
   private fit = viewport(400, 600);
@@ -186,6 +187,7 @@ export class GameScene {
   private movePresentation: MovePresentation | null = null;
   private stackUnlock: StackUnlock | null = null;
   private gameOver = false;
+  private gameOverCueVisible = false;
   private capacity = 0;
   private liftedStack: number | null = null;
   private liftStarted: number | null = null;
@@ -203,6 +205,10 @@ export class GameScene {
     return this.stackUnlock !== null;
   }
 
+  get effectsAnimating(): boolean {
+    return this.matchPool.some(effect => effect.active) || this.scoreBar.animating || this.celebration.animating;
+  }
+
   constructor(private readonly art: Map<string, Texture>) {
     const companion = this.texture('strawberry-glaze');
     this.scoreBar = new ScoreBar(companion);
@@ -212,6 +218,10 @@ export class GameScene {
       this.contactTexture.destroy(true);
       this.vacancyArt.destroy();
       this.joker?.destroy();
+      this.releasePreparedText();
+      for (const effect of this.matchPool) {
+        if (!effect.root.destroyed) effect.root.destroy({ children: true });
+      }
     });
     this.kitchen = sprite(this.root, this.texture('kitchen'));
     this.kitchen.anchor.set(0.5);
@@ -236,6 +246,48 @@ export class GameScene {
     this.hud.addChild(this.hintButton);
 
     this.overlay.addChild(this.results.root);
+  }
+
+  *warmup(renderer: Renderer, reduced: boolean): Generator<void> {
+    for (const item of this.warmResources(reduced)) {
+      if (item instanceof Texture) renderer.texture.initSource(item.source);
+      else if (item instanceof Text) {
+        item.getLocalBounds();
+        // Prepare's Text handler only makes a batchable. Acquire the same
+        // managed texture the canvas text pipe uses on actual reveal.
+        const system = renderer.canvasText;
+        const texture = system.getManagedTexture(item);
+        const key = item.styleKey;
+        if (this.preparedText.has(key)) system.decreaseReferenceCount(key);
+        else this.preparedText.set(key, () => system.decreaseReferenceCount(key));
+        renderer.texture.initSource(texture.source);
+      } else if (item) {
+        // Populate the batches used by the graphics pipe while the scene is idle.
+        renderer.graphicsContext.updateGpuContext(item);
+      }
+      yield;
+    }
+  }
+
+  releasePreparedText(): void {
+    for (const release of this.preparedText.values()) release();
+    this.preparedText.clear();
+  }
+
+  private *warmResources(reduced: boolean): Generator<GraphicsContext | Text | Texture | undefined> {
+    // Opening stacks hold three pieces with five slots. A transfer or clear can
+    // expose three, four or five openings before the refill brings pieces back.
+    for (const count of [3, 4, 5]) {
+      if (count <= this.capacity) yield this.vacancyArt.texture(count, this.layout.step / this.layout.donutHeight);
+    }
+    let effect = this.matchPool[0];
+    if (!effect) {
+      effect = new MatchEffect();
+      this.matchPool.push(effect);
+      yield;
+    }
+    yield* effect.warmup(reduced);
+    yield* this.results.warmup();
   }
 
   private texture(name: string): Texture {
@@ -275,6 +327,23 @@ export class GameScene {
       this.setHintAvailable(false);
       this.clearHint();
       this.results.show(view, this.fit.height);
+    }
+  }
+
+  showGameOverCue(progress: number | null, reduced: boolean): void {
+    if (progress === null && !this.gameOverCueVisible) return;
+    this.gameOverCueVisible = progress !== null;
+    const strength = progress === null ? 0 : reduced ? 1 : Math.sin(Math.PI * progress);
+    const rotation = progress === null || reduced ? 0 : 0.085 * strength * Math.sin(4 * Math.PI * progress);
+    const green = Math.round(255 - 68 * strength);
+    const blue = Math.round(255 - 90 * strength);
+    const tint = 0xff0000 | (green << 8) | blue;
+    for (const { top } of this.stacks) {
+      if (!top) continue;
+      // Only the exposed donut moves. The stack, its shadow, and the tray stay put.
+      const donut = top.children[1] as Sprite;
+      donut.tint = tint;
+      donut.rotation = rotation;
     }
   }
 
@@ -544,12 +613,29 @@ export class GameScene {
     return { x: (point.x - this.fit.x) / this.fit.scale, y: (point.y - this.fit.y) / this.fit.scale };
   }
 
-  hit(point: Point, mode: HitMode = 'exact'): Target {
-    if (this.stackUnlockAnimating) return null;
+  hit(point: Point, mode: HitMode = 'exact', duringUnlock = false): Target {
+    if (this.stackUnlock) return duringUnlock ? this.hitMovingStack(point) : null;
     if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
     if (this.hintButton.visible && contains(this.hintBounds, point)) return 'hint';
     return stackTarget(this.stacks, point, this.fit.height, mode);
+  }
+
+  private hitMovingStack(point: Point): Target {
+    const height = this.fit.height;
+    if (stackTarget([], point, height, 'exact') === 'outside') return 'outside';
+    const { donutWidth, donutHeight, step } = this.layout;
+    let target: number | null = null;
+    // The new tray is actionable once it lands. The old slots move with their racks.
+    for (let index = 0; index < this.layout.slots.length; index++) {
+      const { slot } = this.stacks[index];
+      const hit = { x: slot.x - donutWidth / 2, y: BOARD_TOP,
+        width: donutWidth, height: height - BOARD_TOP - BOARD_FOOTER_SPACE };
+      if (!contains(stackHit({ ...slot, hit }, this.capacity, donutHeight, step), point)) continue;
+      if (target !== null) return null;
+      target = index;
+    }
+    return target;
   }
 
   topPosition(index: number): Point {

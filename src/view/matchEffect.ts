@@ -101,6 +101,20 @@ export class MatchEffect {
     return this.current !== null;
   }
 
+  *warmup(reduced: boolean): Generator<GraphicsContext | undefined> {
+    // The first ordinary clear uses three pieces. Grow larger pools only on demand.
+    for (let count = 1; count <= 3; count++) {
+      this.ensurePieces(count);
+      if (!reduced) this.ensureBursts(count);
+      yield;
+    }
+    if (!reduced) {
+      yield this.flashShape;
+      yield this.sprinkleShape;
+      yield this.streakShape;
+    }
+  }
+
   start(playback: MatchPlayback, geometry: MatchGeometry, texture: Texture, joker?: JokerMatchArt): void {
     this.cancel();
     const launches = playback.reduced ? [] : matchLaunches(playback, geometry);
@@ -151,11 +165,7 @@ export class MatchEffect {
     this.tiltDirection = landing.x < VIEW_WIDTH / 2 ? 1 : -1;
     this.prepareBursts(launches.length, fill);
 
-    while (this.pieces.length < playback.runLength) {
-      const piece = new Sprite(texture);
-      piece.anchor.set(0.5, 1);
-      this.pieces.push(this.donuts.addChild(piece));
-    }
+    this.ensurePieces(playback.runLength);
     this.pieces.forEach((piece, index) => {
       piece.visible = false;
       if (index < playback.runLength) {
@@ -164,6 +174,15 @@ export class MatchEffect {
       }
     });
     this.donuts.visible = true;
+  }
+
+  private ensurePieces(count: number): void {
+    while (this.pieces.length < count) {
+      const piece = new Sprite();
+      piece.anchor.set(0.5, 1);
+      piece.visible = false;
+      this.pieces.push(this.donuts.addChild(piece));
+    }
   }
 
   showPieces(frame: MatchFrame): void {
@@ -260,13 +279,18 @@ export class MatchEffect {
     });
   }
 
-  private prepareBursts(count: number, fill: number): void {
+  private ensureBursts(count: number): void {
     while (this.burstPool.length < count) {
       const flash = this.bursts.addChild(new Graphics(this.flashShape));
+      flash.visible = false;
       const fragments = Array.from({ length: SPRINKLES + STREAKS }, (_, index) =>
-        this.bursts.addChild(new Graphics(index < SPRINKLES ? this.sprinkleShape : this.streakShape)));
+        this.bursts.addChild(new Graphics({ context: index < SPRINKLES ? this.sprinkleShape : this.streakShape, visible: false })));
       this.burstPool.push({ flash, fragments });
     }
+  }
+
+  private prepareBursts(count: number, fill: number): void {
+    this.ensureBursts(count);
     this.burstPool.forEach(({ flash, fragments }) => {
       flash.visible = false;
       fragments.forEach((fragment, index) => {

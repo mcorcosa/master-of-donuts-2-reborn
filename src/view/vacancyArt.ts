@@ -7,6 +7,11 @@ const BODY_OPACITY = 0.15;
 const RIM_OPACITY = 0.37;
 const RIM_RADIUS = 3;
 
+function stride(fractionOfDonutHeight: number): number {
+  // Equivalent layouts can differ in the last few floating-point bits after a resize.
+  return Math.round(fractionOfDonutHeight * HEIGHT * 1e6) / 1e6;
+}
+
 function vacancyMask(texture: Texture): Uint8ClampedArray {
   const canvas = DOMAdapter.get().createCanvas(WIDTH, HEIGHT);
   const context = canvas.getContext('2d')!;
@@ -66,7 +71,7 @@ export class VacancyArt {
   }
 
   keepStrides(...fractionsOfDonutHeight: number[]): void {
-    const steps = fractionsOfDonutHeight.map(fraction => fraction * HEIGHT);
+    const steps = fractionsOfDonutHeight.map(stride);
     for (const [step, textures] of this.textures) {
       if (steps.includes(step)) continue;
       for (const texture of textures.values()) texture.destroy(true);
@@ -75,7 +80,7 @@ export class VacancyArt {
   }
 
   texture(count: number, fractionOfDonutHeight: number): Texture {
-    const step = fractionOfDonutHeight * HEIGHT;
+    const step = stride(fractionOfDonutHeight);
     let textures = this.textures.get(step);
     if (!textures) {
       textures = new Map();

@@ -1,3 +1,6 @@
+import type { Persistence } from '@playbridge/core';
+import { scopedBrowserStorage, type StringStorage } from '@playbridge/web';
+
 export const PERSONAL_SCORES_KEY = 'master-of-donuts-2-reborn.personal-scores.v1';
 const SCORE_LIMIT = 5;
 
@@ -13,7 +16,39 @@ export interface CompletedResults {
   isPersonalBest: boolean;
 }
 
-type ScoreStorage = Pick<Storage, 'getItem' | 'setItem'>;
+type ScoreTarget = 'web' | 'facebook';
+
+export function isLegacyFacebookScoreOrigin(
+  { hostname, origin }: Pick<Location, 'hostname' | 'origin'>,
+  configuredOrigin?: string,
+): boolean {
+  return origin === configuredOrigin ||
+    (origin === `https://${hostname}` && /(^|\.)(facebook\.com|fbcdn\.net|fbsbx\.com)$/.test(hostname));
+}
+
+export function browserScoreStorage(
+  getStorage: () => StringStorage,
+  target: ScoreTarget,
+  legacyFacebookOrigin = false,
+): StringStorage {
+  // Keep the original web key unless the origin's existing scores belong to Facebook.
+  if (target === 'web') return scopedBrowserStorage(legacyFacebookOrigin ? 'web.' : '', getStorage);
+  const prefix = 'facebook.';
+  return scopedBrowserStorage(prefix, () => {
+    const storage = getStorage();
+    return {
+      getItem(key) {
+        const scoped = storage.getItem(key);
+        // Old scores have no platform marker. Only a known Facebook origin can seed this scope.
+        if (scoped === null && legacyFacebookOrigin && key === prefix + PERSONAL_SCORES_KEY) {
+          return storage.getItem(PERSONAL_SCORES_KEY);
+        }
+        return scoped;
+      },
+      setItem: (key, value) => storage.setItem(key, value),
+    };
+  });
+}
 
 function validRun(value: unknown): value is RunStats {
   if (typeof value !== 'object' || value === null) return false;
@@ -27,48 +62,40 @@ function topScores(runs: RunStats[]): RunStats[] {
   return runs.sort((first, second) => second.score - first.score).slice(0, SCORE_LIMIT);
 }
 
-function readScores(raw: string | null): RunStats[] {
-  if (raw === null) return [];
-  try {
-    const data: unknown = JSON.parse(raw);
-    return Array.isArray(data) ? topScores(data.filter(validRun)) : [];
-  } catch {
-    return [];
-  }
-}
-
 export class PersonalScores {
-  private storage?: ScoreStorage;
   private scores: RunStats[] = [];
+  private pending = Promise.resolve();
 
-  constructor(getStorage: () => ScoreStorage) {
-    try {
-      this.storage = getStorage();
-    } catch {
-      // Some embedded contexts deny access to localStorage itself.
-    }
+  constructor(private persistence?: Persistence) {}
+
+  record(run: RunStats): Promise<CompletedResults> {
+    const current = { ...run };
+    const next = this.pending.then(() => this.recordRun(current));
+    this.pending = next.then(() => {}, () => {});
+    return next;
   }
 
-  record(run: RunStats): CompletedResults {
-    if (this.storage) {
+  private async recordRun(current: RunStats): Promise<CompletedResults> {
+    if (this.persistence) {
       try {
-        this.scores = readScores(this.storage.getItem(PERSONAL_SCORES_KEY));
-      } catch {
-        this.storage = undefined;
+        const data = await this.persistence.get(PERSONAL_SCORES_KEY);
+        this.scores = Array.isArray(data) ? topScores(data.filter(validRun)) : [];
+      } catch (error) {
+        if (error instanceof SyntaxError) this.scores = [];
+        else this.persistence = undefined;
       }
     }
 
-    const current = { ...run };
     const isPersonalBest = current.score > (this.scores[0]?.score ?? 0);
     this.scores = topScores([...this.scores, current]);
 
     try {
-      this.storage?.setItem(PERSONAL_SCORES_KEY, JSON.stringify(this.scores));
+      await this.persistence?.set(PERSONAL_SCORES_KEY, this.scores);
     } catch {
-      this.storage = undefined;
+      this.persistence = undefined;
     }
 
     const rows = this.scores.map((entry, index) => ({ rank: index + 1, score: entry.score, current: entry === current }));
-    return { run, rows, isPersonalBest };
+    return { run: current, rows, isPersonalBest };
   }
 }

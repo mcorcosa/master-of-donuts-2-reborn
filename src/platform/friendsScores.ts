@@ -1,3 +1,5 @@
+import type { Outcome, PlatformServices } from '@playbridge/core';
+
 export interface FriendScore {
   rank: number;
   name: string;
@@ -12,49 +14,28 @@ export interface FriendsScores {
 
 const PAGE_SIZE = 10;
 
-/** Call after Facebook startup so the SDK can report the active client's capabilities. */
-export function createFriendsScores(): FriendsScores | null {
-  if (import.meta.env.MODE !== 'facebook' || typeof window === 'undefined') return null;
-
-  const name = import.meta.env.VITE_DONUTS_FRIENDS_BOARD?.trim();
-  if (!name) return null;
-
-  const sdk = window.FBInstant;
-  if (typeof sdk?.getLeaderboardAsync !== 'function') return null;
-
-  try {
-    if (sdk.getSupportedAPIs !== undefined) {
-      const supported = sdk.getSupportedAPIs();
-      if (!Array.isArray(supported) || !supported.every(api => typeof api === 'string') ||
-        !supported.some(api => api === 'getLeaderboardAsync' || api === 'FBInstant.getLeaderboardAsync')) return null;
-    }
-  } catch {
-    return null;
-  }
-
-  const getLeaderboard = sdk.getLeaderboardAsync.bind(sdk);
+/** Called after startup when a completed game can offer Friends. */
+export function createFriendsScores(
+  platform: Pick<PlatformServices, 'capabilities' | 'identity' | 'leaderboards'>,
+  boardName: string,
+  submitScore: (score: number) => Promise<Outcome>,
+): FriendsScores | null {
+  if (platform.capabilities().leaderboards !== 'available') return null;
   return {
     async list() {
-      const board = await getLeaderboard(name);
-      if (typeof board.getConnectedPlayerEntriesAsync !== 'function') {
-        throw new Error('Facebook friends scores are unavailable.');
-      }
-
-      const entries = await board.getConnectedPlayerEntriesAsync(PAGE_SIZE, 0);
-      const currentPlayerID = sdk.player?.getID?.();
-      return entries.map(entry => {
-        const player = entry.getPlayer();
-        const score: FriendScore = { rank: entry.getRank(), name: player.getName(), score: entry.getScore() };
-        if (currentPlayerID && player.getID?.() === currentPlayerID) score.current = true;
-        return score;
-      });
+      const entries = await platform.leaderboards.entries(boardName, 'connected', PAGE_SIZE, 0);
+      if (entries.status !== 'completed') throw entries.error ?? new Error('Friends scores are unavailable.');
+      const identity = platform.identity();
+      const current = identity.status === 'completed' ? identity.value : null;
+      return entries.value.map(({ playerId, playerName, rank, score }) => ({
+        rank, name: playerName, score, ...(current && playerId === current ? { current: true } : {}),
+      }));
     },
     async submit(score) {
       if (!Number.isSafeInteger(score) || score < 0) throw new Error('Invalid leaderboard score.');
 
-      const board = await getLeaderboard(name);
-      if (typeof board.setScoreAsync !== 'function') throw new Error('Facebook score submission is unavailable.');
-      await board.setScoreAsync(score);
+      const submitted = await submitScore(score);
+      if (submitted.status !== 'completed') throw submitted.error ?? new Error('Score submission is unavailable.');
     },
   };
 }

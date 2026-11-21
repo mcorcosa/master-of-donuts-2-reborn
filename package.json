@@ -8,10 +8,13 @@
     "build": "npm run typecheck && vite build",
     "build:facebook": "npm run typecheck && vite build --mode facebook",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"vendor/playbridge/**\"",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@playbridge/core": "file:vendor/playbridge/packages/core",
+    "@playbridge/facebook": "file:vendor/playbridge/packages/facebook",
+    "@playbridge/web": "file:vendor/playbridge/packages/web",
     "pixi.js": "8.20.0"
   },
   "devDependencies": {
