@@ -3,7 +3,7 @@ export interface Point {
   y: number;
 }
 
-export type Target = number | 'restart' | null;
+export type Target = number | 'restart' | 'outside' | null;
 
 export type GestureResult =
   | { kind: 'move' | 'blocked'; from: number; to: number }
@@ -15,9 +15,8 @@ interface Press {
   target: Target;
   hover: Target;
   dragged: boolean;
+  swipeDistanceSquared: number;
 }
-
-const SWIPE_DISTANCE = 10;
 
 export class StackGestures {
   private press: Press | null = null;
@@ -28,32 +27,37 @@ export class StackGestures {
     private readonly canMove: (from: number, to: number) => boolean,
   ) {}
 
-  get source(): number | null {
+  get active(): boolean {
+    return this.press !== null;
+  }
+
+  get dragSource(): number | null {
     const press = this.press;
     if (press?.dragged && typeof press.target === 'number' && this.hasDonuts(press.target)) {
       return press.target;
     }
-    return this.selection;
+    return null;
+  }
+
+  get source(): number | null {
+    return this.dragSource ?? this.selection;
   }
 
   get destination(): number | null {
-    const press = this.press;
-    if (press?.dragged && typeof press.target === 'number' && this.hasDonuts(press.target) &&
-        typeof press.hover === 'number' && press.hover !== press.target) {
-      return press.hover;
-    }
-    return null;
+    const source = this.dragSource;
+    const hover = this.press?.hover;
+    return source !== null && typeof hover === 'number' && hover !== source ? hover : null;
   }
 
   get pressedStack(): number | null {
     const press = this.press;
-    return press && !press.dragged && typeof press.target === 'number' && press.target === press.hover
+    return press && !press.dragged && typeof press.target === 'number' && press.hover !== 'outside'
       ? press.target : null;
   }
 
-  start(id: number, point: Point, target: Target): boolean {
+  start(id: number, point: Point, target: Target, swipeDistance = 10): boolean {
     if (this.press) return false;
-    this.press = { id, origin: point, target, hover: target, dragged: false };
+    this.press = { id, origin: point, target, hover: target, dragged: false, swipeDistanceSquared: swipeDistance ** 2 };
     return true;
   }
 
@@ -65,7 +69,7 @@ export class StackGestures {
     if (!press.dragged) {
       const dx = point.x - press.origin.x;
       const dy = point.y - press.origin.y;
-      press.dragged = dx * dx + dy * dy >= SWIPE_DISTANCE * SWIPE_DISTANCE;
+      press.dragged = dx * dx + dy * dy >= press.swipeDistanceSquared;
     }
     press.hover = target;
     return wasDragged !== press.dragged || previous !== target;
@@ -76,6 +80,7 @@ export class StackGestures {
     if (!press || press.id !== id) return null;
     this.update(id, point, target);
     this.press = null;
+    if (target === 'outside') return null;
 
     if (press.dragged) {
       const from = press.target;
@@ -85,14 +90,15 @@ export class StackGestures {
       return null;
     }
 
-    if (target !== press.target) return null;
-    if (target === 'restart') return { kind: 'restart' };
-    if (target === null || target === this.selection) {
+    const pressed = press.target;
+    if (pressed === 'restart') return target === 'restart' ? { kind: 'restart' } : null;
+    if (typeof pressed !== 'number') return null;
+    if (pressed === this.selection) {
       this.selection = null;
     } else if (this.selection !== null) {
-      return this.attempt(this.selection, target);
-    } else if (this.hasDonuts(target)) {
-      this.selection = target;
+      return this.attempt(this.selection, pressed);
+    } else if (this.hasDonuts(pressed)) {
+      this.selection = pressed;
     }
     return null;
   }

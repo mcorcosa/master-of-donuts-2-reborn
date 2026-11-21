@@ -9,6 +9,7 @@ export interface MatchPlayback {
   color: string;
   runLength: number;
   points: number;
+  combo: number;
   started: number;
   reduced: boolean;
   arrivalMs: number;
@@ -23,7 +24,10 @@ export function beginMatch(before: GameState, after: GameState, from: number, to
   const runLength = matchedRunLength(before.stacks[to], color);
   if (!runLength) return null;
 
-  return { from, to, color, runLength, points, started, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320 };
+  return {
+    from, to, color, runLength, points, combo: after.combo ?? 0,
+    started, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320,
+  };
 }
 
 export function matchFrame(match: MatchPlayback, now: number) {
@@ -60,6 +64,8 @@ interface MatchLaunch {
 }
 
 const SNAP_MS = 30;
+const AWARD_HOLD_MS = 40;
+const SCORE_FLIGHT_MS = 270;
 
 export function matchPopTime(runLength: number, index: number): number {
   return 194 + 74 * (runLength - 1 - index) / (runLength - 1);
@@ -164,12 +170,35 @@ export function scoreSize(points: number): number {
   return Math.min(48, 24 + 20 * scoreRatio(points));
 }
 
+function flightStart(match: MatchPlayback): number {
+  return match.started + match.arrivalMs + match.clearMs + AWARD_HOLD_MS;
+}
+
+export function scoreImpactTime(match: MatchPlayback): number {
+  return match.reduced ? match.started + match.clearMs : flightStart(match) + SCORE_FLIGHT_MS;
+}
+
+export function scoreFlightFrame(match: MatchPlayback, now: number): number | null {
+  const age = now - flightStart(match);
+  return match.reduced || age < 0 || age >= SCORE_FLIGHT_MS ? null : age / SCORE_FLIGHT_MS;
+}
+
+export function scoreFlightPosition(start: Point, target: Point, progress: number): Point {
+  const time = progress ** 1.35;
+  const arc = Math.sin(time * Math.PI);
+  const inset = Math.sign(target.x - start.x) * Math.min(19, Math.abs(target.x - start.x) * 0.14);
+  return {
+    x: start.x + (target.x - start.x) * time - arc * inset,
+    y: start.y + (target.y - start.y) * time - arc * Math.min(35, (start.y - target.y) * 0.24),
+  };
+}
+
 export function awardFrame(match: MatchPlayback, now: number) {
   const emphasis = scoreEmphasis(match.points);
-  const lifetime = 420 + 130 * emphasis;
   const pop = match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1);
   const age = now - match.started - match.arrivalMs - pop;
-  if (age < 0 || age >= lifetime) return null;
+  const end = match.reduced ? match.started + 420 + 130 * emphasis : flightStart(match);
+  if (age < 0 || now >= end) return null;
 
   const peakX = 1.21 + 0.13 * emphasis;
   const peakY = 1.29 + 0.13 * emphasis;
@@ -186,15 +215,10 @@ export function awardFrame(match: MatchPlayback, now: number) {
     scaleY += (peakY - 1) * settle - 0.04 * recoil;
   }
 
-  const drift = Math.max(0, (age - 120) / (lifetime - 120));
-  const travel = match.reduced ? 0 : 12 + 6 * emphasis;
-  const fade = 160 + 20 * emphasis;
   return {
-    alpha: (match.reduced ? Math.min(1, age / 50) : 1)
-      * (1 - Math.max(0, (age - (lifetime - fade)) / fade) ** 2),
+    alpha: match.reduced ? unit(age / 50) * unit((end - now) / 135) : 1,
     scaleX, scaleY,
     rotation: match.reduced || age >= 149 ? 0
       : (3 + 2 * emphasis) * Math.PI / 180 * Math.cos(Math.PI * age / 95) * (1 - age / 149),
-    lift: travel * (1 - (1 - drift) ** 2),
   };
 }

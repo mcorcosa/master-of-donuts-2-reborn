@@ -1,11 +1,13 @@
 import { Assets, Container, DOMAdapter, Graphics, Sprite, Text, Texture } from 'pixi.js';
 import type { DoughInsert, GameState } from '../game';
 import type { Point, StackGestures, Target } from './gestures';
-import { BOARD_TOP, contains, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackSlot, VIEW_WIDTH, viewport } from './layout';
+import { BOARD_TOP, contains, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackSlot, stackTarget, VIEW_WIDTH, viewport } from './layout';
+import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import type { MatchFrame, MatchPlayback } from './matchPlayback';
 import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan } from './movePlayback';
-import { ScoreBar } from './scoreBar';
+import { ScoreBar, type ScoreDisplay } from './scoreBar';
+import { type MovePreview, SelectionArrow } from './selectionArrow';
 import { VacancyArt } from './vacancyArt';
 
 const DONUT_ART = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green'];
@@ -18,6 +20,8 @@ const CENTER = VIEW_WIDTH / 2;
 const DIALOG_WIDTH = 288;
 const DIALOG_HEIGHT = 194;
 const REDUCED_PRESSURE_MS = 110;
+const SELECTION_LIFT_MS = 105;
+const SELECTION_WIGGLE_MS = 540;
 
 export async function loadArt(): Promise<Map<string, Texture>> {
   const textures = await Promise.all(['kitchen', 'logo', 'clear', ...DONUT_ART].map(async name => {
@@ -35,7 +39,6 @@ export interface Feedback {
   started: number;
   duration: number;
   color?: string;
-  levelUp?: boolean;
 }
 
 interface Transfer {
@@ -57,9 +60,6 @@ interface MovePresentation {
 interface StackView {
   slot: StackSlot;
   hit: Rect;
-  mark: Graphics;
-  markColor?: number;
-  markPressed?: boolean;
   vacancies: Sprite;
   vacancyCount: number;
   pieces: Container[];
@@ -99,9 +99,14 @@ function label(parent: Container, value: string, size: number, x: number, y: num
   return parent.addChild(display);
 }
 
+function capacityRail(width: number, capacity: number) {
+  const half = Math.min(34, width / 2 + 3);
+  return { half, first: 1.5 - half, pitch: (half * 2 - 3) / capacity };
+}
+
 function drawCapacity(group: Container, slot: StackSlot, count: number, capacity: number, width: number): void {
   const { x, base } = slot;
-  const half = Math.min(34, width / 2 + 3);
+  const { half, first, pitch } = capacityRail(width, capacity);
   const cue = group.addChild(new Graphics({ x, y: base }));
 
   if (count === capacity) {
@@ -121,9 +126,8 @@ function drawCapacity(group: Container, slot: StackSlot, count: number, capacity
 
   cue.roundRect(-half, 7, half * 2, 8, 4).fill(0xc48561)
     .roundRect(1 - half, 8, half * 2 - 2, 6, 3).fill(0xa66244);
-  const pitch = (half * 2 - 3) / capacity;
   for (let index = 0; index < capacity; index++) {
-    const left = 1.5 - half + index * pitch;
+    const left = first + index * pitch;
     const filled = index < count;
     cue.roundRect(left, 8.5, pitch - 0.8, 5, 1.6).fill(filled ? 0xe5a02f : 0xffe0b8)
       .roundRect(left + 0.5, 9, pitch - 1.8, 1.5, 0.75).fill(filled ? 0xffd572 : 0xffedcf);
@@ -138,9 +142,16 @@ export class GameScene {
   private readonly board = new Container();
   private readonly overlay = new Container();
   private readonly flight: Sprite;
+  private readonly arrow = new SelectionArrow();
+  private readonly selectionCue = new Graphics({ eventMode: 'none', visible: false })
+    .circle(0, 0, 4).fill(0xffdf86).stroke({ color: GOLD, width: 1.5 });
+  private readonly feedbackCue = new Graphics({ eventMode: 'none', visible: false })
+    .circle(0, 0, 5).stroke({ color: 0xffffff, width: 3 });
   private readonly contactTexture = createContactTexture();
   private readonly vacancyArt: VacancyArt;
-  private readonly matchEffect: MatchEffect;
+  private readonly celebration = new LevelCelebration();
+  private readonly matchEffects = new Container();
+  private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar = new ScoreBar();
   private readonly pressure: Text;
   private readonly beads = new Graphics();
@@ -154,9 +165,20 @@ export class GameScene {
   private fit = viewport(400, 600);
   private layout = layoutStacks(this.fit.height, 3);
   private matchedDestination: readonly Container[] = [];
+  private currentMatch: MatchEffect | null = null;
   private movePresentation: MovePresentation | null = null;
   private gameOver = false;
   private capacity = 0;
+  private liftedStack: number | null = null;
+  private liftStarted: number | null = null;
+
+  get selectionAnimating(): boolean {
+    return this.liftStarted !== null;
+  }
+
+  get moveAnimating(): boolean {
+    return this.movePresentation !== null;
+  }
 
   constructor(private readonly art: Map<string, Texture>) {
     this.vacancyArt = new VacancyArt(this.texture('clear'));
@@ -167,16 +189,15 @@ export class GameScene {
     this.kitchen = sprite(this.root, this.texture('kitchen'));
     this.kitchen.anchor.set(0.5);
     this.root.addChild(this.content, this.scrim, this.overlay);
-    this.matchEffect = new MatchEffect();
-    this.content.addChild(this.board, this.matchEffect.root, this.hud);
+    this.content.addChild(this.board);
     this.flight = sprite(this.content, Texture.EMPTY);
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
+    this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.celebration.root, this.hud, this.matchEffects);
 
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
     logo.anchor.set(0.5);
     logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
-    this.scoreBar.root.y = 68;
     this.hud.addChild(this.scoreBar.root, this.beads);
     this.pressure = label(this.hud, '', 22, CENTER, 0);
     this.status = label(this.hud, '', 15, CENTER, 0);
@@ -199,6 +220,7 @@ export class GameScene {
   }
 
   resize(width: number, height: number): void {
+    this.hideMoveGuides();
     this.fit = viewport(width, height);
     for (const layer of [this.content, this.overlay]) {
       layer.position.set(this.fit.x, this.fit.y);
@@ -230,8 +252,9 @@ export class GameScene {
     }
   }
 
-  draw(state: GameState, levelStartScore: number, pressureLimit: number): void {
+  draw(state: GameState, pressureLimit: number): void {
     this.finishMove();
+    this.hideMoveGuides();
     this.gameOver = state.gameOver;
     this.capacity = state.capacity;
     for (const child of this.board.removeChildren()) child.destroy({ children: true });
@@ -241,8 +264,6 @@ export class GameScene {
     this.stacks = state.stacks.map((stack, index) => {
       const slot = slots[index];
       const group = this.board.addChild(new Container());
-      const mark = group.addChild(new Graphics());
-      mark.visible = false;
       drawCapacity(group, slot, stack.length, state.capacity, donutWidth);
       const vacancies = sprite(group, Texture.EMPTY, slot.x);
       vacancies.eventMode = 'none';
@@ -268,14 +289,56 @@ export class GameScene {
         .moveTo(side, y - 5).lineTo(side + 3, y - 2).lineTo(side, y + 2)
         .stroke({ color: 0xffdfa0, width: 2.6, cap: 'round', join: 'round' });
       refillCue.visible = false;
-      return { slot, hit, mark, vacancies, vacancyCount: 0, pieces, refillCue, top, topShadow, topY };
+      return { slot, hit, vacancies, vacancyCount: 0, pieces, refillCue, top, topShadow, topY };
     });
     this.updateVacancies();
 
-    this.scoreBar.draw(state, levelStartScore);
     this.drawPressure(state.movesLeft, pressureLimit);
     this.scrim.visible = this.overlay.visible = state.gameOver;
     if (state.gameOver) this.result.text = state.score.toLocaleString();
+  }
+
+  drawScore(display: ScoreDisplay): void {
+    this.scoreBar.draw(display);
+  }
+
+  creditScore(now: number, reduced: boolean): void {
+    this.scoreBar.credit(now, reduced);
+  }
+
+  reachScoreGoal(now: number, reduced: boolean): void {
+    this.scoreBar.reachGoal(now, reduced);
+  }
+
+  startLevelCelebration(details: LevelCelebrationDetails, now: number, reduced: boolean): void {
+    const { upgrade } = details;
+    const { donutWidth, donutHeight, step } = this.layout;
+    const markers: Rect[] = [];
+    if (upgrade?.kind === 'slots') {
+      const { first, pitch } = capacityRail(donutWidth, this.capacity);
+      for (const { slot } of this.stacks) {
+        markers.push({
+          x: slot.x + first + upgrade.previousCapacity * pitch - 1.4, y: slot.base + 7.5,
+          width: (upgrade.capacity - upgrade.previousCapacity) * pitch + 2.2, height: 6.8,
+        });
+      }
+    } else if (upgrade?.kind === 'stack') {
+      for (const { slot, pieces } of this.stacks.slice(upgrade.firstNewStack, upgrade.stackCount)) {
+        const y = Math.max(BOARD_TOP, slot.base - Math.max(0, pieces.length - 1) * step - donutHeight - 3);
+        markers.push({ x: slot.x - donutWidth / 2 - 4, y, width: donutWidth + 8, height: slot.base + 18 - y });
+      }
+    }
+    this.celebration.start(details, markers, now, reduced, this.fit.height);
+  }
+
+  showScoreEffects(now: number): void {
+    this.scoreBar.showEffects(now);
+    this.celebration.show(now);
+  }
+
+  cancelScoreEffects(): void {
+    this.scoreBar.resetEffects();
+    this.celebration.cancel();
   }
 
   private updateVacancies(): void {
@@ -303,19 +366,41 @@ export class GameScene {
     return { x: (point.x - this.fit.x) / this.fit.scale, y: (point.y - this.fit.y) / this.fit.scale };
   }
 
-  hit(point: Point): Target {
+  hit(point: Point, mode: HitMode = 'exact'): Target {
     if (this.overlay.visible) {
       const inDialog = { x: point.x - this.dialog.x, y: point.y - this.dialog.y };
       return contains(this.restartHit, inDialog) ? 'restart' : null;
     }
     if (this.gameOver) return null;
-    const index = this.stacks.findIndex(({ hit }) => contains(hit, point));
-    return index >= 0 ? index : null;
+    return stackTarget(this.stacks, point, this.fit.height, mode);
   }
 
   topPosition(index: number): Point {
     const { slot, top } = this.stacks[index];
     return { x: slot.x, y: top?.y ?? slot.base };
+  }
+
+  private guidePoint(index: number): Point {
+    const { slot, top } = this.stacks[index];
+    const center = this.layout.donutHeight * 0.58;
+    if (!top) return { x: slot.x, y: slot.base - center };
+    const offset = center * top.scale.y;
+    return { x: top.x + Math.sin(top.rotation) * offset, y: top.y - Math.cos(top.rotation) * offset };
+  }
+
+  private hideMoveGuides(): void {
+    this.arrow.hide();
+    this.selectionCue.visible = this.feedbackCue.visible = false;
+    if (this.liftedStack !== null) {
+      const { top, topY, topShadow } = this.stacks[this.liftedStack];
+      if (top) {
+        top.y = topY;
+        top.rotation = 0;
+        top.scale.set(1);
+      }
+      if (topShadow) topShadow.visible = true;
+    }
+    this.liftedStack = this.liftStarted = null;
   }
 
   startMove(inserts: readonly DoughInsert[], started: number, reduced: boolean, transfer?: Transfer): void {
@@ -420,7 +505,14 @@ export class GameScene {
   startMatch(match: MatchPlayback): void {
     const target = this.stacks[match.to];
     const { donutWidth, donutHeight, step } = this.layout;
-    this.matchEffect.start(match, {
+    let effect = this.matchPool.find(effect => !effect.active);
+    if (!effect) {
+      effect = new MatchEffect();
+      this.matchPool.push(effect);
+    }
+    this.matchEffects.addChild(effect.root);
+    this.currentMatch = effect;
+    effect.start(match, {
       start: this.topPosition(match.from),
       landing: { x: target.slot.x, y: target.slot.base - target.pieces.length * step },
       width: donutWidth,
@@ -431,67 +523,85 @@ export class GameScene {
     this.matchedDestination = target.pieces.slice(-(match.runLength - 1));
     this.stacks[match.from].top!.visible = false;
     this.updateVacancies();
-    for (const stack of this.stacks) stack.mark.visible = false;
+    this.hideMoveGuides();
     this.flight.visible = false;
     this.status.text = '';
   }
 
   showMatch(frame: MatchFrame): void {
-    this.matchEffect.showPieces(frame);
+    this.currentMatch?.showPieces(frame);
     if (frame.phase === 'clear') {
       for (const piece of this.matchedDestination) piece.visible = false;
       this.updateVacancies();
     }
-    if (frame.phase === 'resolved') this.matchedDestination = [];
+    if (frame.phase === 'resolved') {
+      this.matchedDestination = [];
+      this.currentMatch = null;
+    }
   }
 
   showMatchTail(now: number): void {
-    this.matchEffect.showTail(now);
+    const target = this.scoreBar.creditTarget;
+    for (const effect of this.matchPool) effect.showTail(now, target);
   }
 
   cancelMatch(): void {
     this.matchedDestination = [];
-    this.matchEffect.cancel();
+    this.currentMatch = null;
+    for (const effect of this.matchPool) effect.cancel();
   }
 
-  showInteraction(gestures: StackGestures, legal: boolean, feedback: Feedback | null, now: number, reduced: boolean): void {
+  showInteraction(gestures: StackGestures, preview: MovePreview | null, feedback: Feedback | null, now: number, reduced: boolean): void {
     if (this.gameOver) {
+      this.hideMoveGuides();
       this.status.text = '';
       return;
     }
 
-    const { source, destination, pressedStack } = gestures;
-    const age = feedback ? now - feedback.started : 0;
-
+    const { source, pressedStack } = gestures;
+    if (source !== this.liftedStack) {
+      this.liftedStack = source;
+      this.liftStarted = source === null || reduced ? null : now;
+    }
+    if (reduced) this.liftStarted = null;
+    else if (source !== null && this.liftStarted === null) this.liftStarted = now;
+    const age = this.liftStarted === null ? 0 : Math.max(0, now - this.liftStarted);
+    const rise = 1 - (1 - Math.min(1, age / SELECTION_LIFT_MS)) ** 3;
+    const phase = age / SELECTION_WIGGLE_MS;
+    const wiggle = Math.sin(phase * Math.PI * 2) * 0.085;
     this.stacks.forEach((view, index) => {
-      const result = feedback?.target === index ? feedback : null;
-      const color = index === destination ? (legal ? MINT : RED)
-        : index === source || index === pressedStack ? GOLD
-        : result ? (!result.color ? RED : result.levelUp ? GOLD : MINT) : undefined;
-      const { hit } = view;
       const pressed = index === pressedStack;
-      view.mark.visible = color !== undefined;
-      if (color !== undefined && (view.markColor !== color || view.markPressed !== pressed)) {
-        view.mark.clear().roundRect(hit.x + 3, hit.y + 2, hit.width - 6, hit.height - 4, 16)
-          .fill({ color, alpha: pressed ? 0.23 : 0.11 }).stroke({ color, width: pressed ? 3.3 : 2.2 });
-        view.markColor = color;
-        view.markPressed = pressed;
-      }
-      view.mark.alpha = result && !pressed && index !== source && index !== destination
-        ? 1 - 0.7 * age / result.duration : 1;
       if (view.top && !this.movePresentation) {
         const lifted = !reduced && !pressed && index === source;
         const squash = !reduced && pressed;
-        view.top.y = view.topY - (lifted ? STACK_LIFT : 0);
+        view.top.y = view.topY - (lifted ? STACK_LIFT * rise : 0);
+        view.top.rotation = lifted ? wiggle : 0;
         view.top.scale.set(squash ? 1.055 : 1, squash ? 0.89 : 1);
         if (view.topShadow) view.topShadow.visible = !lifted;
       }
     });
 
-    this.status.text = !feedback ? ''
-      : !feedback.color ? 'That stack is full'
-      : feedback.levelUp ? 'Level up!'
-      : '';
+    if (source !== null && preview && source !== preview.destination) {
+      const { point, destination, blocked } = preview;
+      const end = destination === null ? point : this.guidePoint(destination);
+      this.arrow.show(this.guidePoint(source), end, blocked ? 'blocked' : destination === null ? 'gap' : 'move');
+    } else this.arrow.hide();
+
+    this.selectionCue.visible = reduced && source !== null && !this.arrow.root.visible;
+    if (source !== null && this.selectionCue.visible) {
+      const anchor = this.guidePoint(source);
+      this.selectionCue.position.set(anchor.x, anchor.y - this.layout.donutHeight * 0.43);
+    }
+
+    this.feedbackCue.visible = !!feedback;
+    if (feedback) {
+      const anchor = this.guidePoint(feedback.target);
+      this.feedbackCue.position.set(anchor.x, anchor.y - this.layout.donutHeight * 0.43);
+      this.feedbackCue.tint = feedback.color ? MINT : RED;
+      this.feedbackCue.alpha = reduced ? 1 : 1 - 0.7 * (now - feedback.started) / feedback.duration;
+    }
+
+    this.status.text = feedback && !feedback.color ? 'That stack is full' : '';
     this.status.style.fill = feedback && !feedback.color ? RED : INK;
   }
 }

@@ -30,14 +30,42 @@ describe('stack gestures', () => {
     expect(gestures.source).toBeNull();
   });
 
-  it('clears a selection when tapping its own stack or outside the board', () => {
+  it('keeps selection on a gap or outside tap and clears it on an explicit same-stack tap', () => {
     const gestures = fixture();
     tap(gestures, 0);
-    tap(gestures, 0);
-    expect(gestures.source).toBeNull();
-    tap(gestures, 0);
+    gestures.start(1, { x: 182, y: 100 }, null);
+    expect(gestures.finish(1, { x: 183, y: 100 }, null)).toBeNull();
+    expect(gestures.source).toBe(0);
     tap(gestures, null, outside);
+    expect(gestures.source).toBe(0);
+    tap(gestures, 0);
     expect(gestures.source).toBeNull();
+  });
+
+  it('keeps the pressed target through small movement over its edge', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, middle, 1);
+    const drift = { x: middle.x + 2, y: middle.y - 3 };
+    gestures.update(1, drift, null);
+    expect(gestures.pressedStack).toBe(1);
+    expect(gestures.finish(1, drift, null)).toEqual({ kind: 'move', from: 0, to: 1 });
+  });
+
+  it('cancels an off-board release even within tap jitter and keeps the prior selection', () => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, middle, 1, 12);
+    const edge = { x: middle.x + 2, y: middle.y + 2 };
+    gestures.update(1, edge, 'outside');
+    expect(gestures.pressedStack).toBeNull();
+    expect(gestures.finish(1, edge, 'outside')).toBeNull();
+    expect(gestures.source).toBe(0);
+    gestures.start(1, left, 0);
+    gestures.update(1, middle, 1);
+    expect(gestures.destination).toBe(1);
+    expect(gestures.finish(1, outside, 'outside')).toBeNull();
+    expect(gestures.source).toBe(0);
   });
 
   it('uses the swipe origin and release target, skipping intermediate stacks', () => {

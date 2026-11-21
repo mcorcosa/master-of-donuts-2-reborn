@@ -30,7 +30,7 @@ describe('Master of Donuts 2 rules', () => {
       for (const color of colors) expect(inventory.filter((donut) => donut === color)).toHaveLength(3);
       expect(game.stacks.map((stack) => stack.length)).toEqual([3, 3, 3]);
       expect(game.stacks.every((stack) => new Set(stack).size > 1)).toBe(true);
-      expect(game).toMatchObject({ score: 0, level: 1, capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false });
+      expect(game).toMatchObject({ score: 0, combo: 0, level: 1, capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false });
     }
     expect(another.stacks).not.toEqual(opening.stacks);
     expect(createGame(lowest)).toEqual(opening);
@@ -87,15 +87,70 @@ describe('Master of Donuts 2 rules', () => {
     expect(matchedRunLength(Array(9).fill('red'), 'red')).toBe(10);
   });
 
+  it.each([
+    [1, 3, 100], [1, 4, 150], [1, 5, 200],
+    [2, 3, 110], [2, 4, 165], [2, 5, 220],
+  ])('at level %i a %i-donut clear awards %i points', (level, runLength, award) => {
+    const game = board([['red'], Array(runLength - 1).fill('red'), ['gold', 'yellow']], {
+      level, capacity: level + 4,
+    });
+    expect(move(game, 0, 1, lowest).score).toBe(award);
+  });
+
+  it('uses the starting level’s award when a large clear immediately crosses the goal', () => {
+    const game = board([['red'], ['gold', 'red', 'red', 'red'], ['yellow', 'gold']], { score: 390 });
+
+    const next = move(game, 0, 1, lowest);
+    expect(next).toMatchObject({ score: 540, combo: 1, level: 2, capacity: 6, nextLevelScore: 1500 });
+    expect(move(next, 1, 0, highest)).toMatchObject({ score: 661, combo: 2, level: 2 });
+  });
+
+  it('starts a legacy fixture at zero, preserves a streak on invalid moves and resets it on a miss', () => {
+    const game = board([
+      ['red'], ['red', 'red'], ['gold'], ['gold', 'gold'], ['yellow'], ['yellow', 'yellow'], ['blue'], ['purple'],
+    ], { capacity: 10, level: 16, score: 30000, nextLevelScore: 34500 });
+
+    expect(game.combo).toBeUndefined();
+    const first = move(game, 0, 1, lowest);
+    expect(first).toMatchObject({ score: 30250, combo: 1 });
+    const second = move(first, 2, 3, lowest);
+    expect(second).toMatchObject({ score: 30525, combo: 2 });
+    expect(move(second, 2, 2, lowest)).toBe(second);
+    expect(move(second, -1, 0, lowest)).toBe(second);
+    const third = move(second, 4, 5, lowest);
+    expect(third).toMatchObject({ score: 30825, combo: 3 });
+    expect(move(third, 6, 7, lowest)).toMatchObject({ score: 30825, combo: 0, movesLeft: 6 });
+    expect(createGame(lowest).combo).toBe(0);
+  });
+
+  it('rounds down the bonus on the level-adjusted long-run award', () => {
+    const game = board([['red'], ['gold', 'red', 'red', 'red'], ['yellow', 'gold']], {
+      combo: 1, level: 2, capacity: 6, nextLevelScore: 1500,
+    });
+    expect(move(game, 0, 1, lowest)).toMatchObject({ score: 181, combo: 2 });
+  });
+
+  it('caps the bonus at 50 percent while the streak keeps counting', () => {
+    const game = board([
+      ['red'], ['red', 'red'], ['gold'], ['gold', 'gold'], ['yellow'], ['yellow', 'yellow'], ['blue'], ['purple'],
+    ], { combo: 4, capacity: 10, level: 16, score: 30000, nextLevelScore: 34500 });
+
+    const fifth = move(game, 0, 1, lowest);
+    expect(fifth).toMatchObject({ score: 30350, combo: 5 });
+    const sixth = move(fifth, 2, 3, lowest);
+    expect(sixth).toMatchObject({ score: 30725, combo: 6 });
+    expect(move(sixth, 4, 5, lowest)).toMatchObject({ score: 31100, combo: 7 });
+  });
+
   it('clears all four reds above gold and makes a bottom-only continuation on the reported board', () => {
     const game = board([['red'], ['gold', 'red', 'red', 'red'], ['yellow', 'gold']]);
     const next = move(game, 0, 1, lowest);
 
     expect(next.stacks).toEqual([['red', 'gold', 'gold'], ['gold'], ['yellow', 'gold']]);
-    expect(next).toMatchObject({ score: 100, movesLeft: 7, gameOver: false });
+    expect(next).toMatchObject({ score: 150, movesLeft: 7, gameOver: false });
     expect(game.stacks[1]).toEqual(['gold', 'red', 'red', 'red']);
     expect(canMove(next, 1, 0)).toBe(true);
-    expect(move(next, 1, 0, highest).score).toBe(200);
+    expect(move(next, 1, 0, highest).score).toBe(260);
   });
 
   it('keeps ordinary bottom refill when a legal setup miss can unlock the next score', () => {
@@ -104,12 +159,12 @@ describe('Master of Donuts 2 rules', () => {
     ], { movesLeft: 2 });
     const next = move(game, 0, 1, lowest);
     expect(next.stacks).toEqual([['red', 'gold', 'gold'], ['gold', 'red', 'yellow'], ['gold', 'yellow']]);
-    expect(next.score).toBe(100);
+    expect(next.score).toBe(150);
 
     const setup = move(next, 2, 1, highest);
-    expect(setup).toMatchObject({ score: 100, movesLeft: 1, gameOver: false });
+    expect(setup).toMatchObject({ score: 150, movesLeft: 1, gameOver: false });
     expect(canMove(setup, 2, 0)).toBe(true);
-    expect(move(setup, 2, 0, highest).score).toBe(200);
+    expect(move(setup, 2, 0, highest).score).toBe(250);
   });
 
   it('creates a scoring transfer with only three new donuts when the clear empties the whole board', () => {
@@ -117,9 +172,9 @@ describe('Master of Donuts 2 rules', () => {
     const next = move(game, 0, 1, highest);
 
     expect(next.stacks).toEqual([['red'], ['red', 'red'], []]);
-    expect(next).toMatchObject({ score: 100, movesLeft: 1, gameOver: false });
+    expect(next).toMatchObject({ score: 150, movesLeft: 1, gameOver: false });
     expect(canMove(next, 0, 1)).toBe(true);
-    expect(move(next, 0, 1, lowest)).toMatchObject({ score: 200, movesLeft: 1 });
+    expect(move(next, 0, 1, lowest)).toMatchObject({ score: 260, movesLeft: 1 });
   });
 
   it('clears a five-donut run while preserving the same color below a blocker', () => {
@@ -130,9 +185,9 @@ describe('Master of Donuts 2 rules', () => {
 
     expect(next.stacks[1]).toEqual(['red', 'gold', 'yellow', 'yellow']);
     expect(next.stacks.flat()).toHaveLength(game.stacks.flat().length - 5 + 3);
-    expect(next.score).toBe(3640);
+    expect(next.score).toBe(3780);
     expect(canMove(next, 0, 1)).toBe(true);
-    expect(move(next, 0, 1, highest).score).toBe(3780);
+    expect(move(next, 0, 1, highest).score).toBe(3934);
   });
 
   it('clears a ten-donut run at maximum capacity, scores once, and preserves an existing scoring move', () => {
@@ -144,9 +199,9 @@ describe('Master of Donuts 2 rules', () => {
     expect(next.stacks).toEqual([
       ['red', 'gold'], ['gold', 'red'], ['gold', 'gold'], ['blue'], ['blue'], ['purple'], ['choco'], ['yellow'],
     ]);
-    expect(next).toMatchObject({ score: 30250, gameOver: false });
+    expect(next).toMatchObject({ score: 31125, gameOver: false });
     expect(canMove(next, 0, 2)).toBe(true);
-    expect(move(next, 0, 2, highest).score).toBe(30500);
+    expect(move(next, 0, 2, highest).score).toBe(31400);
   });
 
   it('uses the top-placement rescue against fatal pressure on a dense high-level board', () => {
@@ -159,14 +214,14 @@ describe('Master of Donuts 2 rules', () => {
     const next = move(game, 0, 1, lowest, onDough);
 
     expect(next.stacks).toEqual([[...full.slice(1), 'yellow'], [...covered, 'yellow', 'yellow'], ...game.stacks.slice(2)]);
-    expect(next).toMatchObject({ score: 58840, movesLeft: 1, gameOver: false });
+    expect(next).toMatchObject({ score: 59010, movesLeft: 1, gameOver: false });
     expect(onDough).toHaveBeenCalledExactlyOnceWith([
       { stack: 1, depth: covered.length, color: 'yellow' },
       { stack: 1, depth: covered.length + 1, color: 'yellow' },
       { stack: 0, depth: full.length - 1, color: 'yellow' },
     ]);
     expect(canMove(next, 0, 1)).toBe(true);
-    expect(move(next, 0, 1, highest)).toMatchObject({ score: 59180, movesLeft: 1, gameOver: false });
+    expect(move(next, 0, 1, highest)).toMatchObject({ score: 59384, movesLeft: 1, gameOver: false });
   });
 
   it('protects top pairs and completes the match refill before a capacity upgrade', () => {
@@ -280,7 +335,7 @@ describe('Master of Donuts 2 rules', () => {
     expect(level3.stacks[3]).toEqual(['gold', 'gold', 'yellow', 'gold']);
 
     const level4 = move({ ...level3, stacks: [...game.stacks, ['red']], score: 2380 }, 0, 1, lowest);
-    expect(level4).toMatchObject({ score: 2500, level: 4, rank: 'Batter Boss', capacity: 6, nextLevelScore: 3500 });
+    expect(level4).toMatchObject({ score: 2512, level: 4, rank: 'Batter Boss', capacity: 6, nextLevelScore: 3500 });
     const pressure = move({ ...level4, stacks: [['gold'], ['yellow'], ['red'], []], movesLeft: 1 }, 0, 1, highest);
     expect(pressure.stacks[0]).toEqual(['choco']);
   });
@@ -292,7 +347,7 @@ describe('Master of Donuts 2 rules', () => {
     expect(level16).toMatchObject({ score: 29500, level: 16, capacity: 10, rank: 'Master of Donuts', nextLevelScore: 34500 });
 
     const level17 = move({ ...level16, score: 34250, stacks }, 0, 1, lowest);
-    expect(level17).toMatchObject({ score: 34500, level: 17, capacity: 10, rank: 'Master of Donuts', nextLevelScore: 37500 });
+    expect(level17).toMatchObject({ score: 34525, level: 17, capacity: 10, rank: 'Master of Donuts', nextLevelScore: 37500 });
     expect(level17.stacks).toHaveLength(8);
   });
 
@@ -308,5 +363,15 @@ describe('Master of Donuts 2 rules', () => {
     const latePressure = move({ ...lateGame, movesLeft: 1 }, 2, 3, lowest);
     expect(latePressure.stacks.flat()).toHaveLength(stacks.flat().length + 6);
     expect(latePressure).toMatchObject({ movesLeft: 7, gameOver: false });
+  });
+
+  it('advances one fallback level per scoring move even with enough points to pass multiple goals', () => {
+    const game = board([
+      ['gold', 'red'], Array(9).fill('red'), ['gold', 'gold'], ['blue'], ['blue'], ['purple'], ['choco'], ['yellow'],
+    ], { capacity: 10, level: 100, score: 286499, nextLevelScore: 286500, rank: 'Master of Donuts' });
+
+    const largeClear = move(game, 0, 1, lowest);
+    expect(largeClear).toMatchObject({ score: 291404, level: 101, nextLevelScore: 289500 });
+    expect(move(largeClear, 0, 2, highest)).toMatchObject({ score: 292614, level: 102, nextLevelScore: 292500 });
   });
 });

@@ -1,6 +1,7 @@
 export interface GameState {
   stacks: string[][];
   score: number;
+  combo?: number;
   level: number;
   rank: string;
   capacity: number;
@@ -210,6 +211,7 @@ export function createGame(rng: () => number = Math.random): GameState {
   const state: RunState = {
     stacks,
     score: 0,
+    combo: 0,
     level: 1,
     rank: RANKS[0],
     capacity: 5,
@@ -241,6 +243,7 @@ export function move(
   const matched = matchedRunLength(target, color);
   target.push(color);
   if (!matched) {
+    next.combo = 0;
     next.movesLeft--;
     if (next.movesLeft > 0) return next;
     next.movesLeft = MOVE_LIMIT;
@@ -254,7 +257,11 @@ export function move(
   const inserts: DoughInsert[] = [];
   if (matched) {
     target.splice(-matched);
-    next.score += 100 + (state.level - 1) * 10;
+    const priorCombo = state.combo ?? 0;
+    const baseAward = 100 + (matched - 3) * 50;
+    const adjustedAward = baseAward * (10 + state.level - 1) / 10;
+    next.combo = priorCombo + 1;
+    next.score += adjustedAward + Math.floor(adjustedAward * Math.min(priorCombo, 5) / 10);
     if (matched === 3) refill(next, inserts, colors, rng, color);
     else refillLargeMatch(next, inserts, colors, rng, color, from, to);
     if (next.score >= next.nextLevelScore) advanceLevel(next, inserts, colors, rng);

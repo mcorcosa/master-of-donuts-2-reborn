@@ -1,4 +1,4 @@
-import type { Point } from './gestures';
+import type { Point, Target } from './gestures';
 
 export interface Rect extends Point {
   width: number;
@@ -23,6 +23,10 @@ const DONUT_ASPECT = 320 / 430;
 const WIDTH_FIT_STEP_RATIO = 0.28;
 const MAX_STEP_RATIO = 0.52;
 const STEP_SCALE = 0.85;
+const TAP_SLOP = 14;
+const SWIPE_SLOP = 22;
+
+export type HitMode = 'exact' | 'tap' | 'swipe';
 
 export function viewport(width: number, height: number) {
   const scale = Math.min(Math.max(1, width) / VIEW_WIDTH, Math.max(1, height) / 540, 1.6);
@@ -76,4 +80,25 @@ export function stackHit(slot: StackSlot, count: number, donutHeight: number, st
 export function contains(rect: Rect, point: Point): boolean {
   return point.x >= rect.x && point.x < rect.x + rect.width &&
     point.y >= rect.y && point.y < rect.y + rect.height;
+}
+
+export function stackTarget(stacks: readonly { hit: Rect }[], point: Point, height: number, mode: HitMode): Target {
+  if (point.x < BOARD_INSET || point.x >= VIEW_WIDTH - BOARD_INSET ||
+      point.y < BOARD_TOP || point.y >= height - BOARD_FOOTER_SPACE) return 'outside';
+
+  const exact = stacks.findIndex(({ hit }) => contains(hit, point));
+  if (exact >= 0) return exact;
+  if (mode === 'exact') return null;
+
+  const slop = mode === 'tap' ? TAP_SLOP : SWIPE_SLOP;
+  let nearby: number | null = null;
+  for (let index = 0; index < stacks.length; index++) {
+    const hit = stacks[index].hit;
+    const dx = Math.max(hit.x - point.x, point.x - (hit.x + hit.width), 0);
+    const dy = Math.max(hit.y - point.y, point.y - (hit.y + hit.height), 0);
+    if (dx * dx + dy * dy > slop * slop) continue;
+    if (nearby !== null) return null;
+    nearby = index;
+  }
+  return nearby;
 }
