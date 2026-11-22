@@ -3,15 +3,14 @@ import type { Point } from './gestures';
 import type { JokerArt } from './jokerArt';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
 import {
-  awardFrame, clamp, clearStart, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches, type MatchPlayback,
-  scoreFlightFrame, scoreFlightPosition, scoreSize,
+  awardFrame, clamp, clearStart, comboPopPeak, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches,
+  type MatchPlayback, scoreFlightFrame, scoreFlightPosition, scorePopPeak, scoreSize,
 } from './matchPlayback';
 import { flightPosition, unit } from './movePlayback';
 
 const FONT = 'Reborn Fredoka';
 const CREAM = 0xfff3d1;
-const SCORE_SCALE = 1.32;
-const COMBO_GAP = 4;
+const COMBO_GAP = 5;
 const SPRINKLES = 6;
 const STREAKS = 2;
 const BURST_MS = 142;
@@ -49,6 +48,9 @@ export class MatchEffect {
   private readonly donuts = new Container();
   private readonly bursts = new Container();
   private readonly award = new Container();
+  private readonly score = new Container();
+  private readonly comboBadge = new Container();
+  private readonly comboBacking = new Graphics();
   private readonly glaze = new Container();
   private readonly trail = Array.from({ length: 6 }, (_, index) => this.glaze.addChild(new Graphics()
     .ellipse(0, 0, 4.5 - index * 0.38, 2.8 - index * 0.27).fill(0xffffff)));
@@ -65,7 +67,7 @@ export class MatchEffect {
   private origin: Point = { x: 0, y: 0 };
   private scoreY = 0;
   private scoreFit = 1;
-  private tiltDirection = 1;
+  private comboFit = 1;
   private current: {
     playback: MatchPlayback;
     geometry: MatchGeometry;
@@ -77,17 +79,19 @@ export class MatchEffect {
   constructor() {
     const style = {
       fontFamily: [FONT, 'Comic Sans MS', 'cursive'],
-      fontSize: 24 * SCORE_SCALE, fontWeight: '700' as const,
+      fontSize: scoreSize(0), fontWeight: '700' as const,
     };
-    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 4.2 * SCORE_SCALE } } });
-    this.face = new Text({ text: '', style: { ...style, stroke: { color: CREAM, width: 1.2 * SCORE_SCALE } } });
+    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 6, join: 'round' } } });
+    this.face = new Text({ text: '', style: { ...style, stroke: { color: CREAM, width: 2, join: 'round' } } });
     this.combo = new Text({ text: '', style: {
-      ...style, fontSize: 16, fill: CREAM, stroke: { color: 0x632f23, width: 3.2, join: 'round' },
+      ...style, fontSize: 24, fill: CREAM,
     } });
     this.outline.anchor.set(0.5);
     this.face.anchor.set(0.5);
     this.combo.anchor.set(0.5);
-    this.award.addChild(this.outline, this.face, this.combo);
+    this.score.addChild(this.outline, this.face);
+    this.comboBadge.addChild(this.comboBacking, this.combo);
+    this.award.addChild(this.score, this.comboBadge);
     this.root.addChild(this.donuts, this.bursts, this.award, this.glaze);
     this.root.once('destroyed', () => {
       this.sprinkleShape.destroy();
@@ -120,49 +124,19 @@ export class MatchEffect {
     const launches = playback.reduced ? [] : matchLaunches(playback, geometry);
     this.current = { playback, geometry, texture, launches, joker };
     const fill = DONUT_FILLS[playback.color] ?? CREAM;
-    const size = scoreSize(playback.points) * SCORE_SCALE;
-    for (const layer of [this.outline, this.face]) {
-      layer.text = `+${number.format(playback.points)}`;
-      layer.style.fill = fill;
-      layer.style.fontSize = size;
-      layer.position.set(0);
-    }
-    this.outline.style.stroke = { color: deepHue(fill), width: 4.2 * SCORE_SCALE };
-
-    const bounds = this.outline.getLocalBounds();
-    this.scoreFit = Math.min(1, 248 / Math.max(1, bounds.width));
-    this.outline.scale.set(this.scoreFit);
-    this.face.scale.set(this.scoreFit);
+    const { marginX, marginY } = this.prepareAward(playback, fill);
     this.trail.forEach((piece, index) => { piece.tint = index % 3 === 2 ? CREAM : fill; });
-    const scoreHeight = bounds.height * this.scoreFit;
-    let halfWidth = Math.max(Math.abs(bounds.minX), Math.abs(bounds.maxX)) * this.scoreFit;
-    let extraHeight = 0;
-    if (playback.combo >= 2) {
-      this.combo.visible = true;
-      this.combo.text = `${number.format(playback.combo)}× Combo`;
-      const comboBounds = this.combo.getLocalBounds();
-      halfWidth = Math.max(halfWidth, Math.abs(comboBounds.minX), Math.abs(comboBounds.maxX));
-      extraHeight = comboBounds.height + COMBO_GAP;
-      this.combo.y = scoreHeight / 2 + COMBO_GAP - comboBounds.minY - extraHeight / 2;
-    }
-    this.outline.y = this.face.y = this.scoreY = -((bounds.minY + bounds.maxY) * this.scoreFit + extraHeight) / 2;
-    const peakX = halfWidth * (playback.reduced ? 1 : 1.34);
-    const peakY = (scoreHeight + extraHeight) / 2 * (playback.reduced ? 1 : 1.42);
-    const tilt = playback.reduced ? 0 : 0.09;
-    const marginX = peakX + peakY * tilt + 6;
-    const marginY = peakY + peakX * tilt + 3;
 
     const { landing, width, height, viewHeight } = geometry;
     const lead = launches.at(-1)?.burst;
-    const preferredY = lead ? lead.y - marginY - 9 : landing.y - height - 20 - extraHeight / 2;
+    const preferredY = lead ? lead.y - marginY - 9 : landing.y - height - marginY - 5;
     const minimumY = BOARD_TOP + marginY;
     const anchorX = lead?.x ?? landing.x;
-    const offset = extraHeight && preferredY < minimumY ? marginX + (lead ? 25 : width / 2) : 0;
+    const offset = playback.combo >= 2 && preferredY < minimumY ? marginX + (lead ? 25 : width / 2) : 0;
     this.origin = {
       x: clamp(anchorX + (anchorX < VIEW_WIDTH / 2 ? offset : -offset), marginX, VIEW_WIDTH - marginX),
       y: clamp(preferredY, minimumY, viewHeight - BOARD_FOOTER_SPACE - marginY),
     };
-    this.tiltDirection = landing.x < VIEW_WIDTH / 2 ? 1 : -1;
     this.prepareBursts(launches.length, fill);
 
     this.ensurePieces(playback.runLength);
@@ -174,6 +148,47 @@ export class MatchEffect {
       }
     });
     this.donuts.visible = true;
+  }
+
+  private prepareAward(playback: MatchPlayback, fill: number) {
+    const size = scoreSize(playback.points);
+    const text = `+${number.format(playback.points)}`;
+    for (const layer of [this.outline, this.face]) {
+      layer.text = text;
+      layer.style.fill = fill;
+      layer.style.fontSize = size;
+    }
+    this.outline.style.stroke = { color: deepHue(fill), width: 6, join: 'round' };
+    const bounds = this.outline.getLocalBounds();
+    const x = -(bounds.minX + bounds.maxX) / 2;
+    const y = -(bounds.minY + bounds.maxY) / 2;
+    this.outline.position.set(x, y);
+    this.face.position.set(x, y);
+    this.scoreFit = Math.min(1, 248 / Math.max(1, bounds.width));
+    const scorePeak = playback.reduced ? { x: 1, y: 1 } : scorePopPeak(playback.points);
+    let halfWidth = bounds.width * this.scoreFit * scorePeak.x / 2;
+    const scoreHeight = bounds.height * this.scoreFit * scorePeak.y;
+
+    this.scoreY = 0;
+    let extraHeight = 0;
+    if (playback.combo >= 2) {
+      this.combo.text = `${number.format(playback.combo)}× Combo`;
+      const bounds = this.combo.getLocalBounds();
+      this.combo.position.set(-(bounds.minX + bounds.maxX) / 2, -(bounds.minY + bounds.maxY) / 2);
+      const width = bounds.width + 26;
+      const height = bounds.height + 8;
+      this.comboFit = Math.min(1, 232 / (width + 2));
+      const comboPeak = playback.reduced ? 1 : comboPopPeak(playback.combo);
+      const badgeHeight = (height + 2) * this.comboFit * comboPeak;
+      const border = playback.combo >= 5 ? 0xffd477 : 0xe9ae73;
+      this.comboBacking.clear().roundRect(-width / 2, -height / 2, width, height, height / 2)
+        .fill(0x713526).stroke({ color: border, width: 2 });
+      halfWidth = Math.max(halfWidth, (width + 2) * this.comboFit * comboPeak / 2);
+      extraHeight = COMBO_GAP + badgeHeight;
+      this.scoreY = -extraHeight / 2;
+      this.comboBadge.y = (scoreHeight + COMBO_GAP) / 2;
+    }
+    return { marginX: halfWidth + 6, marginY: (scoreHeight + extraHeight) / 2 + 3 };
   }
 
   private ensurePieces(count: number): void {
@@ -248,26 +263,25 @@ export class MatchEffect {
       return;
     }
     this.award.position.copyFrom(this.origin);
-    this.award.scale.set(frame.scaleX, frame.scaleY);
-    this.award.rotation = this.tiltDirection * frame.rotation;
     this.award.alpha = frame.alpha;
-    this.combo.alpha = 1;
+    this.score.position.set(0, this.scoreY);
+    this.score.scale.set(this.scoreFit * frame.scaleX, this.scoreFit * frame.scaleY);
+    this.comboBadge.visible = playback.combo >= 2 && frame.comboAlpha > 0;
+    this.comboBadge.alpha = frame.comboAlpha;
+    this.comboBadge.scale.set(this.comboFit * frame.comboScale);
   }
 
   private flyScore(progress: number, target: Point, combo: boolean): void {
     const start = { x: this.origin.x, y: this.origin.y + this.scoreY };
     const position = scoreFlightPosition(start, target, progress);
     this.award.position.copyFrom(this.origin);
-    this.award.scale.set(1);
-    this.award.rotation = 0;
     this.award.alpha = 1;
-    this.combo.visible = combo && progress < 0.7;
-    this.combo.alpha = 1 - unit((progress - 0.24) / 0.46);
+    this.comboBadge.visible = combo && progress < 0.7;
+    this.comboBadge.alpha = 1 - unit((progress - 0.24) / 0.46);
+    this.comboBadge.scale.set(this.comboFit);
     const shrink = 1 - 0.82 * progress ** 1.15;
-    for (const layer of [this.outline, this.face]) {
-      layer.position.set(position.x - this.origin.x, position.y - this.origin.y);
-      layer.scale.set(this.scoreFit * shrink);
-    }
+    this.score.position.set(position.x - this.origin.x, position.y - this.origin.y);
+    this.score.scale.set(this.scoreFit * shrink);
 
     this.trail.forEach((piece, index) => {
       const lag = (index + 1) * 0.066;
@@ -337,7 +351,7 @@ export class MatchEffect {
 
   cancel(): void {
     this.current = null;
-    this.combo.visible = false;
+    this.comboBadge.visible = false;
     this.combo.text = '';
     this.donuts.visible = this.bursts.visible = this.award.visible = this.glaze.visible = false;
   }

@@ -17,23 +17,33 @@ function mockStorage(initial: string | null = null) {
 }
 
 describe('personal scores', () => {
-  it('keeps the top five with stable ties across reloads and highlights only the just-completed row', async () => {
-    const storage = mockStorage();
+  it('keeps stored scores, retains ten with stable ties across reloads, and highlights only the current run', async () => {
+    const legacy = [run(500), run(400), run(300), run(300, 2), run(200)];
+    const storage = mockStorage(JSON.stringify(legacy));
     const persistence = createBrowserPersistence(storage);
     const scores = new PersonalScores(persistence);
     expect(storage.setItem).not.toHaveBeenCalled();
-    for (const completed of [run(100), run(300), run(400), run(300, 2), run(500), run(50)]) await scores.record(completed);
+    for (const completed of [run(100), run(175), run(150), run(100, 2), run(125), run(50)]) await scores.record(completed);
 
     const reloaded = new PersonalScores(persistence);
-    expect(await reloaded.record(run(300, 3, 2))).toEqual({
-      run: run(300, 3, 2), isPersonalBest: false, rows: [
+    const last = run(115, 3, 2);
+    expect(await reloaded.record(last)).toEqual({
+      run: last, isPersonalBest: false, rows: [
         { rank: 1, score: 500, current: false }, { rank: 2, score: 400, current: false },
-        { rank: 3, score: 300, current: false }, { rank: 4, score: 300, current: false }, { rank: 5, score: 300, current: true },
+        { rank: 3, score: 300, current: false }, { rank: 4, score: 300, current: false },
+        { rank: 5, score: 200, current: false }, { rank: 6, score: 175, current: false },
+        { rank: 7, score: 150, current: false }, { rank: 8, score: 125, current: false },
+        { rank: 9, score: 115, current: true }, { rank: 10, score: 100, current: false },
       ],
     });
     expect(storage.setItem).toHaveBeenLastCalledWith(PERSONAL_SCORES_KEY,
-      JSON.stringify([run(500), run(400), run(300), run(300, 2), run(300, 3, 2)]));
-    expect((await reloaded.record(run(300, 4))).rows.every(row => !row.current)).toBe(true);
+      JSON.stringify([...legacy, run(175), run(150), run(125), last, run(100)]));
+    for (const nonRanked of [run(100, 4), run(50, 5)]) {
+      const result = await reloaded.record(nonRanked);
+      expect(result.run).toEqual(nonRanked);
+      expect(result.rows).toHaveLength(10);
+      expect(result.rows.every(row => !row.current)).toBe(true);
+    }
   });
 
   it('celebrates only a strictly higher positive score', async () => {

@@ -10,16 +10,42 @@ const INNER_WIDTH = WIDTH - INSET * 2;
 const INK = '#542e24';
 const SOFT_INK = '#74443a';
 const CREAM = '#fff5e9';
+const SCORE_LIMIT = 10;
 const FIRST_ROW_Y = 278;
+const PERSONAL_TAB_ROW_Y = 303;
+const FRIENDS_ROW_Y = 284;
+const ROW_HEIGHT = 24;
 const ROW_PITCH = 27;
+const RESTART_HEIGHT = 46;
+const PERSONAL_FOOTER_SPACE = 10;
+const FRIENDS_FOOTER_SPACE = 68;
+const VIEW_MARGIN = 11;
+const LIST_LEFT = INSET - 1;
+const LIST_WIDTH = INNER_WIDTH + 2;
+const SCROLLBAR_X = WIDTH - INSET + 5;
+const SCROLLBAR_WIDTH = 4;
 const TAB_WIDTH = INNER_WIDTH / 2 - 6;
 const PERSONAL_TAB: Rect = { x: INSET, y: 243, width: TAB_WIDTH, height: 34 };
 const FRIENDS_TAB: Rect = { ...PERSONAL_TAB, x: WIDTH - INSET - TAB_WIDTH };
-const SUBMIT: Rect = { x: INSET, y: 411, width: INNER_WIDTH, height: 34 };
+const SUBMIT: Rect = { x: INSET, y: 24, width: INNER_WIDTH, height: 34 };
 const SUBMISSION_LABELS: Record<ScoreSubmission, string> = {
   idle: 'Submit score', submitting: 'Submitting score…', sent: 'Score submitted', error: 'Couldn’t submit · Retry',
 };
 const number = new Intl.NumberFormat();
+
+function rowsHeight(count: number): number {
+  return count === 0 ? 0 : 2 + ROW_HEIGHT + (count - 1) * ROW_PITCH;
+}
+
+function fitName(display: Text, name: string, maxWidth: number): void {
+  const characters = Array.from(name);
+  let length = Math.min(characters.length, 18);
+  display.text = characters.length > length ? `${characters.slice(0, length).join('')}…` : name;
+  while (length > 0 && display.getLocalBounds().width > maxWidth) {
+    length--;
+    display.text = `${characters.slice(0, length).join('')}…`;
+  }
+}
 
 function label(parent: Container, text: string, x: number, y: number, size: number, options: {
   align?: number;
@@ -47,20 +73,27 @@ type WarmItem = Text | GraphicsContext;
 export class ResultsPanel {
   readonly root = new Container({ label: 'end-game-results' });
   private readonly hidden = new Container();
-  private readonly restart: Rect = { x: INSET, y: 0, width: INNER_WIDTH, height: 46 };
+  private readonly restart: Rect = { x: INSET, y: 0, width: INNER_WIDTH, height: RESTART_HEIGHT };
   private readonly backgrounds = new Map<number, GraphicsContext>();
-  private readonly normalRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, 24, 8).fill(0xfae2d1);
-  private readonly currentRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, 24, 8)
+  private readonly normalRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8).fill(0xfae2d1);
+  private readonly currentRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8)
     .fill(0xffc5a5).stroke({ color: 0xb26444, width: 1 });
   private readonly personalRows: ReturnType<ResultsPanel['makeRow']>[] = [];
   private shell?: ReturnType<ResultsPanel['buildShell']>;
   private view: ResultsView | null = null;
   private renderedFriends: ResultsView['friends'] = null;
+  private adaptiveBackground?: GraphicsContext;
+  private readonly scroll = { personal: 0, friends: 0 };
+  private listTop = 0;
+  private listHeight = 0;
+  private scrollLimit = 0;
+  private thumbTravel = 0;
 
   constructor(private readonly companionTexture: Texture) {
     this.root.once('destroyed', () => {
       this.hidden.destroy({ children: true });
       for (const context of this.backgrounds.values()) context.destroy();
+      this.adaptiveBackground?.destroy();
       this.normalRow.destroy();
       this.currentRow.destroy();
     });
@@ -72,21 +105,23 @@ export class ResultsPanel {
       if (child instanceof Text && child !== shell.score && child !== shell.level && child !== shell.combo) yield child;
       else if (child instanceof Graphics && child !== shell.backing) yield child.context;
       else if (child === shell.best || child === shell.deviceWithTabs || child === shell.deviceWithoutTabs ||
-        child === shell.personalTab || child === shell.friendsTab) {
+        child === shell.personalTab || child === shell.friendsTab || child === shell.friendsFooter) {
         for (const part of child.children) {
           if (part instanceof Text) yield part;
           else if (part instanceof Graphics) yield part.context;
         }
       }
     }
-    // History has at most five rows, and the Friends layout always has the same height.
-    yield this.background(455);
-    for (let rows = 1; rows <= 5; rows++) {
-      yield this.background(FIRST_ROW_Y + rows * ROW_PITCH + 10);
+    const restartPositions = [this.friendsRestartY, ...Array.from({ length: SCORE_LIMIT + 1 }, (_, count) =>
+      FIRST_ROW_Y + rowsHeight(count) + PERSONAL_FOOTER_SPACE)];
+    for (const y of restartPositions) {
+      const context = this.backgrounds.get(y) ?? this.background(y);
+      this.backgrounds.set(y, context);
+      yield context;
     }
     yield this.normalRow;
     yield this.currentRow;
-    for (let rank = 1; rank <= 5; rank++) {
+    for (let rank = 1; rank <= SCORE_LIMIT; rank++) {
       const row = this.row(rank);
       yield row.rank;
       if (rank === 1) yield row.current;
@@ -96,13 +131,11 @@ export class ResultsPanel {
   show(view: ResultsView, viewHeight: number): void {
     const { personal: { run, rows, isPersonalBest }, tab, friends } = view;
     const shell = this.shell ??= this.buildShell();
-    const restartY = friends ? 455 : FIRST_ROW_Y + rows.length * ROW_PITCH + 10;
-    if (this.restart.y !== restartY) {
-      this.restart.y = restartY;
-      shell.backing.context = this.background(restartY);
-      shell.restart.y = restartY + this.restart.height / 2;
+    const personalRows = rows.slice(0, SCORE_LIMIT);
+    if (this.view?.personal !== view.personal) {
+      this.scroll.personal = 0;
+      this.scroll.friends = 0;
     }
-    this.resize(viewHeight);
     this.attach(shell.best, isPersonalBest);
     fitText(shell.score, number.format(run.score), 214);
     fitText(shell.level, number.format(run.level), TAB_WIDTH - 24);
@@ -117,13 +150,15 @@ export class ResultsPanel {
     const showFriends = tab === 'friends' && friends !== null;
     this.attach(shell.deviceWithTabs, !showFriends && !!friends);
     this.attach(shell.deviceWithoutTabs, !showFriends && !friends);
-    for (const row of this.personalRows) {
-      if (showFriends || row.index > rows.length) this.attach(row.group, false);
-    }
+    this.attach(shell.personalBody, !showFriends, shell.listContent);
+    this.attach(shell.friendsBody, showFriends, shell.listContent);
+    this.attach(shell.friendsFooter, showFriends);
     if (!showFriends) {
-      for (const entry of rows) {
+      for (const row of this.personalRows) {
+        if (row.index > personalRows.length) this.attach(row.group, false);
+      }
+      for (const entry of personalRows) {
         const row = this.row(entry.rank);
-        row.group.y = (friends ? 303 : FIRST_ROW_Y) + (entry.rank - 1) * ROW_PITCH;
         row.group.label = entry.current ? 'leaderboard-current-score' : 'leaderboard-score';
         if (row.isCurrent !== entry.current) {
           row.isCurrent = entry.current;
@@ -133,22 +168,25 @@ export class ResultsPanel {
           } else this.hidden.addChild(row.current);
         }
         fitText(row.score, number.format(entry.score), 204);
-        this.attach(row.group, true);
+        this.attach(row.group, true, shell.personalBody);
       }
-    }
-    if (showFriends) {
-      if (this.renderedFriends?.list !== friends.list || this.renderedFriends.submission !== friends.submission) {
+    } else {
+      if (this.renderedFriends?.list !== friends.list) {
         for (const child of shell.friendsBody.removeChildren()) child.destroy({ children: true });
-        this.drawFriends(shell.friendsBody, friends);
-        this.renderedFriends = friends;
+        this.drawFriends(shell.friendsBody, friends.list);
       }
-      this.attach(shell.friendsBody, true);
-    } else this.attach(shell.friendsBody, false);
+      if (this.renderedFriends?.submission !== friends.submission) {
+        shell.submit.text.text = SUBMISSION_LABELS[friends.submission];
+        this.drawButton(shell.submit, SUBMIT, friends.submission === 'idle' || friends.submission === 'error');
+      }
+      this.renderedFriends = friends;
+    }
     this.view = view;
+    this.resize(viewHeight);
   }
 
-  private attach(part: Container, visible: boolean): void {
-    const parent = visible ? this.root : this.hidden;
+  private attach(part: Container, visible: boolean, destination = this.root): void {
+    const parent = visible ? destination : this.hidden;
     if (part.parent !== parent) parent.addChild(part);
   }
 
@@ -182,23 +220,34 @@ export class ResultsPanel {
     label(deviceWithoutTabs, 'Personal scores', 22, 255, 21);
     label(deviceWithoutTabs, 'On this device', WIDTH - 22, 256, 14, { align: 1, fill: SOFT_INK });
 
+    const list = this.root.addChild(new Container({ label: 'results-list' }));
+    const listContent = list.addChild(new Container({ label: 'results-list-content' }));
+    const mask = list.addChild(new Graphics({ label: 'results-list-mask' }));
+    listContent.mask = mask;
+    const scrollbar = list.addChild(new Graphics());
+    const thumb = list.addChild(new Graphics());
+    const personalBody = this.hidden.addChild(new Container({ label: 'personal-list' }));
+    const friendsBody = this.hidden.addChild(new Container({ label: 'friends-list' }));
+    const friendsFooter = this.hidden.addChild(new Container());
+    label(friendsFooter, 'Share your final score on the Facebook friends leaderboard.', CENTER, 11, 15,
+      { align: 0.5, fill: SOFT_INK, maxWidth: INNER_WIDTH }).label = 'friends-submit-disclosure';
+    const submit = this.button(friendsFooter, SUBMIT, SUBMISSION_LABELS.idle, 'friends-submit');
+    this.drawButton(submit, SUBMIT, true);
+
     return { backing, score, best, level, combo, restart, personalTab, friendsTab, personalButton, friendsButton,
-      deviceWithTabs, deviceWithoutTabs, friendsBody: this.hidden.addChild(new Container()) };
+      deviceWithTabs, deviceWithoutTabs, list, listContent, mask, scrollbar, thumb, personalBody, friendsBody,
+      friendsFooter, submit };
   }
 
   private background(y: number): GraphicsContext {
-    const cached = this.backgrounds.get(y);
-    if (cached) return cached;
     const { x, width, height } = this.restart;
     const panelHeight = y + height + INSET;
-    const context = new GraphicsContext()
+    return new GraphicsContext()
       .roundRect(0, 7, WIDTH, panelHeight, 25).fill({ color: 0x572920, alpha: 0.52 })
       .roundRect(0, 0, WIDTH, panelHeight, 25).fill(0xffefdf).stroke({ color: 0xfff9ef, width: 1.5 })
       .roundRect(10, 10, WIDTH - 20, 150, 19).fill(0xffc6a7).stroke({ color: 0xffdbc2, width: 1 })
       .roundRect(x, y + 3, width, height, 14).fill(0x78271f)
       .roundRect(x, y, width, height, 14).fill(0xa13935).stroke({ color: 0x8c302d, width: 1 });
-    this.backgrounds.set(y, context);
-    return context;
   }
 
   private row(index: number) {
@@ -206,7 +255,7 @@ export class ResultsPanel {
   }
 
   private makeRow(index: number) {
-    const group = this.hidden.addChild(new Container());
+    const group = this.hidden.addChild(new Container({ y: 1 + (index - 1) * ROW_PITCH }));
     const backing = group.addChild(new Graphics(this.normalRow));
     const rank = label(group, `${index}.`, 29, 12, 16, { fill: SOFT_INK });
     const current = label(this.hidden, 'This run', 59, 12, 14);
@@ -214,35 +263,22 @@ export class ResultsPanel {
     return { group, index, backing, rank, current, score, isCurrent: false };
   }
 
-  private drawFriends(parent: Container, { list, submission }: NonNullable<ResultsView['friends']>): void {
+  private drawFriends(parent: Container, list: NonNullable<ResultsView['friends']>['list']): void {
     if (list.status === 'ready' && list.scores.length) {
-      const ordered = [...list.scores].sort((first, second) => first.rank - second.rank);
-      const scores = ordered.slice(0, 5);
-      const own = ordered.find((score, index) => index >= scores.length && score.current);
-      if (own) scores[4] = own;
+      const scores = [...list.scores].sort((first, second) => first.rank - second.rank).slice(0, SCORE_LIMIT);
       scores.forEach(({ rank, name, score, current }, index) => {
-        const group = parent.addChild(new Container({ y: 284 + index * 21,
+        const group = parent.addChild(new Container({ y: 1 + index * ROW_PITCH,
           label: current ? 'friends-current-score' : 'friends-score' }));
-        const backing = new Graphics().roundRect(INSET, 0, INNER_WIDTH, 19, 7).fill(current ? 0xffc5a5 : 0xfae2d1);
-        if (current) backing.stroke({ color: 0xb26444, width: 1 });
-        group.addChild(backing);
-        label(group, `${number.format(rank)}.`, 26, 9.5, 14, { maxWidth: 40, fill: SOFT_INK });
-        const characters = Array.from(name);
-        const nameText = characters.length > 18 ? `${characters.slice(0, 17).join('')}…` : name;
-        label(group, nameText, 72, 9.5, 16, { maxWidth: 102 });
-        label(group, number.format(score), WIDTH - 25, 9.5, 16, { align: 1, maxWidth: 142 });
+        group.addChild(new Graphics(current ? this.currentRow : this.normalRow));
+        label(group, `${number.format(rank)}.`, 26, 12, 15, { maxWidth: 40, fill: SOFT_INK });
+        fitName(label(group, '', 70, 12, 17), name, 115);
+        label(group, number.format(score), WIDTH - 26, 12, 17, { align: 1, maxWidth: 139 });
       });
     } else {
       const message = list.status === 'error' ? 'Couldn’t load scores. Tap Friends to retry.'
         : list.status === 'ready' ? 'No friends scores yet.' : 'Loading friends scores…';
-      label(parent, message, CENTER, 331, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 }).label = 'friends-list-status';
+      label(parent, message, CENTER, 47, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 }).label = 'friends-list-status';
     }
-    label(parent, 'Share your final score on the Facebook friends leaderboard.', CENTER, 398, 15,
-      { align: 0.5, fill: SOFT_INK, maxWidth: INNER_WIDTH }).label = 'friends-submit-disclosure';
-
-    const enabled = submission === 'idle' || submission === 'error';
-    const submit = this.button(parent, SUBMIT, SUBMISSION_LABELS[submission], 'friends-submit');
-    this.drawButton(submit, SUBMIT, enabled);
   }
 
   private button(parent: Container, { x, y, width, height }: Rect, caption: string, id: string) {
@@ -267,17 +303,86 @@ export class ResultsPanel {
     return value;
   }
 
-  private get height(): number {
-    return this.restart.y + this.restart.height + INSET;
+  private get friendsRestartY(): number {
+    return FRIENDS_ROW_Y + rowsHeight(SCORE_LIMIT) + FRIENDS_FOOTER_SPACE;
   }
 
   resize(viewHeight: number): void {
-    this.root.position.set((VIEW_WIDTH - WIDTH) / 2, (viewHeight - this.height) / 2);
+    const shell = this.shell;
+    const view = this.view;
+    if (!shell || !view) return;
+    const { tab, personal, friends } = view;
+    const showFriends = tab === 'friends' && friends !== null;
+    const personalCount = Math.min(SCORE_LIMIT, personal.rows.length);
+    const footerSpace = showFriends ? FRIENDS_FOOTER_SPACE : PERSONAL_FOOTER_SPACE;
+    const preferredRestart = friends ? this.friendsRestartY : FIRST_ROW_Y + rowsHeight(personalCount) + footerSpace;
+    const maxRestart = Math.floor(viewHeight - RESTART_HEIGHT - INSET - VIEW_MARGIN * 2);
+    const restartY = Math.min(preferredRestart, maxRestart);
+    if (this.restart.y !== restartY) {
+      this.restart.y = restartY;
+      const warmed = this.backgrounds.get(restartY);
+      const context = warmed ?? this.background(restartY);
+      shell.backing.context = context;
+      this.adaptiveBackground?.destroy();
+      this.adaptiveBackground = warmed ? undefined : context;
+      shell.restart.y = restartY + RESTART_HEIGHT / 2;
+    }
+    this.root.position.set((VIEW_WIDTH - WIDTH) / 2, (viewHeight - restartY - RESTART_HEIGHT - INSET) / 2);
+
+    const top = showFriends ? FRIENDS_ROW_Y : friends ? PERSONAL_TAB_ROW_Y : FIRST_ROW_Y;
+    const height = restartY - footerSpace - top;
+    const count = showFriends
+      ? Math.min(SCORE_LIMIT, friends.list.status === 'ready' ? friends.list.scores.length : 0)
+      : personalCount;
+    const contentHeight = rowsHeight(count);
+    const maxScroll = Math.max(0, contentHeight - height);
+    shell.friendsFooter.y = restartY - FRIENDS_FOOTER_SPACE;
+    if (this.listTop !== top || this.listHeight !== height || this.scrollLimit !== maxScroll) {
+      this.listTop = shell.list.y = top;
+      this.listHeight = height;
+      this.scrollLimit = maxScroll;
+      shell.mask.clear().rect(LIST_LEFT, 0, LIST_WIDTH, height).fill(0xffffff);
+      shell.scrollbar.clear();
+      shell.thumb.clear();
+      if (maxScroll > 0) {
+        const thumbHeight = Math.max(20, height * height / contentHeight);
+        this.thumbTravel = height - thumbHeight;
+        shell.scrollbar.roundRect(SCROLLBAR_X, 0, SCROLLBAR_WIDTH, height, 2).fill(0xe9bdab);
+        shell.thumb.roundRect(SCROLLBAR_X, 0, SCROLLBAR_WIDTH, thumbHeight, 2).fill(0xa8533c);
+      }
+    }
+    this.setScroll(shell, tab, this.scroll[tab]);
+  }
+
+  canScroll(point: Point): boolean {
+    return this.scrollLimit > 0 && contains({
+      x: LIST_LEFT, y: this.listTop, width: SCROLLBAR_X + SCROLLBAR_WIDTH - LIST_LEFT, height: this.listHeight,
+    }, this.toLocal(point));
+  }
+
+  scrollBy(delta: number): boolean {
+    if (!this.view || !this.shell) return false;
+    const { tab } = this.view;
+    return this.setScroll(this.shell, tab, this.scroll[tab] + delta);
+  }
+
+  private setScroll({ listContent, thumb }: ReturnType<ResultsPanel['buildShell']>, tab: ResultsView['tab'],
+    offset: number): boolean {
+    const clamped = Math.max(0, Math.min(offset, this.scrollLimit));
+    const moved = listContent.y !== -clamped;
+    this.scroll[tab] = clamped;
+    listContent.y = -clamped;
+    thumb.y = this.scrollLimit ? this.thumbTravel * clamped / this.scrollLimit : 0;
+    return moved;
+  }
+
+  private toLocal(point: Point): Point {
+    return { x: point.x - this.root.x, y: point.y - this.root.y };
   }
 
   hit(point: Point): ResultsAction | null {
     if (!this.view) return null;
-    const local = { x: point.x - this.root.x, y: point.y - this.root.y };
+    const local = this.toLocal(point);
     const { x, y, width, height } = this.restart;
     if (contains({ x, y: y - 5, width, height: height + 10 }, local)) return 'restart';
 
@@ -285,7 +390,8 @@ export class ResultsPanel {
     if (!friends) return null;
     if (contains(PERSONAL_TAB, local)) return 'personal';
     if (contains(FRIENDS_TAB, local)) return 'friends';
-    if (tab === 'friends' && (friends.submission === 'idle' || friends.submission === 'error') && contains(SUBMIT, local)) {
+    const submit = { ...SUBMIT, y: this.restart.y - FRIENDS_FOOTER_SPACE + SUBMIT.y };
+    if (tab === 'friends' && (friends.submission === 'idle' || friends.submission === 'error') && contains(submit, local)) {
       return 'submit';
     }
     return null;

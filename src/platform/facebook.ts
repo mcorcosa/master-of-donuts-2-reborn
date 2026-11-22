@@ -1,5 +1,6 @@
 import { PlatformError, type Outcome, type Persistence, type PlatformServices } from '@playbridge/core';
-import { createFacebookPlatform, type FacebookLeaderboard, type FacebookLeaderboardEntry, type FacebookSDK } from '@playbridge/facebook';
+import { createFacebookPlatform, type FacebookLeaderboard, type FacebookLeaderboardEntry, type FacebookSDK, type FacebookServices } from '@playbridge/facebook';
+import { RemoveAds } from './removeAds';
 
 export const BOOSTER_REWARDED_PLACEMENT = 'booster';
 
@@ -99,7 +100,8 @@ export function createRebornFacebookPlatform(
   boardName: string,
   persistence: Persistence,
   boosterPlacementId = '',
-): { services: PlatformServices; submitScore: (score: number) => Promise<Outcome> } {
+  removeAdsSku = '',
+): { services: Omit<PlatformServices, 'purchases'>; removeAds: RemoveAds; submitScore: (score: number) => Promise<Outcome> } {
   let sdk: FacebookSDK | undefined;
   let getLeaderboard: FacebookHostSDK['getLeaderboardAsync'];
   let probeLeaderboard: (() => FacebookHostSDK['getLeaderboardAsync']) | undefined;
@@ -111,10 +113,12 @@ export function createRebornFacebookPlatform(
     }
     return getLeaderboard;
   }
-  const platform = createFacebookPlatform({
+  const platform: FacebookServices = createFacebookPlatform({
     getSDK: () => sdk,
     rewardedPlacements: { [BOOSTER_REWARDED_PLACEMENT]: boosterPlacementId.trim() },
     initialRewarded: BOOSTER_REWARDED_PLACEMENT,
+    interstitialAllowed: () => removeAds.ownership === 'inactive',
+    checkoutActive: () => removeAds.checkoutActive,
     async awaitSDK() {
       const host = await awaitSDK();
       sdk = {
@@ -130,6 +134,7 @@ export function createRebornFacebookPlatform(
         onPause: callback => host.onPause?.(callback),
         logEvent: name => host.logEvent(name),
         get player() { return host.player; },
+        get payments() { return host.payments; },
         get getRewardedVideoAsync() {
           const getAd = host.getRewardedVideoAsync;
           return typeof getAd === 'function' ? getAd.bind(host) : undefined;
@@ -141,8 +146,17 @@ export function createRebornFacebookPlatform(
       };
     },
   });
-  const services: PlatformServices = {
-    ...platform,
+  const { purchases, ...platformServices } = platform;
+  const removeAds = new RemoveAds({
+    purchases,
+    sku: removeAdsSku,
+    // Enable checkout only when the actual automatic interstitial integration can serve ads.
+    automaticAdsEnabled: () => false,
+    canOpenCheckout: () => !platform.ads.showing,
+    ownershipChanged: () => platform.ads.syncInterstitial(),
+  });
+  const services = {
+    ...platformServices,
     persistence,
     lifecycle: {
       ...platform.lifecycle,
@@ -169,5 +183,5 @@ export function createRebornFacebookPlatform(
       return { status: error instanceof PlatformError ? error.status : 'failed', error };
     }
   }
-  return { services, submitScore };
+  return { services, removeAds, submitScore };
 }

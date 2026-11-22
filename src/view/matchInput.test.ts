@@ -25,6 +25,8 @@ const scene = vi.hoisted(() => ({
   hit: vi.fn(),
   draw: vi.fn<(state: GameState) => void>(),
   showResults: vi.fn<(view: ResultsView | null) => void>(),
+  canScrollResults: vi.fn<(point: Point) => boolean>(),
+  scrollResults: vi.fn<(delta: number) => boolean>(),
   showGameOverCue: vi.fn<(progress: number | null, reduced: boolean) => void>(),
   drawScore: vi.fn<(display: ScoreDisplay) => void>(),
   creditScore: vi.fn(), reachScoreGoal: vi.fn(), startLevelCelebration: vi.fn(),
@@ -64,6 +66,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(createGame).mockReturnValue(initial);
   getFriendsScores.mockReturnValue(null);
+  scene.canScrollResults.mockReturnValue(false);
+  scene.scrollResults.mockReturnValue(false);
   scene.hit.mockImplementation(({ x }: Point, _mode: string, duringUnlock: boolean) => {
     const last = scene.draw.mock.lastCall?.[0];
     if (last?.gameOver) return x === 300 ? 'restart' : null;
@@ -175,8 +179,9 @@ async function setup(
   const personalScores = scores ?? new PersonalScores(createBrowserPersistence(
     jokerPlaytest ? sessionStorage : browserScoreStorage(() => localStorage, 'web')));
   const quality = new BrowserQuality(window as unknown as Window);
+  const onResultsVisibilityChange = vi.fn<(visible: boolean) => void>();
   await mountGame(app as unknown as Application, {
-    jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality,
+    jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onResultsVisibilityChange,
     onPause(callback) { pause = callback; return () => { pause = () => {}; }; },
   });
 
@@ -185,6 +190,11 @@ async function setup(
     (['pointerdown', 'pointerleave', 'lostpointercapture'].includes(type) ? canvas : window).dispatchEvent(event);
   };
   const tap = (x: number) => { pointer('pointerdown', x); pointer('pointerup', x); };
+  const wheel = (clientX: number, clientY: number, deltaY: number, deltaMode = 0) => {
+    const event = Object.assign(new Event('wheel', { cancelable: true }), { clientX, clientY, deltaY, deltaMode });
+    canvas.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
   const match = () => { tap(50); tap(150); };
   const tick = (age: number) => {
     now = age;
@@ -201,8 +211,8 @@ async function setup(
     window.dispatchEvent(new Event('resize'));
     tick(now);
   };
-  return { window, document, renderer, render: app.render, resizeViewport, pointer, tap, match, tick,
-    motion, localStorage, sessionStorage, suspendFromHost: () => pause(),
+  return { window, document, renderer, render: app.render, resizeViewport, pointer, tap, wheel, match, tick,
+    motion, localStorage, sessionStorage, onResultsVisibilityChange, suspendFromHost: () => pause(),
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
 
@@ -1368,7 +1378,7 @@ describe('game view match playback', () => {
       if (!scene.draw.mock.lastCall?.[0].gameOver) return Math.floor(x / 100);
       return x === 300 ? 'restart' : x === 320 ? 'friends' : x === 340 ? 'submit' : 'personal';
     });
-    const { match, tick, tap, renderer, localStorage, render } = await setup(true);
+    const { match, tick, tap, renderer, localStorage, render, onResultsVisibilityChange } = await setup(true);
     vi.mocked(move).mockReturnValueOnce({ ...initial, score: 1555, gameOver: true });
     match();
     expect(getFriendsScores).not.toHaveBeenCalled();
@@ -1376,7 +1386,9 @@ describe('game view match playback', () => {
     await settleResults();
     const popupAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
     tick(1000 + GAME_OVER_HOLD_MS);
+    expect(onResultsVisibilityChange).not.toHaveBeenCalled();
     tick(popupAt);
+    expect(onResultsVisibilityChange).toHaveBeenCalledExactlyOnceWith(true);
     expect(getFriendsScores).toHaveBeenCalledTimes(1);
     expect(scene.showResults.mock.lastCall?.[0]).toMatchObject({ tab: 'personal' });
     renderer.emit('resize');
@@ -1401,7 +1413,44 @@ describe('game view match playback', () => {
     tap(300);
     await Promise.resolve();
     expect(scene.showResults).toHaveBeenLastCalledWith(null);
+    expect(onResultsVisibilityChange.mock.calls).toEqual([[true], [false]]);
     expect(board.list).toHaveBeenCalledTimes(1);
     expect(localStorage.setItem).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a results-list drag and wheel without replaying or leaving a captured gesture active after resize', async () => {
+    scene.canScrollResults.mockImplementation(point => point.x === 100);
+    scene.scrollResults.mockReturnValue(true);
+    const { match, tick, pointer, wheel, render, renderer, tap } = await setup(true);
+    expect(wheel(100, 400, 20)).toBe(false);
+    vi.mocked(move).mockReturnValueOnce({ ...initial, score: 1555, gameOver: true });
+    match();
+    tick(1000);
+    await settleResults();
+    tick(1000 + GAME_OVER_HOLD_MS);
+    const popupAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
+    tick(popupAt);
+    expect(scene.showResults.mock.lastCall?.[0]?.tab).toBe('personal');
+
+    const rendered = render.mock.calls.length;
+    pointer('pointerdown', 100, 1, 'touch', 1, 400);
+    pointer('pointermove', 100, 2, 'touch', 1, 315);
+    pointer('pointermove', 100, 1, 'touch', 1, 350);
+    pointer('pointerup', 300, 1, 'touch', 0, 328);
+    expect(scene.scrollResults.mock.calls).toEqual([[50], [22]]);
+    tick(popupAt + 16);
+    expect(render).toHaveBeenCalledTimes(rendered + 1);
+    expect(scene.showResults.mock.lastCall?.[0]?.tab).toBe('personal');
+
+    expect(wheel(300, 400, 20)).toBe(false);
+    expect(wheel(100, 400, -2, 1)).toBe(true);
+    expect(scene.scrollResults).toHaveBeenLastCalledWith(-32);
+    pointer('pointerdown', 100, 1, 'touch', 1, 400);
+    renderer.emit('resize');
+    pointer('pointermove', 100, 1, 'touch', 1, 300);
+    pointer('pointerup', 300, 1, 'touch', 0, 310);
+    expect(scene.scrollResults).toHaveBeenCalledTimes(3);
+    tap(300);
+    expect(scene.showResults).toHaveBeenLastCalledWith(null);
   });
 });

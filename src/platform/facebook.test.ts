@@ -48,6 +48,49 @@ test('prepares and requests a configured rewarded booster ad through the bound h
     .resolves.toEqual({ status: 'unavailable', attempted: false });
 });
 
+test('restores the configured SKU through Facebook but cannot check out in this build', async () => {
+  const sku = 'reborn_test_remove_ads';
+  const receipt = { productID: sku, purchaseToken: 'fixture-token' };
+  const payments = {
+    onReady: vi.fn(function (ready: () => void) { ready(); }),
+    getPurchasesAsync: vi.fn<() => Promise<unknown>>(async () => []),
+    getCatalogAsync: vi.fn(async () => [{ productID: sku, price: '2,99 €' }]),
+    purchaseAsync: vi.fn(async () => receipt),
+    consumePurchaseAsync: vi.fn(),
+  };
+  payments.getPurchasesAsync.mockImplementationOnce(async function (this: typeof payments) {
+    expect(this).toBe(payments);
+    return [receipt];
+  });
+  const getInterstitialAdAsync = vi.fn();
+  const showAsync = vi.fn(async () => {});
+  const host = {
+    ...mockSDK(), payments, getInterstitialAdAsync,
+    getRewardedVideoAsync: async () => ({ loadAsync: async () => {}, showAsync }),
+  };
+  const { services, removeAds } = createRebornFacebookPlatform(async () => host, '', persistence, 'booster', sku);
+  await startGame(services, async () => {});
+  expect(services.capabilities().purchases).toBe('available');
+  expect(services.capabilities().interstitialAds).toBe('unsupported');
+  expect(services).not.toHaveProperty('purchases');
+
+  await removeAds.refresh();
+  expect(removeAds.ownership).toBe('active');
+  await expect(services.ads.request({ kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT }))
+    .resolves.toEqual({ status: 'completed', attempted: true });
+  expect(showAsync).toHaveBeenCalledOnce();
+
+  await removeAds.refresh();
+  expect(removeAds.ownership).toBe('inactive');
+  expect(removeAds.view.state).toBe('unavailable');
+  await removeAds.buy(() => true);
+  expect(payments.getPurchasesAsync).toHaveBeenCalledTimes(2);
+  expect(payments.getCatalogAsync).not.toHaveBeenCalled();
+  expect(payments.purchaseAsync).not.toHaveBeenCalled();
+  expect(payments.consumePurchaseAsync).not.toHaveBeenCalled();
+  expect(getInterstitialAdAsync).not.toHaveBeenCalled();
+});
+
 test('starts Facebook only after the first playable frame is ready, with host binding intact', async () => {
   const sdk = mockSDK();
   const hostCalls: (string | number)[] = [];

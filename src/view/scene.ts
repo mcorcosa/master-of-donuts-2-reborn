@@ -23,7 +23,6 @@ const DONUT_ART = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', '
 const CREAM = '#fff2dc';
 const INK = '#672e20';
 const GOLD = 0xab591a;
-const MINT = 0x237d61;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
 const FOOTER_STATUS_X = 239;
@@ -46,7 +45,6 @@ export interface Feedback {
   target: number;
   started: number;
   duration: number;
-  color?: string;
 }
 
 interface Transfer {
@@ -173,9 +171,9 @@ export class GameScene {
   private readonly freeBooster = new FreeBoosterCelebration();
   private readonly boosterPrompt: Text;
   private readonly selectionCue = new Graphics({ eventMode: 'none', visible: false })
-    .circle(0, 0, 4).fill(0xffdf86).stroke({ color: GOLD, width: 1.5 });
+    .poly([-9, -6, 0, -2, 9, -6, 0, 6]).fill(0xffdf86).stroke({ color: GOLD, width: 1.5, join: 'round' });
   private readonly feedbackCue = new Graphics({ eventMode: 'none', visible: false })
-    .circle(0, 0, 5).stroke({ color: 0xffffff, width: 3 });
+    .circle(0, 0, 5).stroke({ color: RED, width: 3 });
   private readonly contactTexture = createContactTexture();
   private readonly vacancyArt: VacancyArt;
   private readonly celebration = new LevelCelebration();
@@ -354,6 +352,14 @@ export class GameScene {
       this.clearHint();
       this.results.show(view, this.fit.height);
     }
+  }
+
+  canScrollResults(point: Point): boolean {
+    return this.overlay.visible && this.results.canScroll(point);
+  }
+
+  scrollResults(delta: number): boolean {
+    return this.overlay.visible && this.results.scrollBy(delta);
   }
 
   showGameOverCue(progress: number | null, reduced: boolean): void {
@@ -922,11 +928,10 @@ export class GameScene {
     if (feedback) {
       const anchor = this.guidePoint(feedback.target);
       this.feedbackCue.position.set(anchor.x, anchor.y - this.layout.donutHeight * 0.43);
-      this.feedbackCue.tint = feedback.color ? MINT : RED;
       this.feedbackCue.alpha = reduced ? 1 : 1 - 0.7 * (now - feedback.started) / feedback.duration;
     }
 
-    this.status.text = feedback && !feedback.color ? 'That stack is full' : '';
-    this.status.style.fill = feedback && !feedback.color ? RED : INK;
+    this.status.text = feedback ? 'That stack is full' : '';
+    this.status.style.fill = feedback ? RED : INK;
   }
 }

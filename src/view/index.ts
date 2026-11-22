@@ -70,10 +70,11 @@ interface GameResultsOptions {
   watchBoosterAd?(isCurrent: () => boolean): Promise<AdOutcome>;
   quality: BrowserQuality;
   onPause?(callback: () => void): () => void;
+  onResultsVisibilityChange?(visible: boolean): void;
 }
 
 export async function mountGame(app: Application, {
-  jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onPause,
+  jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onPause, onResultsVisibilityChange,
 }: GameResultsOptions): Promise<void> {
   const [art] = await Promise.all([loadArt(), preloadScoreFont().catch(error => {
     console.warn('The bundled score font could not be loaded.', error);
@@ -95,6 +96,7 @@ export async function mountGame(app: Application, {
   let state = createRun();
   let bestCombo = 0;
   let results: ResultsSession | null = null;
+  let resultsDrag: { id: number; y: number } | null = null;
   let gameOver: GameOverPresentation | null = null;
   let levelStartScore = 0;
   let displayed = scoreDisplay(state, levelStartScore);
@@ -410,6 +412,7 @@ export async function mountGame(app: Application, {
     };
     results = new ResultsSession(completed, jokerPlaytest ? null : getFriendsScores(), present);
     scene.showResults(results.view);
+    onResultsVisibilityChange?.(true);
   }
 
   function advanceScore(now: number): void {
@@ -491,19 +494,24 @@ export async function mountGame(app: Application, {
       !scene.moveAnimating && !scene.stackUnlockAnimating;
     if (!canRetainSelection) gestures.reset();
     renderedSize = { width: viewportWidth, height: viewportHeight };
+    resultsDrag = null;
     cancelPresentation();
     scene.resize(width, height);
     draw();
     syncControls();
   }
 
-  function hit(event: PointerEvent, mode: 'tap' | 'swipe') {
-    const client = { x: event.clientX, y: event.clientY };
+  function toScene(client: Point): Point {
     const rect = canvas.getBoundingClientRect();
-    const local = scene.toLocal({
+    return scene.toLocal({
       x: (client.x - rect.left) * app.screen.width / (rect.width || 1),
       y: (client.y - rect.top) * app.screen.height / (rect.height || 1),
     });
+  }
+
+  function hit(event: PointerEvent, mode: 'tap' | 'swipe') {
+    const client = { x: event.clientX, y: event.clientY };
+    const local = toScene(client);
     const touch = event.pointerType === 'touch';
     const mouse = event.pointerType === 'mouse';
     let target = scene.hit(local, touch ? mode : 'exact', touch || mouse);
@@ -518,9 +526,14 @@ export async function mountGame(app: Application, {
   function down(event: PointerEvent): void {
     if (hostPaused && !document.hidden) wake();
     const locked = pending !== null || scene.stackUnlockAnimating;
-    if (boosters.claiming || queuedMove || event.button !== 0 ||
+    if (boosters.claiming || queuedMove || resultsDrag || event.button !== 0 ||
         (locked && event.pointerType !== 'touch' && event.pointerType !== 'mouse')) return;
-    const { client, target } = hit(event, 'tap');
+    const { client, local, target } = hit(event, 'tap');
+    if (results && !gestures.active && scene.canScrollResults(local)) {
+      resultsDrag = { id: event.pointerId, y: local.y };
+      capture(event.pointerId);
+      return;
+    }
     if (locked && typeof target !== 'number') return;
     if (state.gameOver && (!results || typeof target !== 'string' || target === 'outside')) return;
     if (target === 'hint' && !syncHintAvailability()) return;
@@ -540,14 +553,38 @@ export async function mountGame(app: Application, {
       updateInteraction();
     }
     frames.invalidate();
+    capture(event.pointerId);
+  }
+
+  function capture(pointerId: number): void {
     try {
-      canvas.setPointerCapture(event.pointerId);
+      canvas.setPointerCapture(pointerId);
     } catch {
       // Window listeners also cover a pointer that could not be captured.
     }
   }
 
+  function trackResultsDrag(event: PointerEvent): boolean {
+    if (resultsDrag?.id !== event.pointerId) return false;
+    const { y } = toScene({ x: event.clientX, y: event.clientY });
+    if (scene.scrollResults(resultsDrag.y - y)) frames.invalidate();
+    resultsDrag.y = y;
+    return true;
+  }
+
+  function wheelResults(event: WheelEvent): void {
+    if (!results || resultsDrag || event.ctrlKey || event.metaKey) return;
+    const client = { x: event.clientX, y: event.clientY };
+    const local = toScene(client);
+    if (!scene.canScrollResults(local)) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.getBoundingClientRect().height : 1;
+    const end = toScene({ ...client, y: client.y + event.deltaY * unit });
+    if (scene.scrollResults(end.y - local.y)) frames.invalidate();
+    event.preventDefault();
+  }
+
   function track(event: PointerEvent): void {
+    if (trackResultsDrag(event)) return;
     const locked = pending !== null || scene.stackUnlockAnimating;
     const held = gestures.owns(event.pointerId);
     const idleMouse = !locked && !gestures.active && event.pointerType === 'mouse' && gestures.source !== null;
@@ -573,6 +610,10 @@ export async function mountGame(app: Application, {
   }
 
   function up(event: PointerEvent): void {
+    if (trackResultsDrag(event)) {
+      resultsDrag = null;
+      return;
+    }
     if (!gestures.owns(event.pointerId)) return;
     // The browser grants touch and pen activation on pointerup.
     if (event.isTrusted && event.pointerType !== 'mouse' && !document.hidden && !pageHidden && !hostPaused) sound.activate();
@@ -637,6 +678,7 @@ export async function mountGame(app: Application, {
       results = null;
       gameOver = null;
       scene.showResults(null);
+      onResultsVisibilityChange?.(false);
       state = createRun();
       boosters = new RunBoosters();
       adStatusUntil = 0;
@@ -735,7 +777,7 @@ export async function mountGame(app: Application, {
     if (state.score !== before.score || level) resetScore();
     const start = scene.topPosition(from);
     const color = before.stacks[from].at(-1)!;
-    if (!state.gameOver) feedback = { target: to, started, duration: 280, color };
+    feedback = null;
     draw();
     scene.startMove(inserts, started, motion.matches, { to, start, color });
     if (motion.matches) sound.landing(color);
@@ -744,6 +786,7 @@ export async function mountGame(app: Application, {
   }
 
   function cancel(event: PointerEvent): void {
+    if (resultsDrag?.id === event.pointerId) resultsDrag = null;
     if (gestures.cancel(event.pointerId)) {
       tapOnlyPress = false;
       arrowPointer = null;
@@ -815,6 +858,7 @@ export async function mountGame(app: Application, {
   }
 
   function suspend(): void {
+    resultsDrag = null;
     silencePresentation();
     cancelBoosterPresentation();
     syncGameOverVisibility();
@@ -832,6 +876,7 @@ export async function mountGame(app: Application, {
   }
 
   function settleInterruptedPlay(): void {
+    resultsDrag = null;
     clearHint();
     cancelBoosterPresentation();
     if (pending || scene.stackUnlockAnimating) {
@@ -868,6 +913,7 @@ export async function mountGame(app: Application, {
   canvas.addEventListener('pointerdown', down, options);
   canvas.addEventListener('pointerleave', leave, options);
   canvas.addEventListener('lostpointercapture', cancel, options);
+  canvas.addEventListener('wheel', wheelResults, { ...options, passive: false });
   window.addEventListener('pointermove', track, options);
   window.addEventListener('pointerup', up, options);
   window.addEventListener('pointercancel', cancel, options);

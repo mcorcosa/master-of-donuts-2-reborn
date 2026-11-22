@@ -146,7 +146,8 @@ describe('match presentation', () => {
     expect(leadFlash.visible).toBe(true);
     expect(leadFlash.position).toMatchObject(launches[2].burst);
     expect(award.visible).toBe(true);
-    expect(award.children.filter(child => child.visible).map(child => (child as Text).text)).toEqual(['+110', '+110']);
+    expect(effect['score'].children.map(child => (child as Text).text)).toEqual(['+110', '+110']);
+    expect(effect['comboBadge'].visible).toBe(false);
     expect(effect['burstPool'][2].fragments.some(fragment => fragment.tint === 0xef3e48)).toBe(true);
     tick(firstPop + 14);
     expect(visible()[2].width).toBeLessThan(geometry.width / 2);
@@ -212,7 +213,7 @@ describe('match presentation', () => {
   it('fades in place under reduced motion even after reusing a normal match effect', () => {
     vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
     const effect = new MatchEffect();
-    const [donuts, bursts, award] = effect.root.children;
+    const [donuts, bursts] = effect.root.children;
     const visible = () => donuts.children.filter((child): child is Sprite => child instanceof Sprite && child.visible);
     const geometry = { start: { x: 70, y: 310 }, landing: { x: 200, y: 280 }, width: 80, height: 60, step: 20, viewHeight: 700 };
     effect.start({ ...playback, runLength: 8 }, geometry, Texture.WHITE);
@@ -231,27 +232,28 @@ describe('match presentation', () => {
     expect(visible().every(piece => piece.alpha < 1 && piece.width === geometry.width)).toBe(true);
     expect(bursts.visible).toBe(false);
     expect(bursts.children.every(child => !child.visible)).toBe(true);
-    expect(award.children.filter(child => child.visible).map(child => (child as Text).text)).toEqual(['+170', '+170']);
-    expect(award.scale).toMatchObject({ x: 1, y: 1 });
+    expect(effect['score'].children.map(child => (child as Text).text)).toEqual(['+170', '+170']);
+    expect(effect['score'].scale).toMatchObject({ x: 1, y: 1 });
     effect.showPieces(matchFrame(match, 730));
     expect(donuts.visible).toBe(false);
     effect.root.destroy({ children: true });
   });
 
   it.each([
-    { combo: 2, reduced: false },
-    { combo: 3, reduced: true },
-    { combo: 12, reduced: false },
-  ])('keeps the $combo× award together at both board edges (reduced motion: $reduced)', ({ combo, reduced }) => {
-    const pointsBounds = new Bounds(-34, -18, 34, 18);
+    { combo: 2, reduced: false, points: 110 },
+    { combo: 3, reduced: true, points: 110 },
+    { combo: 12, reduced: false, points: Number.MAX_SAFE_INTEGER },
+  ])('fits the full $points award and $combo× badge at both board edges (reduced motion: $reduced)', ({ combo, reduced, points }) => {
+    const pointsBounds = points > 110 ? new Bounds(-372, -26, 372, 26) : new Bounds(-34, -18, 34, 18);
     const comboBounds = new Bounds(-63, -10, 63, 10);
+    const number = new Intl.NumberFormat();
     vi.spyOn(Text.prototype, 'getLocalBounds').mockImplementation(function (this: Text) {
       return this.text.endsWith(' Combo') ? comboBounds : pointsBounds;
     });
     const effect = new MatchEffect();
-    const award = effect.root.children[2];
-    const labels = () => award.children.filter(child => child.visible).map(child => (child as Text).text);
-    const match = { ...playback, runLength: 10, combo, reduced, arrivalMs: reduced ? 0 : 220 };
+    const [award, outline, streak] = [effect['award'], effect['outline'], effect['combo']];
+    const [score, comboBadge, comboBacking] = [effect['score'], effect['comboBadge'], effect['comboBacking']];
+    const match = { ...playback, runLength: 10, combo, points, reduced, arrivalMs: reduced ? 0 : 220 };
     const onset = match.arrivalMs + (reduced ? 0 : matchPopTime(10, 9));
     const viewHeight = 540;
     const { slots, donutWidth: width, donutHeight: height, step } = layoutStacks(viewHeight, 8);
@@ -261,16 +263,17 @@ describe('match presentation', () => {
       effect.start(match, geometry, Texture.WHITE);
       effect.showTail(onset - 1, counter);
       expect(award.visible).toBe(false);
-      expect(labels()).toEqual(['+110', '+110', `${combo}× Combo`]);
-      const [outline, , streak] = award.children;
-      expect(streak.y + comboBounds.minY).toBeGreaterThan(outline.y + pointsBounds.maxY);
+      expect(outline.text).toBe(`+${number.format(points)}`);
+      expect(streak.text).toBe(`${combo}× Combo`);
 
-      for (const time of [onset + 12, onset + 48, onset + 149, reduced ? onset + 400 : 579]) {
+      for (const age of [12, 34, 56, 57, 90, 116, 165, ...(reduced ? [400] : [])]) {
+        const time = onset + age;
         effect.showTail(time, counter);
         expect(award.visible).toBe(true);
         expect(award.alpha).toBeGreaterThan(0);
-        for (const label of [outline, streak]) {
-          const bounds = (label as Text).getLocalBounds();
+        expect(comboBadge.visible).toBe(reduced || age > 56);
+        for (const label of [outline, ...(comboBadge.visible ? [comboBacking, streak] : [])]) {
+          const bounds = label.getLocalBounds();
           for (const x of [bounds.minX, bounds.maxX]) {
             for (const y of [bounds.minY, bounds.maxY]) {
               const point = label.toGlobal({ x, y });
@@ -281,10 +284,15 @@ describe('match presentation', () => {
             }
           }
         }
+        if (comboBadge.visible) {
+          const scoreBottom = outline.toGlobal({ x: 0, y: pointsBounds.maxY }).y;
+          const badgeTop = comboBacking.toGlobal({ x: 0, y: comboBacking.getLocalBounds().minY }).y;
+          expect(badgeTop).toBeGreaterThan(scoreBottom);
+        }
       }
       if (reduced) {
-        expect(award.scale).toMatchObject({ x: 1, y: 1 });
-        expect(award.rotation).toBe(0);
+        expect(score.scale).toMatchObject({ x: 1, y: 1 });
+        expect(comboBadge.scale).toMatchObject({ x: 1, y: 1 });
       }
       if (!reduced) {
         const comboPoint = streak.toGlobal({ x: 0, y: 0 });
@@ -303,8 +311,8 @@ describe('match presentation', () => {
       expect(award.visible).toBe(false);
       effect.start({ ...match, combo: 1 }, geometry, Texture.WHITE);
       effect.showTail(onset + 50, counter);
-      expect(labels()).toEqual(['+110', '+110']);
-      expect((streak as Text).text).toBe('');
+      expect(comboBadge.visible).toBe(false);
+      expect(streak.text).toBe('');
     }
     effect.root.destroy({ children: true });
   });
@@ -339,12 +347,12 @@ describe('match presentation', () => {
     const high = { ...playback, points: 2500 };
     const pop = high.arrivalMs + matchPopTime(high.runLength, high.runLength - 1);
     const at = (age: number) => awardFrame(high, pop + age)!;
-    expect(scoreSize(110)).toBe(24);
-    expect(scoreSize(2500)).toBe(44);
+    expect(scoreSize(110)).toBe(40);
+    expect(scoreSize(2500)).toBe(64);
     expect(awardFrame(playback, pop - 1)).toBeNull();
-    expect(awardFrame(playback, pop + 48)).toMatchObject({ scaleX: 1.21, scaleY: 1.29, alpha: 1 });
-    expect(at(48)).toMatchObject({ scaleX: expect.closeTo(1.34), scaleY: expect.closeTo(1.42), alpha: 1 });
-    expect(at(149)).toMatchObject({ scaleX: 1, scaleY: 1, rotation: 0 });
+    expect(awardFrame(playback, pop + 34)).toMatchObject({ scaleX: 1.29, scaleY: 1.39, alpha: 1 });
+    expect(at(34)).toMatchObject({ scaleX: expect.closeTo(1.43), scaleY: expect.closeTo(1.52), alpha: 1 });
+    expect(at(116)).toMatchObject({ scaleX: 1, scaleY: 1 });
     expect(at(165).alpha).toBe(1);
     expect(at(166)).toBeNull();
     expect(scoreFlightFrame(high, 579)).toBeNull();
@@ -356,11 +364,23 @@ describe('match presentation', () => {
     expect(scoreFlightPosition(origin, counter, 1)).toEqual(counter);
   });
 
+  it('gives the combo its own later pop with a bounded streak accent', () => {
+    const pop = playback.arrivalMs + matchPopTime(playback.runLength, playback.runLength - 1);
+    const at = (combo: number, age: number) => awardFrame({ ...playback, combo }, pop + age)!;
+    expect(at(2, 34).comboAlpha).toBe(0);
+    expect(at(2, 56).comboAlpha).toBe(0);
+    expect(at(2, 67).comboAlpha).toBe(0.5);
+    expect(at(2, 90)).toMatchObject({ comboAlpha: 1, comboScale: 1.13 });
+    expect(at(5, 90).comboScale).toBeGreaterThan(at(2, 90).comboScale);
+    expect(at(120, 90).comboScale).toBe(at(6, 90).comboScale);
+    expect(at(6, 140).comboScale).toBe(1);
+  });
+
   it('suppresses score motion and accents and starts the reduced clear without flight', () => {
     const reduced = { ...playback, points: 2500, reduced: true, arrivalMs: 0, clearMs: 230 };
     expect(matchFrame(reduced, 0)).toEqual({ phase: 'clear', progress: 0 });
-    expect(awardFrame(reduced, 25)).toMatchObject({ alpha: 0.5, scaleX: 1, scaleY: 1, rotation: 0 });
-    expect(awardFrame(reduced, 180)).toMatchObject({ alpha: 1, scaleX: 1, scaleY: 1, rotation: 0 });
+    expect(awardFrame(reduced, 25)).toMatchObject({ alpha: 0.5, scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 });
+    expect(awardFrame(reduced, 180)).toMatchObject({ alpha: 1, scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 });
     expect(scoreFlightFrame(reduced, 280)).toBeNull();
     expect(scoreImpactTime(reduced)).toBe(230);
     expect(matchFrame(reduced, 230).phase).toBe('resolved');
@@ -398,7 +418,8 @@ describe('score and level effects', () => {
     bar.draw({ score, level: 8, rank: 'Doughnut Dynamo', nextLevelScore: score * 2, levelStartScore: 0 });
     const digits = bar['score'];
     const fitted = digits.scale.x;
-    expect(digits.text).toBe(new Intl.NumberFormat().format(score));
+    expect(bar.root.children.filter(child => child instanceof Text).map(child => child.text))
+      .toEqual([new Intl.NumberFormat().format(score), 'Level', '8']);
     bar.credit(0, false);
     bar.showEffects(36);
     expect(digits.scale.x).toBeCloseTo(fitted * 1.27);
@@ -420,14 +441,14 @@ describe('score and level effects', () => {
     bar.root.destroy({ children: true });
   });
 
-  it('shows the exact rank and static board focus without rays or stars in reduced motion', () => {
+  it('shows the level and upgrade with static board focus in reduced motion', () => {
     vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
     const level = new LevelCelebration();
     const { root } = level;
     const [markers, rays, particles, hero] = root.children;
     level.start({ level: 3, rank: 'Fryer Fighter', upgrade: { kind: 'stack', firstNewStack: 3, stackCount: 4 } },
       [{ x: 320, y: 300, width: 65, height: 86 }], 0, true, 540);
-    expect(hero.children.slice(1).map(child => (child as Text).text)).toEqual(['Level 3', 'Fryer Fighter', 'New stack']);
+    expect(hero.children.slice(1).map(child => (child as Text).text)).toEqual(['Level 3', 'New stack']);
     expect(markers.getLocalBounds().width).toBeGreaterThan(60);
     expect(rays.visible).toBe(false);
     expect(particles.visible).toBe(false);

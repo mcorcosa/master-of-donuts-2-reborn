@@ -36,9 +36,8 @@ export class LevelCelebration {
   private readonly rays = new Container();
   private readonly sugar = new Container();
   private readonly hero = new Container();
-  private readonly heading = title(43, HONEY, -24, 4.5);
-  private readonly rank = title(27, CREAM, 17, 3);
-  private readonly upgrade = title(15, 0xffe3a7, 43, 2.5);
+  private readonly heading = title(43, HONEY, 0, 4.5);
+  private readonly upgrade = title(15, 0xffe3a7, 21, 2.5);
   private readonly plaque = new Graphics();
   private readonly stars: Graphics[];
   private active: { started: number; reduced: boolean; height: number; y: number } | null = null;
@@ -49,7 +48,7 @@ export class LevelCelebration {
 
   constructor() {
     this.root.addChild(this.focus, this.rays, this.sugar, this.hero);
-    this.hero.addChild(this.plaque, this.heading, this.rank, this.upgrade);
+    this.hero.addChild(this.plaque, this.heading, this.upgrade);
     for (let index = 0; index < 12; index++) {
       const length = index % 2 ? 115 : 136;
       const ray = new Graphics().poly([22, -2, length, -13, length, 13, 22, 2])
@@ -63,7 +62,7 @@ export class LevelCelebration {
   }
 
   start(details: LevelCelebrationDetails, markers: readonly Rect[], now: number, reduced: boolean, height: number): void {
-    const { level, rank, upgrade } = details;
+    const { level, upgrade } = details;
     let text = '';
     if (upgrade?.kind === 'stack') text = upgrade.stackCount - upgrade.firstNewStack === 1 ? 'New stack' : 'New stacks';
     if (upgrade?.kind === 'slots') {
@@ -71,12 +70,10 @@ export class LevelCelebration {
       text = `+${extra} ${extra === 1 ? 'slot' : 'slots'} per stack`;
     }
     setTitle(this.heading, `Level ${level}`, 244);
-    setTitle(this.rank, rank, 245);
     setTitle(this.upgrade, text, 240);
-    this.heading.y = text ? -26 : -20;
-    this.rank.y = text ? 13 : 22;
+    this.heading.y = text ? -12 : 0;
     this.upgrade.visible = !!text;
-    const halfHeight = text ? 63 : 54;
+    const halfHeight = text ? 43 : 36;
     this.plaque.clear()
       .roundRect(-141, 5 - halfHeight, 282, halfHeight * 2, 24).fill({ color: 0x64301f, alpha: 0.38 })
       .roundRect(-141, -halfHeight, 282, halfHeight * 2, 24).fill({ color: 0x71351e, alpha: 0.95 })

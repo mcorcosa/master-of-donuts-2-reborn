@@ -2,7 +2,7 @@ import type { Persistence } from '@playbridge/core';
 import { scopedBrowserStorage, type StringStorage } from '@playbridge/web';
 
 export const PERSONAL_SCORES_KEY = 'master-of-donuts-2-reborn.personal-scores.v1';
-const SCORE_LIMIT = 5;
+const SCORE_LIMIT = 10;
 
 export interface RunStats {
   score: number;

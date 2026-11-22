@@ -168,16 +168,21 @@ export function launchedDonut(launch: MatchLaunch, geometry: MatchGeometry, age:
   };
 }
 
-function scoreRatio(points: number): number {
-  return Math.log(Math.max(300, points) / 300) / Math.log(2500 / 300);
-}
-
-export function scoreEmphasis(points: number): number {
-  return Math.min(1, scoreRatio(points));
+function scoreEmphasis(points: number): number {
+  return Math.min(1, Math.log(Math.max(300, points) / 300) / Math.log(2500 / 300));
 }
 
 export function scoreSize(points: number): number {
-  return Math.min(48, 24 + 20 * scoreRatio(points));
+  return 40 + 24 * scoreEmphasis(points);
+}
+
+export function scorePopPeak(points: number) {
+  const strength = scoreEmphasis(points);
+  return { x: 1.29 + 0.14 * strength, y: 1.39 + 0.13 * strength };
+}
+
+export function comboPopPeak(combo: number): number {
+  return 1.13 + 0.12 * unit((combo - 2) / 4);
 }
 
 function flightStart(match: MatchPlayback): number {
@@ -204,31 +209,26 @@ export function scoreFlightPosition(start: Point, target: Point, progress: numbe
 }
 
 export function awardFrame(match: MatchPlayback, now: number) {
-  const emphasis = scoreEmphasis(match.points);
   const pop = match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1);
   const age = now - clearStart(match) - pop;
-  const end = match.reduced ? clearStart(match) + 420 + 130 * emphasis : flightStart(match);
+  const end = match.reduced ? clearStart(match) + 420 + 130 * scoreEmphasis(match.points) : flightStart(match);
   if (age < 0 || now >= end) return null;
-
-  const peakX = 1.21 + 0.13 * emphasis;
-  const peakY = 1.29 + 0.13 * emphasis;
-  let scaleX = 1;
-  let scaleY = 1;
-  if (!match.reduced && age < 48) {
-    const punch = 1 - (1 - age / 48) ** 2;
-    scaleX = 0.79 + (peakX - 0.79) * punch;
-    scaleY = 0.7 + (peakY - 0.7) * punch;
-  } else if (!match.reduced && age < 149) {
-    const settle = (1 - (age - 48) / 101) ** 2;
-    const recoil = Math.sin(Math.PI * (age - 48) / 101) ** 2;
-    scaleX += (peakX - 1) * settle - 0.07 * recoil;
-    scaleY += (peakY - 1) * settle - 0.04 * recoil;
+  if (match.reduced) {
+    return { alpha: unit(age / 50) * unit((end - now) / 135), scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 };
   }
 
+  const peak = scorePopPeak(match.points);
+  const comboAge = age - 56;
   return {
-    alpha: match.reduced ? unit(age / 50) * unit((end - now) / 135) : 1,
-    scaleX, scaleY,
-    rotation: match.reduced || age >= 149 ? 0
-      : (3 + 2 * emphasis) * Math.PI / 180 * Math.cos(Math.PI * age / 95) * (1 - age / 149),
+    alpha: 1,
+    scaleX: popScale(age, 0.83, peak.x, 34, 82),
+    scaleY: popScale(age, 0.74, peak.y, 34, 82),
+    comboAlpha: unit(comboAge / 22),
+    comboScale: popScale(comboAge, 0.9, comboPopPeak(match.combo), 34, 50),
   };
+}
+
+function popScale(age: number, start: number, peak: number, riseMs: number, settleMs: number): number {
+  if (age < riseMs) return peak - (peak - start) * (1 - unit(age / riseMs)) ** 2;
+  return 1 + (peak - 1) * (1 - unit((age - riseMs) / settleMs)) ** 2;
 }
