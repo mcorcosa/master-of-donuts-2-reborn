@@ -19,6 +19,38 @@ function tap(gestures: StackGestures, target: Target, point = left) {
 }
 
 describe('stack gestures', () => {
+  it('requires an armed Joker tap to press and release the same occupied stack', () => {
+    const gestures = fixture();
+    gestures.start(1, left, 0, 'touch', true);
+    expect(gestures.boosterPress).toBe(true);
+    expect(gestures.finish(2, left, 0)).toBeNull();
+    expect(gestures.finish(1, { x: left.x + 3, y: left.y }, 0)).toEqual({ kind: 'joker-target', stack: 0 });
+    expect(gestures.boosterPress).toBe(false);
+    expect(gestures.source).toBeNull();
+
+    gestures.start(1, middle, 1, 'mouse', true);
+    expect(gestures.finish(1, middle, 1)).toBeNull();
+    gestures.start(1, left, 0, 'touch', true);
+    gestures.update(1, right, 2);
+    expect(gestures.dragSource).toBeNull();
+    expect(gestures.finish(1, left, 0)).toBeNull();
+    gestures.start(1, left, 0, 'mouse', true);
+    expect(gestures.finish(1, { x: left.x + 1, y: left.y }, 1)).toBeNull();
+    expect(gestures.source).toBeNull();
+  });
+
+  it.each(['joker', 'sweep'] as const)('requires a full %s button click and leaves stack selection alone on a crossed release', button => {
+    const gestures = fixture();
+    tap(gestures, 0);
+    gestures.start(1, left, 1);
+    expect(gestures.finish(1, left, button)).toBeNull();
+    expect(gestures.source).toBe(0);
+    gestures.start(1, left, button);
+    expect(gestures.boosterPress).toBe(true);
+    expect(gestures.finish(1, left, 1)).toBeNull();
+    expect(tap(gestures, button)).toEqual({ kind: button });
+  });
+
   it('selects on tap release, tolerates jitter, and moves into an empty stack', () => {
     const gestures = fixture();
     expect(tap(gestures, 1, middle)).toBeNull();

@@ -1,6 +1,6 @@
 import { createBrowserPersistence, createWebPlatform } from '@playbridge/web';
 import { afterEach, expect, test, vi } from 'vitest';
-import { createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './facebook';
+import { BOOSTER_REWARDED_PLACEMENT, createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './facebook';
 import { startGame } from './startup';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -18,6 +18,35 @@ function mockSDK() {
     player: { getDataAsync: vi.fn(), setDataAsync: vi.fn(), flushDataAsync: vi.fn() },
   } satisfies FacebookHostSDK;
 }
+
+test('prepares and requests a configured rewarded booster ad through the bound host SDK', async () => {
+  const loadAsync = vi.fn(async () => {});
+  const showAsync = vi.fn(async () => {});
+  const host = {
+    ...mockSDK(),
+    getRewardedVideoAsync: vi.fn(async function (this: FacebookHostSDK, placement: string) {
+      expect(this).toBe(host);
+      expect(placement).toBe('test-placement');
+      return { loadAsync, showAsync };
+    }),
+  };
+  const { services } = createRebornFacebookPlatform(async () => host, '', persistence, ' test-placement ');
+  await startGame(services, async () => {});
+  expect(services.capabilities().rewardedAds).toBe('available');
+  await expect(services.ads.request({ kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT, isCurrent: () => false }))
+    .resolves.toEqual({ status: 'failed', attempted: false });
+  expect(showAsync).not.toHaveBeenCalled();
+  await expect(services.ads.request({ kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT }))
+    .resolves.toEqual({ status: 'completed', attempted: true });
+  expect(loadAsync).toHaveBeenCalled();
+  expect(showAsync).toHaveBeenCalledOnce();
+
+  const unconfigured = createRebornFacebookPlatform(async () => host, '', persistence).services;
+  await startGame(unconfigured, async () => {});
+  expect(unconfigured.capabilities().rewardedAds).toBe('unavailable');
+  await expect(unconfigured.ads.request({ kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT }))
+    .resolves.toEqual({ status: 'unavailable', attempted: false });
+});
 
 test('starts Facebook only after the first playable frame is ready, with host binding intact', async () => {
   const sdk = mockSDK();

@@ -1,15 +1,23 @@
+import type { AdOutcome } from '@playbridge/core';
 import type { Application } from 'pixi.js';
-import { canMove, canRequestSetupHint, createGame, type DoughInsert, findSetupHint, type GameState, JOKER, move } from '../game';
+import { GameSound } from '../audio/GameSound';
+import {
+  canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
+  JOKER, move, useJokerBooster, useStackSweep,
+} from '../game';
+import { RunBoosters } from '../game/boosters';
 import type { BrowserQuality } from '../performance/browserQuality';
 import { FrameLoop } from '../performance/frameLoop';
 import type { FriendsScores } from '../platform/friendsScores';
 import type { PersonalScores } from '../platform/personalScores';
+import type { BoosterButtonView, BoosterFooterView } from './boosters';
 import { GameOverPresentation } from './gameOverPresentation';
-import { type Point, StackGestures } from './gestures';
+import { type BoosterButton, type Point, StackGestures } from './gestures';
 import { VIEW_WIDTH } from './layout';
 import { LEVEL_CELEBRATION_MS, type LevelCelebrationDetails } from './levelCelebration';
 import { preloadScoreFont } from './matchEffect';
-import { beginMatch, matchFrame, type MatchPlayback, scoreImpactTime } from './matchPlayback';
+import { awardFrame, beginMatch, clearStart, matchFrame, type MatchPlayback, matchPopTime, scoreImpactTime } from './matchPlayback';
+import { FLIGHT_MS } from './movePlayback';
 import { ResultsSession } from './resultsSession';
 import { type Feedback, GameScene, loadArt } from './scene';
 import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
@@ -18,6 +26,7 @@ const MOUSE_BOARD_EDGE_SLOP = 6;
 const BROWSER_CHROME_HEIGHT_CHANGE = 96;
 const MIN_CREDIT_SPACING_MS = 55;
 const HINT_STATUS_MS = 1500;
+const AD_STATUS_MS = 2000;
 const WARMUP_MIN_IDLE_MS = 4;
 const WARMUP_FALLBACK_MS = 45;
 
@@ -29,6 +38,7 @@ interface LevelReveal {
   settled: boolean;
   credited: boolean;
   gleamAt: number | null;
+  silent?: boolean;
 }
 
 interface ScoreCredit {
@@ -57,17 +67,19 @@ interface GameResultsOptions {
   jokerPlaytest: boolean;
   personalScores: Pick<PersonalScores, 'record'>;
   getFriendsScores(): FriendsScores | null;
+  watchBoosterAd?(isCurrent: () => boolean): Promise<AdOutcome>;
   quality: BrowserQuality;
   onPause?(callback: () => void): () => void;
 }
 
 export async function mountGame(app: Application, {
-  jokerPlaytest, personalScores, getFriendsScores, quality, onPause,
+  jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onPause,
 }: GameResultsOptions): Promise<void> {
   const [art] = await Promise.all([loadArt(), preloadScoreFont().catch(error => {
     console.warn('The bundled score font could not be loaded.', error);
   })]);
   const scene = new GameScene(art);
+  const sound = new GameSound();
   const { canvas, renderer, stage } = app;
   const document = canvas.ownerDocument;
   const window = document.defaultView!;
@@ -92,13 +104,20 @@ export async function mountGame(app: Application, {
   let celebrationEnds = 0;
   let feedback: Feedback | null = null;
   let renderedSize: { width: number; height: number } | null = null;
-  let pending: { playback: MatchPlayback; level: LevelReveal | null; inserts: readonly DoughInsert[] } | null = null;
+  let pending: { playback: MatchPlayback; level: LevelReveal | null; inserts: readonly DoughInsert[]; popAt: number | null } | null = null;
+  let landing: { at: number; color: string } | null = null;
   let tapOnlyPress = false;
   let queuedMove: { from: number; to: number } | null = null;
   let arrowPointer: { point: Point; destination: number | null } | null = null;
   let hintCache: { state: GameState; eligible: boolean; result?: ReturnType<typeof findSetupHint> } | null = null;
   let hintAvailable = false;
   let hintStatusUntil = 0;
+  let jokerArmed = false;
+  let boosters = new RunBoosters();
+  let boosterDrop: { kind: BoosterButton; creditAt: number; playback: MatchPlayback } | null = null;
+  let adStatusUntil = 0;
+  let boosterCache: { state: GameState; joker: boolean; swept: GameState } | null = null;
+  let boosterDisplay: BoosterFooterView | null = null;
   const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const gestures = new StackGestures(index => state.stacks[index].length > 0, (from, to) => canMove(state, from, to));
   const frames = new FrameLoop({
@@ -125,11 +144,12 @@ export async function mountGame(app: Application, {
   function boardAnimating(): boolean {
     return pending !== null || scene.moveAnimating || scene.stackUnlockAnimating || scene.effectsAnimating ||
       scene.selectionAnimating || (feedback !== null && !motion.matches) ||
-      credits.length > 0 || levels.length > 0;
+      credits.length > 0 || levels.length > 0 || (!motion.matches && scene.boosterCueDeadline > 0);
   }
 
   function timedWork(): boolean {
-    return boardAnimating() || (!motion.matches && gameOver?.cueAnimating === true);
+    return boardAnimating() || boosterDrop !== null || scene.freeBoosterAnimating ||
+      (!motion.matches && gameOver?.cueAnimating === true);
   }
 
   function needsAnimation(): boolean {
@@ -144,6 +164,13 @@ export async function mountGame(app: Application, {
       const feedbackEnds = feedback.started + feedback.duration;
       if (!next || feedbackEnds < next) next = feedbackEnds;
     }
+    const boosterEnds = motion.matches ? scene.boosterCueDeadline : 0;
+    if (boosterEnds && (!next || boosterEnds < next)) next = boosterEnds;
+    const dropEnds = scene.freeBoosterAnimating ? 0 : scene.freeBoosterDeadline;
+    if (dropEnds && (!next || dropEnds < next)) next = dropEnds;
+    const claimRefresh = boosters.source('joker') && boosters.source('sweep') ? 0 : boosters.nextRefresh(now);
+    if (claimRefresh && (!next || claimRefresh < next)) next = claimRefresh;
+    if (adStatusUntil && (!next || adStatusUntil < next)) next = adStatusUntil;
     if (next === wakeAt) return;
     if (wakeAt) window.clearTimeout(wakeTimer);
     wakeAt = next;
@@ -238,7 +265,7 @@ export async function mountGame(app: Application, {
   }
 
   function syncHintAvailability(): boolean {
-    const settled = !state.gameOver && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
+    const settled = !state.gameOver && !boosters.claiming && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
     if (settled && hintCache?.state !== state) hintCache = { state, eligible: canRequestSetupHint(state) };
     const available = settled && hintCache?.eligible === true;
     if (available !== hintAvailable) {
@@ -246,6 +273,90 @@ export async function mountGame(app: Application, {
       scene.setHintAvailable(available);
     }
     return available;
+  }
+
+  function canOfferBoosters(): boolean {
+    return !!watchBoosterAd && focused && !document.hidden && !pageHidden && !hostPaused;
+  }
+
+  function syncBoosterClock(now: number): void {
+    boosters.setActive(!state.gameOver && canOfferBoosters(), now);
+  }
+
+  function syncBoosterAvailability(now = performance.now()): BoosterFooterView {
+    const visible = !state.gameOver;
+    const settled = visible && !pending && !queuedMove && !scene.moveAnimating && !scene.stackUnlockAnimating &&
+      !scene.effectsAnimating && !scene.boosterCueDeadline && !credits.length && !levels.length &&
+      !boosters.claiming && !hostPaused && !document.hidden && !pageHidden;
+    if (settled && boosterCache?.state !== state) {
+      // Keep the validated Sweep board so a completed press commits the exact preview.
+      boosterCache = { state, joker: canUseJokerBooster(state), swept: useStackSweep(state) };
+    }
+    const progress = Math.floor(boosters.progress(now) * 100) / 100;
+    const canOffer = !!watchBoosterAd && boosters.hasOffersLeft;
+    const button = (kind: BoosterButton, legal: boolean): BoosterButtonView => {
+      const source = boosters.source(kind);
+      if (source) return { usable: legal, mode: source === 'free' ? 'free' : 'held' };
+      if (boosters.claiming === kind) return { usable: false, mode: 'loading' };
+      if (!canOffer) return { usable: false, mode: 'locked' };
+      return { usable: false, mode: legal && canOfferBoosters() && boosters.canClaim(kind, now) ? 'ad' : 'charging' };
+    };
+    const joker = button('joker', settled && boosterCache?.joker === true);
+    const sweep = button('sweep', settled && boosterCache !== null && boosterCache.swept !== state);
+    if (!joker.usable) jokerArmed = false;
+    const adUnavailable = adStatusUntil > now;
+    if (!boosterDisplay || joker.mode !== boosterDisplay.joker.mode || joker.usable !== boosterDisplay.joker.usable ||
+        sweep.mode !== boosterDisplay.sweep.mode || sweep.usable !== boosterDisplay.sweep.usable ||
+        progress !== boosterDisplay.progress || jokerArmed !== boosterDisplay.armed || visible !== boosterDisplay.visible ||
+        adUnavailable !== boosterDisplay.adUnavailable) {
+      boosterDisplay = { joker, sweep, progress, armed: jokerArmed, visible, adUnavailable };
+      scene.setBoosterControls(boosterDisplay);
+    }
+    return boosterDisplay;
+  }
+
+  function syncControls(now = performance.now()): void {
+    syncHintAvailability();
+    syncBoosterAvailability(now);
+  }
+
+  async function claimBooster(kind: BoosterButton): Promise<void> {
+    const run = boosters;
+    if (!watchBoosterAd || !run.beginClaim(kind, performance.now())) return;
+    jokerArmed = false;
+    adStatusUntil = 0;
+    gestures.reset();
+    clearHint();
+    updateInteraction();
+    syncControls();
+    frames.invalidate();
+    const isCurrentRun = () => !events.signal.aborted && boosters === run && !state.gameOver;
+    let outcome: AdOutcome = { status: 'failed', attempted: false };
+    try { outcome = await watchBoosterAd(() => isCurrentRun() && canOfferBoosters()); }
+    catch { /* Keep the offer available after a host error. */ }
+    if (!isCurrentRun()) return;
+    run.finishClaim(outcome.status === 'completed');
+    const now = performance.now();
+    if (outcome.status !== 'completed' && outcome.status !== 'cancelled') adStatusUntil = now + AD_STATUS_MS;
+    if (outcome.attempted && focused && !document.hidden && !pageHidden) wake();
+    syncBoosterClock(now);
+    syncControls(now);
+    frames.invalidate();
+  }
+
+  function cancelBoosterPresentation(): void {
+    if (jokerArmed || gestures.boosterPress) {
+      jokerArmed = false;
+      gestures.reset();
+      updateInteraction();
+    }
+    scene.cancelBoosterCue();
+    cancelFreeBoosterPresentation();
+  }
+
+  function cancelFreeBoosterPresentation(kind?: BoosterButton): void {
+    if (!kind || boosterDrop?.kind === kind) boosterDrop = null;
+    scene.cancelFreeBoosterCelebration(kind);
   }
 
   function clearHint(): void {
@@ -284,6 +395,7 @@ export async function mountGame(app: Application, {
 
   function syncGameOverVisibility(now = performance.now()): void {
     gameOver?.setVisible(focused && !pageHidden && !document.hidden && !hostPaused, now);
+    syncBoosterClock(now);
     queueDeadline(now);
   }
 
@@ -316,19 +428,48 @@ export async function mountGame(app: Application, {
         level.gleamAt = now;
         scene.reachScoreGoal(now, reduced);
       }
-      if (now >= level.gleamAt + GOAL_GLEAM_MS && level.settled && celebrationEnds <= now) {
+      if (now >= level.gleamAt + GOAL_GLEAM_MS && level.settled && celebrationEnds <= now && !scene.freeBoosterDeadline) {
         levels.shift();
         celebrationEnds = now + LEVEL_CELEBRATION_MS;
         displayed = { score: displayed.score, level: details.level, rank: details.rank, levelStartScore, nextLevelScore };
         scene.drawScore(displayed);
         scene.startLevelCelebration(details, now, reduced);
+        if (!level.silent) sound.levelUp();
       }
     }
     scene.showScoreEffects(now);
+    // Reduced motion leaves the match's score label on the board briefly after credit.
+    if (boosterDrop && boosterDrop.creditAt <= now && !levels.length && celebrationEnds <= now &&
+        !awardFrame(boosterDrop.playback, now)) {
+      scene.startFreeBoosterCelebration(boosterDrop.kind, now, motion.matches);
+      boosterDrop = null;
+    }
+  }
+
+  function silencePresentation(): void {
+    sound.stop();
+    landing = null;
+    if (pending) pending.popAt = null;
+    for (const level of levels) level.silent = true;
+  }
+
+  function playLanding(): void {
+    if (!landing) return;
+    const { color } = landing;
+    landing = null;
+    sound.landing(color);
+  }
+
+  function finishVisibleMove(): void {
+    scene.finishMove();
+    // A new press can reveal the previous landing before its flight would end.
+    playLanding();
   }
 
   function cancelPresentation(): void {
+    silencePresentation();
     clearHint();
+    cancelBoosterPresentation();
     pending = null;
     queuedMove = null;
     tapOnlyPress = false;
@@ -353,7 +494,7 @@ export async function mountGame(app: Application, {
     cancelPresentation();
     scene.resize(width, height);
     draw();
-    syncHintAvailability();
+    syncControls();
   }
 
   function hit(event: PointerEvent, mode: 'tap' | 'swipe') {
@@ -377,16 +518,22 @@ export async function mountGame(app: Application, {
   function down(event: PointerEvent): void {
     if (hostPaused && !document.hidden) wake();
     const locked = pending !== null || scene.stackUnlockAnimating;
-    if (queuedMove || event.button !== 0 || (locked && event.pointerType !== 'touch' && event.pointerType !== 'mouse')) return;
+    if (boosters.claiming || queuedMove || event.button !== 0 ||
+        (locked && event.pointerType !== 'touch' && event.pointerType !== 'mouse')) return;
     const { client, target } = hit(event, 'tap');
     if (locked && typeof target !== 'number') return;
     if (state.gameOver && (!results || typeof target !== 'string' || target === 'outside')) return;
     if (target === 'hint' && !syncHintAvailability()) return;
-    if (!gestures.start(event.pointerId, client, target, event.pointerType)) return;
+    if (target === 'joker' || target === 'sweep') {
+      const button = syncBoosterAvailability()[target];
+      if (!button.usable && button.mode !== 'ad') return;
+    }
+    if (!gestures.start(event.pointerId, client, target, event.pointerType, jokerArmed)) return;
+    if (event.isTrusted && event.pointerType === 'mouse' && !document.hidden && !pageHidden && !hostPaused) sound.activate();
     tapOnlyPress = locked;
     if (!locked) {
       if (target !== 'hint') clearHint();
-      scene.finishMove();
+      finishVisibleMove();
       checkBoardSettled();
       feedback = null;
       arrowPointer = null;
@@ -427,8 +574,10 @@ export async function mountGame(app: Application, {
 
   function up(event: PointerEvent): void {
     if (!gestures.owns(event.pointerId)) return;
+    // The browser grants touch and pen activation on pointerup.
+    if (event.isTrusted && event.pointerType !== 'mouse' && !document.hidden && !pageHidden && !hostPaused) sound.activate();
     frames.invalidate();
-    const { client, target } = hit(event, 'swipe');
+    const { client, target } = hit(event, jokerArmed ? 'tap' : 'swipe');
     if (tapOnlyPress) {
       gestures.update(event.pointerId, client, target);
       if (gestures.dragSource !== null) {
@@ -445,6 +594,8 @@ export async function mountGame(app: Application, {
     }
     if (action?.kind === 'hint') {
       if (syncHintAvailability() && hintCache) {
+        jokerArmed = false;
+        syncBoosterAvailability();
         if (hintCache.result === undefined) hintCache.result = findSetupHint(state);
         gestures.reset();
         updateInteraction();
@@ -453,12 +604,42 @@ export async function mountGame(app: Application, {
       }
       return;
     }
+    if (action?.kind === 'joker') {
+      const button = syncBoosterAvailability().joker;
+      if (button.mode === 'ad') { void claimBooster('joker'); return; }
+      if (button.usable) {
+        jokerArmed = !jokerArmed;
+        gestures.reset();
+        syncBoosterAvailability();
+      }
+      updateInteraction();
+      return;
+    }
+    if (action?.kind === 'joker-target') {
+      if (syncBoosterAvailability().armed) {
+        const next = useJokerBooster(state, action.stack);
+        if (next !== state) {
+          commitBooster('joker', next, action.stack);
+          return;
+        }
+      }
+      updateInteraction();
+      return;
+    }
+    if (action?.kind === 'sweep') {
+      const button = syncBoosterAvailability().sweep;
+      if (button.mode === 'ad') void claimBooster('sweep');
+      else if (button.usable && boosterCache) commitBooster('sweep', boosterCache.swept);
+      return;
+    }
     if (action?.kind === 'restart') {
       results?.close();
       results = null;
       gameOver = null;
       scene.showResults(null);
       state = createRun();
+      boosters = new RunBoosters();
+      adStatusUntil = 0;
       bestCombo = 0;
       levelStartScore = 0;
       cancelPresentation();
@@ -466,7 +647,7 @@ export async function mountGame(app: Application, {
       quality.frames.interrupt();
       applyQuality();
       draw();
-      syncHintAvailability();
+      syncControls();
       return;
     }
     if (action?.kind === 'personal' || action?.kind === 'friends') {
@@ -487,14 +668,38 @@ export async function mountGame(app: Application, {
     updateInteraction();
   }
 
+  function commitBooster(kind: BoosterButton, next: GameState, selected?: number): void {
+    if (!boosters.spend(kind)) return;
+    cancelFreeBoosterPresentation(kind);
+    const targets = state.stacks.flatMap((stack, index) => {
+      const color = stack.at(-1);
+      return color === undefined || (selected !== undefined && selected !== index) ? [] : [{ stack: index, color }];
+    });
+    state = next;
+    jokerArmed = false;
+    gestures.reset();
+    feedback = null;
+    clearHint();
+    scene.startBoosterCue(kind, targets, performance.now(), motion.matches);
+    draw();
+    syncControls();
+  }
+
   function commitMove(from: number, to: number): void {
     const before = state;
     let inserts: readonly DoughInsert[] = [];
     // Commit once so interrupted playback can immediately draw the resolved board.
     state = move(before, from, to, undefined, dough => { inserts = dough; });
+    if (state === before) return;
     bestCombo = Math.max(bestCombo, state.combo ?? 0);
     const started = performance.now();
+    boosters.start();
+    const awarded = !state.gameOver && state.combo === 5
+      ? boosters.grantComboDrop(state.combo, canUseJokerBooster(state) ? 'joker' : 'sweep')
+      : undefined;
+    syncBoosterClock(started);
     if (state.gameOver) {
+      cancelFreeBoosterPresentation();
       const { score, level } = state;
       const presentation = new GameOverPresentation({ score, level, bestCombo }, started, personalScores, () => {
         if (gameOver === presentation && !results) frames.invalidate();
@@ -509,17 +714,22 @@ export async function mountGame(app: Application, {
     const level = levelReveal(before, state, motion.matches);
     if (level) levelStartScore = level.levelStartScore;
     if (playback) {
-      pending = { playback, level, inserts };
-      syncHintAvailability();
+      const popAt = playback.reduced ? null : clearStart(playback) + matchPopTime(playback.runLength, playback.runLength - 1);
+      pending = { playback, level, inserts, popAt };
+      syncControls();
       if (level) levels.push(level);
       // A reduced-motion match can resolve ahead of a flight already in progress.
       const previous = credits.at(-1);
       const at = Math.max(scoreImpactTime(playback), previous ? previous.at + MIN_CREDIT_SPACING_MS : 0);
       credits.push({ at, total: state.score, reduced: playback.reduced, level });
+      if (awarded && focused && !hostPaused && !document.hidden && !pageHidden) {
+        boosterDrop = { kind: awarded, creditAt: at, playback };
+      }
       feedback = null;
       scene.startMatch(playback);
       scene.showMatch(matchFrame(playback, started));
       scene.showMatchTail(started);
+      if (playback.reduced) sound.match(playback.color);
       return;
     }
     if (state.score !== before.score || level) resetScore();
@@ -528,7 +738,9 @@ export async function mountGame(app: Application, {
     if (!state.gameOver) feedback = { target: to, started, duration: 280, color };
     draw();
     scene.startMove(inserts, started, motion.matches, { to, start, color });
-    syncHintAvailability();
+    if (motion.matches) sound.landing(color);
+    else landing = { color, at: started + FLIGHT_MS };
+    syncControls();
   }
 
   function cancel(event: PointerEvent): void {
@@ -554,9 +766,13 @@ export async function mountGame(app: Application, {
     const wasLocked = pending !== null || scene.stackUnlockAnimating;
     if ((!state.gameOver || boardAnimating()) && hasJoker()) scene.showJoker(now, motion.matches);
     if (pending) {
-      const { playback, level, inserts } = pending;
+      const { playback, level, inserts, popAt } = pending;
       const frame = matchFrame(playback, now);
       scene.showMatch(frame);
+      if (popAt !== null && now >= popAt) {
+        pending.popAt = null;
+        sound.match(playback.color);
+      }
       if (frame.phase === 'resolved') {
         pending = null;
         if (level?.details.upgrade?.kind === 'stack') {
@@ -569,21 +785,25 @@ export async function mountGame(app: Application, {
       }
     } else if (feedback || scene.selectionAnimating) updateInteraction(now);
     scene.showMove(now);
+    if (landing && now >= landing.at) playLanding();
     if (wasLocked && !pending && !scene.stackUnlockAnimating) {
       if (queuedMove) {
         const { from, to } = queuedMove;
         queuedMove = null;
-        scene.finishMove();
+        finishVisibleMove();
         checkBoardSettled();
         if (canMove(state, from, to)) commitMove(from, to);
       } else updateInteraction(now);
     }
-    syncHintAvailability();
     if (hintStatusUntil && now >= hintStatusUntil) clearHint();
+    if (adStatusUntil && now >= adStatusUntil) adStatusUntil = 0;
     checkBoardSettled();
+    if (scene.freeBoosterDeadline) scene.showFreeBoosterCelebration(now);
     advanceScore(now);
     scene.showMatchTail(now);
+    if (scene.boosterCueDeadline) scene.showBoosterCue(now, motion.matches);
     advanceGameOver(now);
+    syncControls(now);
     if (!timedWork() && !gestures.active && gestures.source === null) applyQuality();
     app.render();
     painted = true;
@@ -595,6 +815,8 @@ export async function mountGame(app: Application, {
   }
 
   function suspend(): void {
+    silencePresentation();
+    cancelBoosterPresentation();
     syncGameOverVisibility();
     quality.frames.interrupt();
     frames.setSuspended(true);
@@ -611,11 +833,13 @@ export async function mountGame(app: Application, {
 
   function settleInterruptedPlay(): void {
     clearHint();
+    cancelBoosterPresentation();
     if (pending || scene.stackUnlockAnimating) {
       gestures.reset();
       cancelPresentation();
       draw();
     } else {
+      silencePresentation();
       scene.finishMove();
       scene.finishStackUnlock();
       scene.cancelMatch();
@@ -625,7 +849,7 @@ export async function mountGame(app: Application, {
       arrowPointer = null;
       updateInteraction();
     }
-    syncHintAvailability();
+    syncControls();
     quality.frames.interrupt();
     frames.invalidate();
   }
@@ -670,6 +894,7 @@ export async function mountGame(app: Application, {
     else wake();
   }, options);
   motion.addEventListener('change', () => {
+    scene.cancelFreeBoosterCelebration();
     quality.frames.interrupt();
     updateInteraction();
     frames.invalidate();
@@ -689,6 +914,7 @@ export async function mountGame(app: Application, {
     results?.close();
     gameOver = null;
     events.abort();
+    sound.destroy();
     unsubscribePause?.();
     stopWarmup();
     if (wakeAt) window.clearTimeout(wakeTimer);

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canMove, canRequestSetupHint, createGame, type DoughInsert, findSetupHint, type GameState, JOKER, matchedRunLength, move, resolveMatch } from './index';
+import {
+  canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
+  JOKER, matchedRunLength, move, previewStackSweep, resolveMatch, useJokerBooster, useStackSweep,
+} from './index';
 
 const lowest = () => 0;
 const highest = () => 0.999;
@@ -295,6 +298,112 @@ describe('Joker', () => {
     for (let i = 0; i < 44; i++) expect(scoreTriple().map(dough => dough.color)).not.toContain(JOKER);
     expect(scoreTriple().at(-1)?.color).toBe(JOKER);
     expect(createGame(lowest).stacks.flat()).not.toContain(JOKER);
+  });
+});
+
+describe('Boosters', () => {
+  it('replaces only the selected exposed donut and keeps the run counters', () => {
+    const initial = board([['red', 'blue'], ['gold', 'gold'], []], { score: 200, combo: 3, movesLeft: 1 });
+    initial.stacks.forEach(Object.freeze);
+    Object.freeze(initial.stacks);
+    Object.freeze(initial);
+
+    expect(canUseJokerBooster(initial)).toBe(true);
+    const next = useJokerBooster(initial, 0);
+    expect(next).toMatchObject({ ...initial, stacks: [['red', JOKER], ['gold', 'gold'], []] });
+    expect(initial.stacks[0]).toEqual(['red', 'blue']);
+    expect(canUseJokerBooster(next)).toBe(false);
+    expect(useJokerBooster(next, 1)).toBe(next);
+
+    const scored = move(next, 0, 1, lowest);
+    expect(scored).toMatchObject({ score: 330, combo: 4, movesLeft: 1 });
+    expect(scored.stacks.flat()).not.toContain(JOKER);
+    expect(canUseJokerBooster(scored)).toBe(true);
+    expect(canUseJokerBooster(createGame(lowest))).toBe(true);
+  });
+
+  it('rejects empty, invalid, terminal and resident-Joker targets without using the booster', () => {
+    const initial = board([['red'], [], ['blue', 'blue']]);
+    for (const target of [1, -1, 3, 0.5, NaN]) expect(useJokerBooster(initial, target)).toBe(initial);
+    expect(canUseJokerBooster(initial)).toBe(true);
+
+    const terminal = { ...initial, gameOver: true };
+    expect(canUseJokerBooster(terminal)).toBe(false);
+    expect(useJokerBooster(terminal, 0)).toBe(terminal);
+    expect(canUseJokerBooster(board([[], []]))).toBe(false);
+
+    const resident = { ...initial, stacks: [[JOKER, 'red'], [], ['blue', 'blue']] };
+    expect(canUseJokerBooster(resident)).toBe(false);
+    expect(useJokerBooster(resident, 0)).toBe(resident);
+    expect(useJokerBooster(resident, 2)).toBe(resident);
+    const exposed = { ...resident, stacks: [[JOKER], ['red', 'red'], ['blue', 'blue']] };
+    expect(useJokerBooster(exposed, 0)).toBe(exposed);
+    const cleared = useStackSweep(exposed);
+    expect(canUseJokerBooster(cleared)).toBe(true);
+    expect(useJokerBooster(cleared, 1).stacks[1]).toEqual([JOKER]);
+  });
+
+  it('preserves the natural Joker schedule and its RNG draw while a booster Joker is on the board', () => {
+    const ordinary = [['blue'], ['blue', 'blue'], ['red', 'gold']];
+    const rng = vi.fn(lowest);
+    const onDough = vi.fn<(inserts: readonly DoughInsert[]) => void>();
+    let state = board(ordinary, { capacity: 7, level: 7, nextLevelScore: 100_000 });
+    for (let i = 0; i < 44; i++) state = move({ ...state, stacks: ordinary }, 0, 1, lowest);
+
+    const boosted = useJokerBooster({ ...state, stacks: ordinary }, 2);
+    const withJoker = move(boosted, 0, 1, rng, onDough);
+    expect(withJoker.stacks.flat().filter(color => color === JOKER)).toHaveLength(1);
+    expect(onDough.mock.lastCall?.[0].at(-1)?.color).not.toBe(JOKER);
+    expect(rng).toHaveBeenCalledTimes(1);
+
+    const swept = useStackSweep({ ...withJoker, stacks: [['blue', 'red'], ['blue', 'blue', 'gold'], ['red', JOKER]] });
+    expect(swept.stacks).toEqual([['blue'], ['blue', 'blue'], ['red']]);
+    expect(canUseJokerBooster(swept)).toBe(true);
+    rng.mockClear();
+    const natural = move(swept, 0, 1, rng, onDough);
+    expect(natural.stacks.flat().filter(color => color === JOKER)).toHaveLength(1);
+    expect(onDough.mock.lastCall?.[0].at(-1)?.color).toBe(JOKER);
+    expect(rng).toHaveBeenCalledTimes(1);
+  });
+
+  it('previews and commits the same one-top sweep over mixed heights including an empty stack', () => {
+    const initial = board([[], [JOKER, 'gold', 'blue'], ['blue'], ['red', 'red', 'gold']], {
+      score: 1140, combo: 4, level: 2, nextLevelScore: 1500, movesLeft: 1,
+    });
+    initial.stacks.forEach(Object.freeze);
+    Object.freeze(initial.stacks);
+    Object.freeze(initial);
+
+    const preview = previewStackSweep(initial);
+    expect(preview).toMatchObject({ ...initial, stacks: [[], [JOKER, 'gold'], [], ['red', 'red']] });
+    const swept = useStackSweep(initial);
+    expect(swept).toEqual(preview);
+    expect(initial.stacks).toEqual([[], [JOKER, 'gold', 'blue'], ['blue'], ['red', 'red', 'gold']]);
+    expect(canMove(swept, 1, 0)).toBe(true);
+    expect(useStackSweep(swept).stacks).toEqual([[], [JOKER], [], ['red']]);
+    expect(previewStackSweep(createGame(lowest))).not.toBeNull();
+  });
+
+  it('rejects sweeps with no ordinary transfer or whose projected board is terminal', () => {
+    const deadProjection = board([
+      ['red', 'blue', 'green', 'red'], ['gold', 'green', 'blue', 'yellow'], ['gold', 'red', 'red'],
+    ], { capacity: 4, level: 20, score: 45000, nextLevelScore: 50000, movesLeft: 1 });
+    expect(move(deadProjection, 0, 2, lowest).score).toBeGreaterThan(deadProjection.score);
+    const projected = { ...deadProjection, stacks: deadProjection.stacks.map(stack => stack.slice(0, -1)) };
+    expect(canMove(projected, 0, 1)).toBe(true);
+    const beforeProjected = {
+      ...projected, movesLeft: 2,
+      stacks: [['red', 'blue'], ['gold', 'green', 'blue', 'green'], ['gold', 'red']],
+    };
+    expect(move(beforeProjected, 1, 0, lowest)).toMatchObject({ stacks: projected.stacks, gameOver: true });
+
+    for (const state of [
+      board([[], []]), board([[], ['blue'], [JOKER]]), board([['red', 'blue']], { capacity: 3 }),
+      { ...deadProjection, gameOver: true }, deadProjection,
+    ]) {
+      expect(previewStackSweep(state)).toBeNull();
+      expect(useStackSweep(state)).toBe(state);
+    }
   });
 });
 

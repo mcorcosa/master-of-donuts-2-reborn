@@ -1,14 +1,18 @@
+import type { BoosterKind } from '../game/boosters';
+
 export interface Point {
   x: number;
   y: number;
 }
 
 export type ResultsAction = 'restart' | 'personal' | 'friends' | 'submit';
-type ButtonAction = ResultsAction | 'hint';
+export type BoosterButton = BoosterKind;
+type ButtonAction = ResultsAction | 'hint' | BoosterButton;
 export type Target = number | ButtonAction | 'outside' | null;
 
 export type GestureResult =
   | { kind: 'move' | 'blocked'; from: number; to: number }
+  | { kind: 'joker-target'; stack: number }
   | { kind: ButtonAction };
 
 interface Press {
@@ -17,6 +21,7 @@ interface Press {
   target: Target;
   hover: Target;
   dragged: boolean;
+  jokerTarget: boolean;
   mouseStackPress: boolean;
   swipeDistanceSquared: number;
   destinationDistanceSquared: number;
@@ -40,9 +45,14 @@ export class StackGestures {
     return this.press !== null;
   }
 
+  get boosterPress(): boolean {
+    const press = this.press;
+    return !!press && (press.jokerTarget || press.target === 'joker' || press.target === 'sweep');
+  }
+
   get dragSource(): number | null {
     const press = this.press;
-    if (press?.dragged && typeof press.target === 'number' && this.hasDonuts(press.target)) {
+    if (press?.dragged && !press.jokerTarget && typeof press.target === 'number' && this.hasDonuts(press.target)) {
       return press.target;
     }
     return null;
@@ -64,13 +74,13 @@ export class StackGestures {
       ? press.target : null;
   }
 
-  start(id: number, point: Point, target: Target, pointerType = 'mouse'): boolean {
+  start(id: number, point: Point, target: Target, pointerType = 'mouse', jokerTarget = false): boolean {
     if (this.press) return false;
     const swipeDistance = pointerType === 'touch' ? 12 : 10;
     const destinationTap = pointerType === 'touch' &&
       this.selection !== null && typeof target === 'number' && target !== this.selection;
     this.press = {
-      id, origin: point, target, hover: target, dragged: false,
+      id, origin: point, target, hover: target, dragged: false, jokerTarget,
       mouseStackPress: pointerType === 'mouse' && typeof target === 'number',
       swipeDistanceSquared: swipeDistance ** 2,
       destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
@@ -112,7 +122,13 @@ export class StackGestures {
     if (!press || press.id !== id) return null;
     this.update(id, point, target);
     this.press = null;
-    if (target === 'outside' || (target === 'hint' && press.target !== 'hint')) return null;
+    if (target === 'outside' ||
+        ((target === 'hint' || target === 'joker' || target === 'sweep') && press.target !== target)) return null;
+
+    if (press.jokerTarget && typeof press.target === 'number') {
+      return !press.dragged && target === press.target && this.hasDonuts(target)
+        ? { kind: 'joker-target', stack: target } : null;
+    }
 
     if (press.dragged) {
       const from = press.target;

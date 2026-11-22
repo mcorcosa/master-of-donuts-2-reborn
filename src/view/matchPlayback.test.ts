@@ -22,14 +22,17 @@ const counter = { x: 118, y: 84 };
 function makeScene(): GameScene {
   vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
   const imageData = (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) });
+  const gradient = () => ({ addColorStop() {} });
   const context = {
-    createRadialGradient: () => ({ addColorStop() {} }), fillRect() {}, drawImage() {}, putImageData() {},
+    createRadialGradient: gradient, createLinearGradient: gradient, fillRect() {}, drawImage() {}, putImageData() {},
     createImageData: imageData, getImageData: (_x: number, _y: number, width: number, height: number) => imageData(width, height),
+    setTransform() {}, save() {}, restore() {}, rotate() {}, beginPath() {},
+    moveTo() {}, lineTo() {}, quadraticCurveTo() {}, bezierCurveTo() {}, arc() {}, fill() {}, stroke() {},
   };
   vi.spyOn(DOMAdapter.get(), 'createCanvas').mockImplementation((width, height) =>
     ({ width, height, getContext: () => context }) as unknown as HTMLCanvasElement);
-  vi.spyOn(Texture, 'from').mockReturnValue(new Texture({ source: new TextureSource({ width: 64, height: 64 }) }));
-  const art = new Map(['kitchen', 'logo', 'clear', 'strawberry-glaze', 'blue', 'red', 'green', 'gold', 'yellow']
+  vi.spyOn(Texture, 'from').mockImplementation(() => new Texture({ source: new TextureSource({ width: 64, height: 64 }) }));
+  const art = new Map(['kitchen', 'logo', 'clear', 'strawberry-glaze', 'blue', 'red', 'green', 'gold', 'yellow', JOKER]
     .map(name => [name, Texture.WHITE]));
   const scene = new GameScene(art);
   scene.resize(320, 568);

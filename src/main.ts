@@ -1,7 +1,7 @@
 import { Application, Assets } from 'pixi.js';
 import { createBrowserPersistence, createWebPlatform, scopedBrowserStorage } from '@playbridge/web';
 import { BrowserQuality } from './performance/browserQuality';
-import { createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './platform/facebook';
+import { BOOSTER_REWARDED_PLACEMENT, createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './platform/facebook';
 import { createFriendsScores } from './platform/friendsScores';
 import { browserScoreStorage, isLegacyFacebookScoreOrigin, PersonalScores } from './platform/personalScores';
 import { startGame } from './platform/startup';
@@ -23,6 +23,7 @@ async function main(): Promise<void> {
   const boardName = __FACEBOOK__ ? import.meta.env.VITE_DONUTS_FRIENDS_BOARD?.trim() ?? '' : '';
   const facebook = __FACEBOOK__ ? createRebornFacebookPlatform(
     () => loadFacebookSDK(() => window.FBInstant), boardName, createBrowserPersistence(storage),
+    import.meta.env.VITE_DONUTS_BOOSTER_REWARDED_PLACEMENT,
   ) : null;
   const platform = facebook?.services ?? createWebPlatform(storage);
   const personalScores = new PersonalScores(jokerPlaytest
@@ -50,6 +51,9 @@ async function main(): Promise<void> {
       jokerPlaytest,
       personalScores,
       getFriendsScores: () => facebook && createFriendsScores(platform, boardName, facebook.submitScore),
+      watchBoosterAd: platform.capabilities().rewardedAds === 'available' ? isCurrent => platform.ads.request({
+        kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT, isCurrent,
+      }) : undefined,
       quality,
       onPause: callback => platform.lifecycle.onPause(callback),
     });

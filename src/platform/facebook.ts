@@ -1,6 +1,8 @@
 import { PlatformError, type Outcome, type Persistence, type PlatformServices } from '@playbridge/core';
 import { createFacebookPlatform, type FacebookLeaderboard, type FacebookLeaderboardEntry, type FacebookSDK } from '@playbridge/facebook';
 
+export const BOOSTER_REWARDED_PLACEMENT = 'booster';
+
 interface HostLeaderboardEntry extends Pick<FacebookLeaderboardEntry, 'getRank' | 'getScore'> {
   getPlayer(): { getID?(): string | null; getName(): string };
   getTimestamp?(): number;
@@ -96,6 +98,7 @@ export function createRebornFacebookPlatform(
   awaitSDK: () => Promise<FacebookHostSDK>,
   boardName: string,
   persistence: Persistence,
+  boosterPlacementId = '',
 ): { services: PlatformServices; submitScore: (score: number) => Promise<Outcome> } {
   let sdk: FacebookSDK | undefined;
   let getLeaderboard: FacebookHostSDK['getLeaderboardAsync'];
@@ -110,6 +113,8 @@ export function createRebornFacebookPlatform(
   }
   const platform = createFacebookPlatform({
     getSDK: () => sdk,
+    rewardedPlacements: { [BOOSTER_REWARDED_PLACEMENT]: boosterPlacementId.trim() },
+    initialRewarded: BOOSTER_REWARDED_PLACEMENT,
     async awaitSDK() {
       const host = await awaitSDK();
       sdk = {
@@ -125,6 +130,10 @@ export function createRebornFacebookPlatform(
         onPause: callback => host.onPause?.(callback),
         logEvent: name => host.logEvent(name),
         get player() { return host.player; },
+        get getRewardedVideoAsync() {
+          const getAd = host.getRewardedVideoAsync;
+          return typeof getAd === 'function' ? getAd.bind(host) : undefined;
+        },
         get getLeaderboardAsync() {
           const getBoard = selectedLeaderboard();
           return getBoard && (async (name: string) => connectedBoard(await getBoard(name)));

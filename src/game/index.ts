@@ -562,6 +562,30 @@ export function canMove(state: GameState, from: number, to: number): boolean {
   return !state.gameOver && Number.isInteger(from) && Number.isInteger(to) && canTransfer(state.stacks, state.capacity, from, to);
 }
 
+export function canUseJokerBooster(state: GameState): boolean {
+  return !state.gameOver && state.stacks.some(stack => stack.length > 0)
+    && !state.stacks.some(stack => stack.includes(JOKER));
+}
+
+export function useJokerBooster(state: GameState, stack: number): GameState {
+  if (!Number.isInteger(stack) || !state.stacks[stack]?.length || !canUseJokerBooster(state)) return state;
+  const next = { ...state, stacks: state.stacks.map(pile => pile.slice()) };
+  const selected = next.stacks[stack];
+  selected[selected.length - 1] = JOKER;
+  return next;
+}
+
+export function previewStackSweep(state: GameState): GameState | null {
+  if (state.gameOver) return null;
+  const next = { ...state, stacks: state.stacks.map(stack => stack.slice(0, -1)) };
+  const hasTransfer = next.stacks.some((_, from) => next.stacks.some((_, to) => canMove(next, from, to)));
+  return hasTransfer && !isGameOver(next) ? next : null;
+}
+
+export function useStackSweep(state: GameState): GameState {
+  return previewStackSweep(state) ?? state;
+}
+
 export function move(
   state: GameState, from: number, to: number, rng: () => number = Math.random,
   onDough?: (inserts: readonly DoughInsert[]) => void,

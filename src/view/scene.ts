@@ -1,6 +1,8 @@
 import { Assets, Container, DOMAdapter, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
 import { type DoughInsert, type GameState, JOKER } from '../game';
-import type { Point, StackGestures, Target } from './gestures';
+import { BoosterControls, BoosterCue, type BoosterFooterView } from './boosters';
+import { FreeBoosterCelebration } from './freeBoosterCelebration';
+import type { BoosterButton, Point, StackGestures, Target } from './gestures';
 import { JokerArt } from './jokerArt';
 import {
   BOARD_FOOTER_SPACE, BOARD_TOP, contains, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
@@ -24,6 +26,7 @@ const GOLD = 0xab591a;
 const MINT = 0x237d61;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
+const FOOTER_STATUS_X = 239;
 const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
 const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
@@ -165,6 +168,10 @@ export class GameScene {
   private readonly hintButton = new Container({ visible: false });
   private readonly hintBounds = { x: VIEW_WIDTH - 106, y: 0, width: 90, height: BOARD_FOOTER_SPACE };
   private readonly hintStatus: Text;
+  private readonly boosterControls: BoosterControls;
+  private readonly boosterCue = new BoosterCue();
+  private readonly freeBooster = new FreeBoosterCelebration();
+  private readonly boosterPrompt: Text;
   private readonly selectionCue = new Graphics({ eventMode: 'none', visible: false })
     .circle(0, 0, 4).fill(0xffdf86).stroke({ color: GOLD, width: 1.5 });
   private readonly feedbackCue = new Graphics({ eventMode: 'none', visible: false })
@@ -209,8 +216,21 @@ export class GameScene {
     return this.matchPool.some(effect => effect.active) || this.scoreBar.animating || this.celebration.animating;
   }
 
+  get boosterCueDeadline(): number {
+    return this.boosterCue.deadline;
+  }
+
+  get freeBoosterDeadline(): number {
+    return this.freeBooster.deadline;
+  }
+
+  get freeBoosterAnimating(): boolean {
+    return this.freeBooster.animating;
+  }
+
   constructor(private readonly art: Map<string, Texture>) {
     const companion = this.texture('strawberry-glaze');
+    this.boosterControls = new BoosterControls(this.art.get(JOKER)!);
     this.scoreBar = new ScoreBar(companion);
     this.results = new ResultsPanel(companion);
     this.vacancyArt = new VacancyArt(this.texture('clear'));
@@ -231,14 +251,18 @@ export class GameScene {
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
     this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
-      this.celebration.root, this.hud, this.matchEffects);
+      this.boosterCue.root, this.celebration.root, this.hud, this.matchEffects, this.freeBooster.root);
 
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
     logo.anchor.set(0.5);
     logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
     this.hud.addChild(this.scoreBar.root);
-    this.status = label(this.hud, '', 15, CENTER, 0);
-    this.hintStatus = label(this.hud, '', 15, CENTER, 0);
+    this.status = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
+    this.hintStatus = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
+    this.boosterPrompt = label(this.hud, 'Pick a stack', 15, FOOTER_STATUS_X, 0, '#ffedb9');
+    this.boosterPrompt.style.stroke = { color: INK, width: 2.5, join: 'round' };
+    this.boosterPrompt.visible = false;
+    this.hud.addChild(this.boosterControls.root);
     const { width, height } = this.hintBounds;
     this.hintButton.addChild(new Graphics().roundRect(0, 2, width, height - 4, 12)
       .fill(0x164c48).stroke({ color: 0xa6fff0, width: 1.5 }));
@@ -316,6 +340,8 @@ export class GameScene {
     this.scrim.clear().rect(0, 0, width, height).fill({ color: 0x4e2019, alpha: 0.6 });
     this.status.y = this.fit.height - BOARD_FOOTER_SPACE / 2;
     this.hintStatus.y = this.status.y;
+    this.boosterPrompt.y = this.status.y;
+    this.boosterControls.resize(this.fit.height);
     this.hintBounds.y = this.fit.height - BOARD_FOOTER_SPACE;
     this.hintButton.position.set(this.hintBounds.x, this.hintBounds.y);
     this.results.resize(this.fit.height);
@@ -349,6 +375,43 @@ export class GameScene {
 
   setHintAvailable(available: boolean): void {
     this.hintButton.visible = available;
+  }
+
+  setBoosterControls(view: BoosterFooterView): void {
+    this.boosterControls.show(view);
+    this.boosterPrompt.visible = view.visible && (view.armed || view.adUnavailable);
+    this.boosterPrompt.text = view.armed ? 'Pick a stack' : 'Ad unavailable';
+  }
+
+  startBoosterCue(kind: BoosterButton, targets: readonly { stack: number; color: string }[], now: number, reduced: boolean): void {
+    const { donutWidth: width, donutHeight: height, step } = this.layout;
+    const marks = targets.map(({ stack, color }) => {
+      const { slot, pieces } = this.stacks[stack];
+      return { x: slot.x, y: slot.base - (pieces.length - 1) * step - height / 2,
+        width, height, texture: kind === 'sweep' ? this.texture(color) : undefined };
+    });
+    this.boosterCue.start(kind, marks, now, reduced);
+  }
+
+  showBoosterCue(now: number, reduced: boolean): void {
+    this.boosterCue.show(now, reduced);
+  }
+
+  cancelBoosterCue(): void {
+    this.boosterCue.cancel();
+  }
+
+  startFreeBoosterCelebration(kind: BoosterButton, now: number, reduced: boolean): void {
+    this.freeBooster.start(kind, this.boosterControls.dropTarget(kind), now, reduced);
+    this.showFreeBoosterCelebration(now);
+  }
+
+  showFreeBoosterCelebration(now: number): void {
+    this.boosterControls.showDropLanding(this.freeBooster.show(now));
+  }
+
+  cancelFreeBoosterCelebration(kind?: BoosterButton): void {
+    if (this.freeBooster.cancel(kind)) this.boosterControls.showDropLanding(null);
   }
 
   showHint(move: { from: number; to: number } | null): void {
@@ -618,7 +681,7 @@ export class GameScene {
     if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
     if (this.hintButton.visible && contains(this.hintBounds, point)) return 'hint';
-    return stackTarget(this.stacks, point, this.fit.height, mode);
+    return this.boosterControls.hit(point) ?? stackTarget(this.stacks, point, this.fit.height, mode);
   }
 
   private hitMovingStack(point: Point): Target {
