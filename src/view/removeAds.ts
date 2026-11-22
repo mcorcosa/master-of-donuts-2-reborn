@@ -5,7 +5,7 @@ function updateStatus({ state, message }: RemoveAdsView): string {
   switch (state) {
     case 'checking': return 'Checking for a purchase…';
     case 'checkout': return 'Completing checkout…';
-    case 'owned': return 'Your purchase is active. Automatic ads are off.';
+    case 'owned': return 'Your purchase is active. Interstitials are off.';
     case 'pending': return 'Waiting for Facebook to confirm your purchase.';
     case 'available': return message ?? '';
     case 'unavailable': return message ?? 'Purchases are currently unavailable.';
@@ -14,9 +14,9 @@ function updateStatus({ state, message }: RemoveAdsView): string {
 
 export function mountRemoveAds(document: Document, purchase: RemoveAds,
   onPause: (callback: () => void) => () => void, copy = {
-    title: 'Remove Ads',
-    description: 'One purchase permanently removes automatic ads. Rewarded booster ads are still optional.',
-  }): { setVisible(visible: boolean): void; destroy(): void } {
+    title: 'Remove Interstitials',
+    description: 'Permanently removes automatic interstitial ads. Optional rewarded ads remain available.',
+  }, onModalOpen: (open: boolean) => void = () => {}): { setVisible(visible: boolean): void; destroy(): void } {
   const window = document.defaultView!;
   const events = new AbortController();
   const options = { signal: events.signal };
@@ -72,6 +72,7 @@ export function mountRemoveAds(document: Document, purchase: RemoveAds,
 
   function dismiss(): void {
     dialog.close();
+    onModalOpen(false);
     if (!launch.hidden) launch.focus();
   }
 
@@ -79,6 +80,7 @@ export function mountRemoveAds(document: Document, purchase: RemoveAds,
     if (launch.hidden || dialog.open) return;
     generation++;
     dialog.showModal();
+    onModalOpen(true);
     render();
     void purchase.refresh();
   }, options);
@@ -102,13 +104,15 @@ export function mountRemoveAds(document: Document, purchase: RemoveAds,
   }, options);
   const unsubscribeChange = purchase.onChange(render);
   const unsubscribePause = onPause(interrupt);
-  foreground();
   return {
     setVisible(visible) {
       launch.hidden = !visible;
       if (!visible) {
         interrupt();
-        if (dialog.open) dialog.close();
+        if (dialog.open) {
+          dialog.close();
+          onModalOpen(false);
+        }
       }
     },
     destroy() {
@@ -116,6 +120,7 @@ export function mountRemoveAds(document: Document, purchase: RemoveAds,
       events.abort();
       unsubscribeChange();
       unsubscribePause();
+      if (dialog.open) onModalOpen(false);
       dialog.remove();
       launch.remove();
     },

@@ -15,7 +15,7 @@ export type StackLayout = ReturnType<typeof layoutStacks>;
 
 export const VIEW_WIDTH = 400;
 export const BOARD_TOP = 124;
-export const BOARD_FOOTER_SPACE = 36;
+export const BOARD_FOOTER_SPACE = 68;
 export const STACK_LIFT = 6;
 
 const BOARD_INSET = 12;
@@ -27,6 +27,10 @@ const TAP_SLOP = 14;
 const SWIPE_SLOP = 22;
 
 export type HitMode = 'exact' | 'tap' | 'swipe';
+
+export function footerCenterY(height: number): number {
+  return height - BOARD_FOOTER_SPACE / 2;
+}
 
 export function viewport(width: number, height: number) {
   const scale = Math.min(Math.max(1, width) / VIEW_WIDTH, Math.max(1, height) / 540, 1.6);

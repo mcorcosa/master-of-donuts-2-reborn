@@ -17,6 +17,7 @@ interface RemoveAdsOptions {
   automaticAdsEnabled(): boolean;
   canOpenCheckout(): boolean;
   ownershipChanged?(): void;
+  checkoutChanged?(): void;
 }
 
 export class RemoveAds {
@@ -135,6 +136,7 @@ export class RemoveAds {
     // Let any ongoing recheck finish, then read again after the native reply.
     await this.restoring;
     this.openingCheckout = false;
+    this.options.checkoutChanged?.();
     if (this.confirmed !== 'active') {
       // The checkout reply can indicate a possible charge. Only inventory can grant the entitlement.
       this.pending = status === 'completed' || status === 'pending';
@@ -163,6 +165,7 @@ export class RemoveAds {
       }
 
       this.openingCheckout = true;
+      this.options.checkoutChanged?.();
       this.pending = true;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {

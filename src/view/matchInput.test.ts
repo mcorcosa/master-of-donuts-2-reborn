@@ -3,9 +3,11 @@ import type { AdOutcome } from '@playbridge/core';
 import { createBrowserPersistence } from '@playbridge/web';
 import type { Application } from 'pixi.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { GameSound } from '../audio/GameSound';
 import { createGame, type DoughInsert, findSetupHint, type GameState, JOKER, move } from '../game';
 import { BrowserQuality } from '../performance/browserQuality';
 import type { FriendScore, FriendsScores } from '../platform/friendsScores';
+import type { AdPlacement, AdRequestOptions, GameMonetization } from '../platform/monetization';
 import { browserScoreStorage, type CompletedResults, PERSONAL_SCORES_KEY, PersonalScores } from '../platform/personalScores';
 import type { BoosterFooterView } from './boosters';
 import { FREE_BOOSTER_FLIGHT_MS, FREE_BOOSTER_HOLD_MS, FREE_BOOSTER_LANDING_MS } from './freeBoosterCelebration';
@@ -76,11 +78,47 @@ beforeEach(() => {
     return x === 398 ? 'hint' : x === 397 ? 'joker' : x === 396 ? 'sweep' : stack;
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+class TestElement extends EventTarget {
+  readonly nodeName: string;
+  readonly children: TestElement[] = [];
+  parent: TestElement | null = null;
+  textContent = '';
+  hidden = false;
+  open = false;
+
+  constructor(tag: string) {
+    super();
+    this.nodeName = tag.toUpperCase();
+  }
+
+  setAttribute() {}
+  focus() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+
+  append(...children: TestElement[]) {
+    for (const child of children) {
+      this.children.push(child);
+      child.parent = this;
+    }
+  }
+
+  remove() {
+    const siblings = this.parent?.children;
+    if (siblings) siblings.splice(siblings.indexOf(this), 1);
+    this.parent = null;
+  }
+}
 
 async function setup(
   reduced = false, search = '', devicePixelRatio = 1, scores?: Pick<PersonalScores, 'record'>,
   watchBoosterAd?: (isCurrent: () => boolean) => Promise<AdOutcome>,
+  gameMonetization?: GameMonetization,
 ) {
   let now = 0;
   let refillEnds = 0;
@@ -159,7 +197,20 @@ async function setup(
     },
     clearTimeout: (id: number) => { timers.delete(id); },
   });
-  const document = Object.assign(new EventTarget(), { defaultView: window, hidden: false });
+  const body = new TestElement('body');
+  const document = Object.assign(new EventTarget(), {
+    defaultView: window, hidden: false, body,
+    createElement: (tag: string) => new TestElement(tag),
+    querySelectorAll: () => body.children.filter(element => element.nodeName === 'DIALOG' && element.open),
+  });
+  let modalChanged = (_target: TestElement) => {};
+  vi.stubGlobal('MutationObserver', class {
+    constructor(callback: (records: { target: TestElement }[]) => void) {
+      modalChanged = target => callback([{ target }]);
+    }
+    observe() {}
+    disconnect() { modalChanged = () => {}; }
+  });
   const canvas = Object.assign(new EventTarget(), {
     ownerDocument: document, style: {}, setPointerCapture: vi.fn(),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 700 }),
@@ -174,16 +225,38 @@ async function setup(
       rendererEvents.emit('resize');
     },
   });
-  const app = { canvas, renderer, render: vi.fn(), stage: { addChild: vi.fn(), once: vi.fn() }, screen };
+  const app = { canvas, renderer, render: vi.fn(), stage: { addChild: vi.fn(), once: vi.fn(), off: vi.fn() }, screen };
   const jokerPlaytest = new URLSearchParams(search).get('playtest') === 'joker';
   const personalScores = scores ?? new PersonalScores(createBrowserPersistence(
     jokerPlaytest ? sessionStorage : browserScoreStorage(() => localStorage, 'web')));
   const quality = new BrowserQuality(window as unknown as Window);
   const onResultsVisibilityChange = vi.fn<(visible: boolean) => void>();
+  const monetization = gameMonetization ?? (watchBoosterAd ? {
+    available: (placement: AdPlacement) => placement === 'joker' || placement === 'sweep',
+    setPlaying() {},
+    runCompleted() {},
+    request(_placement: AdPlacement, ad: AdRequestOptions) {
+      ad.onAttempt();
+      return watchBoosterAd(ad.canShow);
+    },
+  } : undefined);
   await mountGame(app as unknown as Application, {
-    jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onResultsVisibilityChange,
+    jokerPlaytest, personalScores, getFriendsScores, monetization, quality, onResultsVisibilityChange,
     onPause(callback) { pause = callback; return () => { pause = () => {}; }; },
   });
+  const dialog = body.children[0];
+  const destroy = scene.root.once.mock.lastCall![1] as () => void;
+  const clickDialog = (label: string) => {
+    const button = dialog?.open && dialog.children[2].children.find(child => !child.hidden && child.textContent === label);
+    if (button) button.dispatchEvent(new Event('click'));
+    return !!button;
+  };
+  const setOtherModalOpen = (open: boolean) => {
+    const other = body.children[1] ?? new TestElement('dialog');
+    if (!other.parent) body.append(other);
+    other.open = open;
+    modalChanged(other);
+  };
 
   const pointer = (type: string, clientX: number, pointerId = 1, pointerType = 'mouse', buttons = 0, clientY = 200) => {
     const event = Object.assign(new Event(type), { button: 0, buttons, pointerId, pointerType, clientX, clientY });
@@ -213,8 +286,343 @@ async function setup(
   };
   return { window, document, renderer, render: app.render, resizeViewport, pointer, tap, wheel, match, tick,
     motion, localStorage, sessionStorage, onResultsVisibilityChange, suspendFromHost: () => pause(),
+    clickDialog, dialog, destroy, setOtherModalOpen,
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
+
+describe('game view monetization', () => {
+  const full: GameState = {
+    ...initial, score: 1390, combo: 2, movesLeft: 1, gameOver: true,
+    stacks: [
+      ['red', 'blue', 'red', 'blue', 'blue', 'red'],
+      ['red', 'blue', 'red', 'blue', 'red', 'blue'],
+      ['red', 'blue', 'red', 'blue', 'red', 'blue'],
+    ],
+  };
+  const terminalAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
+  const makeMonetization = (...placements: AdPlacement[]) => ({
+    available: vi.fn((placement: AdPlacement) => placements.includes(placement)),
+    request: vi.fn<GameMonetization['request']>().mockResolvedValue({ status: 'unavailable', attempted: false }),
+    setPlaying: vi.fn<GameMonetization['setPlaying']>(),
+    runCompleted: vi.fn<GameMonetization['runCompleted']>(),
+  });
+  const openTerminal = async (game: Awaited<ReturnType<typeof setup>>, terminal = full, start = 0) => {
+    vi.mocked(move).mockReturnValueOnce(terminal);
+    game.match();
+    game.tick(start + 1000);
+    await settleResults();
+    game.tick(start + 1000 + GAME_OVER_HOLD_MS);
+    game.tick(start + terminalAt);
+  };
+
+  it('counts foreground play transitions between frames and pauses for a purchase modal', async () => {
+    const monetization = makeMonetization();
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    game.setOtherModalOpen(true);
+    game.tap(50);
+    game.tap(150);
+    expect(move).not.toHaveBeenCalled();
+    game.setOtherModalOpen(false);
+    game.window.dispatchEvent(new Event('blur'));
+    game.document.hidden = true;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    game.window.dispatchEvent(new Event('focus'));
+    expect(monetization.setPlaying.mock.calls).toEqual([[true], [false], [true], [false]]);
+    game.document.hidden = false;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    await openTerminal(game);
+    expect(monetization.setPlaying.mock.calls).toEqual([[true], [false], [true], [false], [true], [false]]);
+    expect(monetization.runCompleted).toHaveBeenCalledOnce();
+  });
+
+  it('leases one Play Again for the current results and waits through host pause, hide and blur', async () => {
+    const monetization = makeMonetization('play-again');
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation((_placement, ad) => {
+      expect(ad.canShow()).toBe(true);
+      ad.onAttempt();
+      return new Promise(resolve => { settle = resolve; });
+    });
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    const outgoing = scene.showResults.mock.lastCall?.[0];
+    const stop = vi.spyOn(GameSound.prototype, 'stop');
+    game.tap(300);
+    game.tap(300);
+    expect(monetization.request).toHaveBeenCalledExactlyOnceWith('play-again', expect.any(Object));
+    expect(monetization.runCompleted).toHaveBeenCalledBefore(monetization.request);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(scene.showResults).toHaveBeenLastCalledWith(outgoing);
+    const ad = monetization.request.mock.lastCall![1];
+    game.suspendFromHost();
+    game.window.dispatchEvent(new Event('blur'));
+    game.document.hidden = true;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    expect(ad.isCurrent()).toBe(true);
+    expect(ad.canShow()).toBe(false);
+    settle({ status: 'completed', attempted: true });
+    await settleResults();
+    game.document.hidden = false;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    expect(scene.showResults).toHaveBeenLastCalledWith(outgoing);
+    expect(createGame).toHaveBeenCalledOnce();
+    game.window.dispatchEvent(new Event('focus'));
+    game.window.dispatchEvent(new Event('focus'));
+    expect(scene.showResults).toHaveBeenLastCalledWith(null);
+    expect(createGame).toHaveBeenCalledTimes(2);
+    expect(ad.isCurrent()).toBe(false);
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a no-fill check silent and restarts immediately when it resolves', async () => {
+    const monetization = makeMonetization('play-again');
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    const stop = vi.spyOn(GameSound.prototype, 'stop');
+    game.tap(300);
+    expect(stop).not.toHaveBeenCalled();
+    expect(createGame).toHaveBeenCalledOnce();
+    await settleResults();
+    expect(scene.showResults).toHaveBeenLastCalledWith(null);
+    expect(createGame).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers a foreground return if the host pauses before the ad ever starts', async () => {
+    const monetization = makeMonetization('extra-chance');
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation(() => new Promise(resolve => { settle = resolve; }));
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    game.clickDialog('Watch ad');
+    const ad = monetization.request.mock.lastCall![1];
+    game.suspendFromHost();
+    expect(ad.isCurrent()).toBe(true);
+    expect(ad.canShow()).toBe(false);
+    settle({ status: 'unavailable', attempted: false });
+    await settleResults();
+    expect(game.localStorage.setItem).not.toHaveBeenCalled();
+    expect(game.clickDialog('Return to game')).toBe(true);
+    await settleResults();
+    game.tick(terminalAt + 16);
+    expect(scene.showResults.mock.lastCall?.[0]?.personal.run.score).toBe(full.score);
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+  });
+
+  it('preserves booster inventory and best combo across a successful Extra Chance and records the final run once', async () => {
+    const monetization = makeMonetization('extra-chance');
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation((_placement, ad) => {
+      ad.onAttempt();
+      return new Promise(resolve => { settle = resolve; });
+    });
+    const friends = { list: vi.fn(async () => []), submit: vi.fn(async () => {}) };
+    getFriendsScores.mockReturnValue(friends);
+    scene.hit.mockImplementation(({ x }: Point) => {
+      const last = scene.draw.mock.lastCall?.[0];
+      if (!last?.gameOver) return Math.floor(x / 100);
+      return x === 300 ? 'restart' : x === 320 ? 'friends' : x === 340 ? 'submit' : null;
+    });
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    vi.mocked(move).mockReturnValueOnce({ ...initial, combo: 5 });
+    game.match();
+    game.tick(1000);
+    vi.mocked(move).mockReturnValueOnce(full);
+    game.match();
+    game.tick(2000);
+    await settleResults();
+    game.tick(5999);
+    expect(game.dialog.open).toBe(false);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
+    game.tick(6000);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
+    game.tick(6499);
+    expect(game.dialog.open).toBe(false);
+    game.tick(6500);
+    expect(game.dialog.open).toBe(true);
+    expect(game.dialog.children[0].textContent).toBe('Extra Chance');
+    expect(game.localStorage.setItem).not.toHaveBeenCalled();
+    expect(getFriendsScores).not.toHaveBeenCalled();
+    expect(monetization.runCompleted).not.toHaveBeenCalled();
+    expect(game.clickDialog('Watch ad')).toBe(true);
+    expect(game.clickDialog('Watch ad')).toBe(false);
+    expect(monetization.request).toHaveBeenCalledExactlyOnceWith('extra-chance', expect.any(Object));
+    game.window.dispatchEvent(new Event('blur'));
+    settle({ status: 'completed', attempted: true });
+    await settleResults();
+    expect(scene.draw.mock.lastCall?.[0]).toBe(full);
+    game.window.dispatchEvent(new Event('focus'));
+    const revived = scene.draw.mock.lastCall?.[0];
+    expect(revived).toMatchObject({ ...full, gameOver: false, stacks: expect.any(Array) });
+    expect(revived?.stacks).not.toEqual(full.stacks);
+    expect(scene.setBoosterControls.mock.lastCall?.[0].joker.mode).toBe('free');
+    expect(createGame).toHaveBeenCalledOnce();
+    expect(game.localStorage.setItem).not.toHaveBeenCalled();
+
+    const next = { ...full, score: 1480, combo: 3 };
+    vi.mocked(move).mockReturnValueOnce(next);
+    game.tap(150);
+    game.tap(50);
+    game.tick(terminalAt + 2000);
+    await settleResults();
+    game.tick(terminalAt + 2000 + GAME_OVER_HOLD_MS);
+    game.tick(terminalAt + 2000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    expect(game.dialog.open).toBe(false);
+    expect(monetization.runCompleted).toHaveBeenCalledOnce();
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+    expect(scene.showResults.mock.lastCall?.[0]?.personal.run).toEqual({ score: 1480, level: 2, bestCombo: 5 });
+    expect(getFriendsScores).toHaveBeenCalledOnce();
+    game.tap(320);
+    game.tap(340);
+    game.tap(340);
+    expect(friends.submit).toHaveBeenCalledExactlyOnceWith(1480);
+    game.tap(300);
+    expect(monetization.request).toHaveBeenCalledOnce();
+    expect(createGame).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['skip', 'unavailable', 'failed', 'cancelled', 'unconfirmed completion'] as const)(
+    'finalizes an unchanged terminal on %s', async result => {
+      const monetization = makeMonetization('extra-chance');
+      const game = await setup(true, '', 1, undefined, undefined, monetization);
+      await openTerminal(game);
+      expect(game.localStorage.setItem).not.toHaveBeenCalled();
+      if (result === 'skip') {
+        expect(game.clickDialog('Skip · See results')).toBe(true);
+        expect(monetization.request).not.toHaveBeenCalled();
+      } else {
+        const status = result === 'unconfirmed completion' ? 'completed' : result;
+        monetization.request.mockResolvedValue({ status, attempted: false });
+        expect(game.clickDialog('Watch ad')).toBe(true);
+      }
+      await settleResults();
+      game.tick(terminalAt + 16);
+      expect(game.dialog.open).toBe(false);
+      expect(scene.draw.mock.lastCall?.[0]).toBe(full);
+      expect(scene.showResults.mock.lastCall?.[0]?.personal.run.score).toBe(full.score);
+      expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+      expect(monetization.runCompleted).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('suppresses Extra Chance for a board with no bounded rescue', async () => {
+    const monetization = makeMonetization('extra-chance');
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game, { ...full, stacks: [['blue'], ['red'], ['green']] });
+    expect(game.dialog.open).toBe(false);
+    expect(monetization.request).not.toHaveBeenCalled();
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+    expect(scene.showResults.mock.lastCall?.[0]?.personal.run.score).toBe(full.score);
+  });
+
+  it.each(['pending', 'revived'] as const)('finalizes the %s terminal on teardown and fences late callbacks', async phase => {
+    const monetization = makeMonetization('extra-chance');
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation((_placement, ad) => {
+      ad.onAttempt();
+      return new Promise(resolve => { settle = resolve; });
+    });
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    game.clickDialog('Watch ad');
+    if (phase === 'revived') {
+      settle({ status: 'completed', attempted: true });
+      await settleResults();
+      expect(scene.draw.mock.lastCall?.[0].gameOver).toBe(false);
+    }
+    expect(game.localStorage.setItem).not.toHaveBeenCalled();
+    game.destroy();
+    const ad = monetization.request.mock.lastCall![1];
+    expect(ad.isCurrent()).toBe(false);
+    ad.onRecovery(vi.fn());
+    const draws = scene.draw.mock.calls.length;
+    settle({ status: 'completed', attempted: true });
+    await settleResults();
+    expect(scene.draw).toHaveBeenCalledTimes(draws);
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+    expect(monetization.runCompleted).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a cached page provisional, then finalizes the terminal on permanent pagehide', async () => {
+    const monetization = makeMonetization('extra-chance');
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    game.window.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: true }));
+    game.window.dispatchEvent(new Event('pageshow'));
+    await settleResults();
+    expect(game.localStorage.setItem).not.toHaveBeenCalled();
+    expect(game.dialog.open).toBe(true);
+    game.window.dispatchEvent(Object.assign(new Event('pagehide'), { persisted: false }));
+    game.destroy();
+    await settleResults();
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+    expect(monetization.runCompleted).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a completion arriving after Extra Chance expired, even before recovery input', async () => {
+    const monetization = makeMonetization('extra-chance');
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation((_placement, ad) => {
+      ad.onAttempt();
+      return new Promise(resolve => { settle = resolve; });
+    });
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    await openTerminal(game);
+    game.clickDialog('Watch ad');
+    const ad = monetization.request.mock.lastCall![1];
+    const recover = vi.fn();
+    ad.onRecovery(recover);
+    expect(game.dialog.open).toBe(true);
+    ad.onRecovery();
+    settle({ status: 'completed', attempted: true });
+    await settleResults();
+    game.tick(terminalAt + 16);
+    expect(game.dialog.open).toBe(false);
+    expect(recover).not.toHaveBeenCalled();
+    expect(scene.draw.mock.lastCall?.[0]).toBe(full);
+    expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+  });
+
+  it.each(['play-again', 'extra-chance', 'joker', 'sweep'] as const)('recovers a stalled %s only on foreground input', async placement => {
+    const monetization = makeMonetization(placement);
+    let settle!: (outcome: AdOutcome) => void;
+    monetization.request.mockImplementation((_placement, ad) => {
+      ad.onAttempt();
+      return new Promise(resolve => { settle = resolve; });
+    });
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    if (placement === 'joker' || placement === 'sweep') {
+      game.tap(250);
+      game.tap(50);
+      game.tick(45_000);
+      game.tap(placement === 'joker' ? 397 : 396);
+      expect(game.clickDialog('Watch ad')).toBe(true);
+    } else {
+      await openTerminal(game);
+      if (placement === 'play-again') game.tap(300);
+      else expect(game.clickDialog('Watch ad')).toBe(true);
+    }
+    const ad = monetization.request.mock.lastCall![1];
+    const recover = vi.fn(() => settle({ status: 'completed', attempted: true }));
+    game.suspendFromHost();
+    game.window.dispatchEvent(new Event('blur'));
+    ad.onRecovery(recover);
+    expect(game.clickDialog('Return to game')).toBe(false);
+    game.window.dispatchEvent(new Event('focus'));
+    expect(game.clickDialog('Return to game')).toBe(true);
+    expect(game.clickDialog('Return to game')).toBe(false);
+    expect(recover).toHaveBeenCalledOnce();
+    await settleResults();
+    expect(ad.isCurrent()).toBe(false);
+    if (placement === 'play-again') expect(createGame).toHaveBeenCalledTimes(2);
+    else if (placement === 'extra-chance') {
+      game.tick(terminalAt + 16);
+      expect(scene.draw.mock.lastCall?.[0]).toBe(full);
+      expect(game.localStorage.setItem).toHaveBeenCalledOnce();
+    } else {
+      expect(scene.setBoosterControls.mock.lastCall?.[0][placement].mode).toBe('ad');
+    }
+  });
+});
 
 describe('game view match playback', () => {
   const hintState: GameState = {
@@ -380,7 +788,7 @@ describe('game view match playback', () => {
       expect(isCurrent()).toBe(true);
       return { status: 'completed', attempted: true };
     });
-    const { pointer, tap, tick } = await setup(false, '', 1, undefined, watch);
+    const { pointer, tap, tick, clickDialog } = await setup(false, '', 1, undefined, watch);
     const press = (x: number, id = 1) => pointer('pointerdown', x, id, pointerType, 1);
     const release = (x: number, id = 1) => pointer('pointerup', x, id, pointerType);
     const click = (x: number) => { press(x); release(x); };
@@ -393,6 +801,12 @@ describe('game view match playback', () => {
     release(50);
     expect(watch).not.toHaveBeenCalled();
     click(397);
+    expect(watch).not.toHaveBeenCalled();
+    expect(clickDialog('Cancel')).toBe(true);
+    expect(watch).not.toHaveBeenCalled();
+    click(397);
+    expect(clickDialog('Watch ad')).toBe(true);
+    expect(clickDialog('Watch ad')).toBe(false);
     await settleResults();
     const claimed = scene.draw.mock.lastCall![0];
     expect(claimed.stacks).toEqual([['red', 'blue'], [], ['gold', 'gold', 'red'], ['green']]);
@@ -430,11 +844,12 @@ describe('game view match playback', () => {
       .mockImplementationOnce(() => new Promise(resolve => { resolveAd = resolve; }))
       .mockRejectedValueOnce(Error('No fill'))
       .mockResolvedValueOnce({ status: 'completed', attempted: true });
-    const { tap, tick, suspendFromHost } = await setup(true, '', 1, undefined, watch);
+    const { tap, tick, suspendFromHost, clickDialog } = await setup(true, '', 1, undefined, watch);
     tap(250);
     tap(50);
     tick(45_000);
     tap(396);
+    expect(clickDialog('Watch ad')).toBe(true);
     expect(footer()).toMatchObject({ progress: 1, sweep: { mode: 'loading', usable: false } });
     tap(397);
     tap(50);
@@ -446,11 +861,13 @@ describe('game view match playback', () => {
     await settleResults();
     expect(footer()).toMatchObject({ progress: 1, adUnavailable: false, sweep: { mode: 'ad' } });
     tap(396);
+    expect(clickDialog('Watch ad')).toBe(true);
     await settleResults();
     expect(footer()).toMatchObject({ progress: 1, adUnavailable: true, sweep: { mode: 'ad' } });
 
     watch.mockImplementationOnce(async () => ({ status: 'completed', attempted: true }));
     tap(396);
+    expect(clickDialog('Watch ad')).toBe(true);
     suspendFromHost();
     await settleResults();
     expect(footer()).toMatchObject({ progress: 0, adUnavailable: false, sweep: { mode: 'held', usable: true } });
@@ -529,14 +946,16 @@ describe('game view match playback', () => {
     vi.mocked(createGame).mockReturnValueOnce(board);
     vi.mocked(move).mockReturnValueOnce({ ...board });
     const watch = vi.fn<() => Promise<AdOutcome>>().mockResolvedValue({ status: 'completed', attempted: true });
-    const { tap, match, tick } = await setup(true, '', 1, undefined, watch);
+    const { tap, match, tick, clickDialog } = await setup(true, '', 1, undefined, watch);
     tap(250);
     tap(50);
     tick(45_000);
     tap(397);
+    expect(clickDialog('Watch ad')).toBe(true);
     await settleResults();
     tick(120_000);
     tap(396);
+    expect(clickDialog('Watch ad')).toBe(true);
     await settleResults();
     expect(footer()).toMatchObject({ joker: { mode: 'held' }, sweep: { mode: 'held' } });
 
@@ -804,6 +1223,36 @@ describe('game view match playback', () => {
     expect(move).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { label: 'touch motion in the gap', device: 'touch', drift: [172], release: 173, preview: 1, destination: 1 },
+    { label: 'touch drift reported only at release', device: 'touch', drift: [], release: 173, preview: 1, destination: 1 },
+    { label: 'slight mouse drift', device: 'mouse', drift: [161], release: 162, preview: 1, destination: 1 },
+    { label: 'touch drift beyond the tolerance', device: 'touch', drift: [166, 176, 169], release: 169, preview: null, destination: null },
+    { label: 'release over a different stack', device: 'touch', drift: [198], release: 200, preview: 2, destination: 2 },
+    { label: 'return to the source', device: 'touch', drift: [50], release: 50, preview: null, destination: null },
+    { label: 'drag onto the Hint control', device: 'touch', drift: [166], release: 166, preview: null, destination: null },
+  ])('keeps the preview and swipe result aligned for $label', async ({ device, drift, release, preview, destination, label }) => {
+    scene.hit.mockImplementation(({ x }: Point) => {
+      if (label === 'drag onto the Hint control' && x === 166) return 'hint';
+      if (x < 100) return 0;
+      if (x <= 155) return 1;
+      return x >= 190 ? 2 : null;
+    });
+    const { pointer } = await setup(true);
+    pointer('pointerdown', 50, 1, device, 1);
+    pointer('pointermove', 150, 1, device, 1);
+    expect(scene.showInteraction.mock.lastCall?.[1]).toMatchObject({ destination: 1, blocked: false });
+    for (const x of drift) pointer('pointermove', x, 1, device, 1);
+    const arrow = scene.showInteraction.mock.lastCall?.[1];
+    if (preview === null) expect(arrow).toBeNull();
+    else expect(arrow).toMatchObject({ destination: preview, blocked: false });
+
+    pointer('pointerup', release, 1, device);
+    expect(vi.mocked(move).mock.calls.map(([, from, to]) => [from, to])).toEqual(
+      destination === null ? [] : [[0, destination]],
+    );
+  });
+
   it.each([3, 4, 5, 6, 7, 8])('accepts two moving mouse clicks between every pair on a %i-stack board', async count => {
     const height = 540;
     const capacity = Math.min(10, count + 3);
@@ -977,6 +1426,67 @@ describe('game view match playback', () => {
       expect(move).toHaveBeenCalledTimes(2);
     },
   );
+
+  it.each(['mouse', 'touch'])('replays rapid %s pairs in order against the board left by the previous move', async type => {
+    const fullStack = ['green', 'blue', 'yellow', 'green', 'blue', 'yellow'];
+    vi.mocked(createGame).mockReturnValueOnce({
+      ...initial, nextLevelScore: 5000, stacks: [...initial.stacks.slice(0, 2), fullStack],
+    });
+    const { match, pointer, tick } = await setup();
+    const tap = (x: number) => {
+      pointer('pointerdown', x, 4, type);
+      pointer('pointerup', x, 4, type);
+    };
+
+    match();
+    tick(100);
+    for (const x of [250, 50, 50, 250, 250, 50]) tap(x);
+    expect(move).toHaveBeenCalledTimes(1);
+
+    tick(540);
+    tick(556);
+    tick(572);
+    expect(vi.mocked(move).mock.calls.map(([, from, to]) => [from, to])).toEqual([
+      [0, 1], [2, 0], [0, 2], [2, 0],
+    ]);
+    expect(vi.mocked(move).mock.calls.slice(1).map(([state]) => state.stacks[2].length)).toEqual([6, 5, 6]);
+    expect(scene.draw.mock.lastCall?.[0].stacks[2]).toEqual(fullStack.slice(0, -1));
+  });
+
+  it('keeps touch destination grace when the source tap is still queued', async () => {
+    vi.mocked(createGame).mockReturnValueOnce({ ...initial, nextLevelScore: 5000 });
+    scene.hit.mockImplementation(({ x }: Point) => x === 63 ? 1 : Math.floor(x / 100));
+    const { match, pointer, tick } = await setup();
+    match();
+    tick(100);
+    pointer('pointerdown', 250, 4, 'touch');
+    pointer('pointerup', 250, 4, 'touch');
+    pointer('pointerdown', 50, 5, 'touch');
+    pointer('pointermove', 63, 5, 'touch');
+    pointer('pointerup', 63, 5, 'touch');
+
+    tick(540);
+    expect(vi.mocked(move).mock.calls.map(([, from, to]) => [from, to])).toEqual([[0, 1], [2, 0]]);
+  });
+
+  it('holds remaining queued pairs when a queued move starts another match', async () => {
+    vi.mocked(createGame).mockReturnValueOnce({
+      ...initial, score: 0, nextLevelScore: 5000,
+      stacks: [['blue', 'red'], ['green', 'red', 'red'], ['yellow', 'blue'], ['gold', 'blue', 'blue']],
+    });
+    const { match, tap, tick } = await setup();
+    match();
+    tick(100);
+    for (const x of [250, 350, 50, 250]) tap(x);
+
+    tick(540);
+    expect(vi.mocked(move).mock.calls.map(([, from, to]) => [from, to])).toEqual([[0, 1], [2, 3]]);
+    expect(scene.startMatch).toHaveBeenCalledTimes(2);
+    tick(1079);
+    expect(move).toHaveBeenCalledTimes(2);
+    tick(1080);
+    expect(vi.mocked(move).mock.calls.map(([, from, to]) => [from, to])).toEqual([[0, 1], [2, 3], [0, 2]]);
+  });
 
   it.each(['mouse', 'touch'])('ignores a %s drag that starts during match playback and releases after it', async type => {
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, nextLevelScore: 5000 });
@@ -1197,16 +1707,25 @@ describe('game view match playback', () => {
       JSON.stringify([{ score: 1555, level: 2, bestCombo: 0 }]));
     expect(scene.showResults).not.toHaveBeenCalled();
     expect(scene.drawScore.mock.lastCall?.[0].score).toBe(1555);
+    const cueAt = 230 + 4000;
+    const popupAt = cueAt + 500;
     const priorRenders = render.mock.calls.length;
-    tick(230 + GAME_OVER_HOLD_MS - 1);
+    tick(cueAt - 1);
+    tap(50);
+    tap(150);
+    tap(300);
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(createGame).toHaveBeenCalledTimes(1);
     expect(render).toHaveBeenCalledTimes(priorRenders);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
-    tick(230 + GAME_OVER_HOLD_MS);
+    tick(cueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
-    tick(230 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS - 1);
+    tick(popupAt - 1);
+    tap(300);
+    expect(createGame).toHaveBeenCalledTimes(1);
     expect(scene.showResults).not.toHaveBeenCalled();
     expect(render).toHaveBeenCalledTimes(priorRenders + 1);
-    tick(230 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    tick(popupAt);
     expect(scene.showResults.mock.lastCall?.[0]).toMatchObject({ tab: 'personal', friends: null });
     expect(render).toHaveBeenCalledTimes(priorRenders + 2);
     expect(localStorage.setItem).toHaveBeenCalledTimes(1);
@@ -1253,28 +1772,32 @@ describe('game view match playback', () => {
     tick(16300);
     expect(scene.showResults).not.toHaveBeenCalled();
     window.dispatchEvent(new Event('focus'));
-    tick(17099);
+    const cueAt = 16300 + 4000 - 3 * 400;
+    tick(cueAt - 1);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, false);
-    tick(17100);
+    tick(cueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, false);
 
-    tick(17300);
+    const pauseCueAt = cueAt + 200;
+    tick(pauseCueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, false);
     resizeViewport(390, 700);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, false);
     motion.matches = true;
     motion.dispatchEvent(new Event('change'));
-    tick(17300);
+    tick(pauseCueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, true);
     window.dispatchEvent(new Event('pagehide'));
-    tick(21300);
+    const resumeCueAt = pauseCueAt + 4000;
+    tick(resumeCueAt);
     expect(scene.showResults).not.toHaveBeenCalled();
     window.dispatchEvent(new Event('pageshow'));
-    tick(21300);
+    tick(resumeCueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, true);
-    tick(21599);
+    const popupAt = resumeCueAt + 300;
+    tick(popupAt - 1);
     expect(scene.showResults).not.toHaveBeenCalled();
-    tick(21600);
+    tick(popupAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).toHaveBeenCalledTimes(1);
     expect(move).toHaveBeenCalledTimes(1);
@@ -1296,7 +1819,7 @@ describe('game view match playback', () => {
     });
   });
 
-  it('recovers from a stalled recording and ignores its late completion after replay', async () => {
+  it('waits for the hold and cue after a stalled recording expires and ignores its late completion after replay', async () => {
     let complete!: (results: CompletedResults) => void;
     const record = vi.fn(() => new Promise<CompletedResults>(resolve => { complete = resolve; }));
     const { match, tap, tick, render } = await setup(true, '', 1, { record });
@@ -1304,19 +1827,28 @@ describe('game view match playback', () => {
     match();
     tick(16);
     await settleResults();
-    tick(16 + GAME_OVER_HOLD_MS);
-    tick(16 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    expect(record).toHaveBeenCalledOnce();
+    expect(GAME_OVER_RECORD_LIMIT_MS).toBe(3500);
     const priorRenders = render.mock.calls.length;
-    tick(GAME_OVER_RECORD_LIMIT_MS - 1);
-    expect(render).toHaveBeenCalledTimes(priorRenders);
-    expect(scene.showResults).not.toHaveBeenCalled();
     tick(GAME_OVER_RECORD_LIMIT_MS);
-    expect(scene.showResults.mock.lastCall?.[0]?.personal.run.score).toBe(1390);
+    expect(render).toHaveBeenCalledTimes(priorRenders);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
+    expect(scene.showResults).not.toHaveBeenCalled();
+    const cueAt = 16 + 4000;
+    const popupAt = cueAt + 500;
+    tick(cueAt);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
+    tick(popupAt - 1);
+    expect(scene.showResults).not.toHaveBeenCalled();
+    tick(popupAt);
+    expect(scene.showResults.mock.lastCall?.[0]?.personal).toEqual({
+      run: { score: 1390, level: 2, bestCombo: 0 }, rows: [], isPersonalBest: false,
+    });
     tap(300);
     expect(scene.showResults).toHaveBeenLastCalledWith(null);
     complete({ run: { score: 1390, level: 2, bestCombo: 0 }, rows: [], isPersonalBest: true });
     await settleResults();
-    tick(4000);
+    tick(popupAt + 16);
     expect(scene.showResults).toHaveBeenCalledTimes(2);
     expect(record).toHaveBeenCalledTimes(1);
   });

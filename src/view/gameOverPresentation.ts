@@ -1,6 +1,6 @@
 import type { CompletedResults, PersonalScores, RunStats } from '../platform/personalScores';
 
-export const GAME_OVER_HOLD_MS = 2000;
+export const GAME_OVER_HOLD_MS = 4000;
 export const GAME_OVER_CUE_MS = 500;
 export const GAME_OVER_RECORD_LIMIT_MS = 3500;
 
@@ -9,17 +9,25 @@ export class GameOverPresentation {
   private phaseElapsed = 0;
   private visibleSince: number | null = null;
   private recorded?: CompletedResults;
-  private readonly recordLimit: number;
+  private recordLimit: number | undefined;
   private readonly fallback: CompletedResults;
 
-  constructor(run: RunStats, now: number, scores: Pick<PersonalScores, 'record'>, onRecorded: () => void) {
-    this.recordLimit = now + GAME_OVER_RECORD_LIMIT_MS;
+  constructor(run: RunStats, private readonly scores: Pick<PersonalScores, 'record'>, private readonly onRecorded: () => void) {
     // An unavailable score history cannot establish a rank or a personal best.
     this.fallback = { run, rows: [], isPersonalBest: false };
-    void Promise.resolve().then(() => scores.record(run)).catch(() => this.fallback).then(results => {
+  }
+
+  get ready(): boolean { return this.phase === 'complete' && this.visibleSince !== null; }
+  get run(): RunStats { return this.fallback.run; }
+
+  finalize(now: number): boolean {
+    if (this.recordLimit !== undefined) return false;
+    this.recordLimit = now + GAME_OVER_RECORD_LIMIT_MS;
+    void Promise.resolve().then(() => this.scores.record(this.run)).catch(() => this.fallback).then(results => {
       this.recorded = results;
-      if (this.phase === 'complete') onRecorded();
+      if (this.phase === 'complete') this.onRecorded();
     });
+    return true;
   }
 
   setVisible(visible: boolean, now: number): void {
@@ -37,7 +45,7 @@ export class GameOverPresentation {
     if (this.phase === 'settling' && boardSettled) this.start('hold', now);
     else if (this.phase === 'hold' && elapsed >= GAME_OVER_HOLD_MS) this.start('cue', now);
     else if (this.phase === 'cue' && elapsed >= GAME_OVER_CUE_MS) this.start('complete', now);
-    if (this.phase === 'complete') return this.recorded ?? (now >= this.recordLimit ? this.fallback : undefined);
+    if (this.ready) return this.recorded ?? (this.recordLimit !== undefined && now >= this.recordLimit ? this.fallback : undefined);
   }
 
   cueProgress(now: number): number | null {
@@ -52,7 +60,7 @@ export class GameOverPresentation {
     if (this.visibleSince === null) return 0;
     if (this.phase === 'hold') return this.visibleSince + GAME_OVER_HOLD_MS - this.phaseElapsed;
     if (this.phase === 'cue' && reduced) return this.visibleSince + GAME_OVER_CUE_MS - this.phaseElapsed;
-    if (this.phase === 'complete' && !this.recorded) return this.recordLimit;
+    if (this.phase === 'complete' && !this.recorded) return this.recordLimit ?? 0;
     return 0;
   }
 

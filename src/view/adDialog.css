@@ -1,0 +1,37 @@
+.game-ad-dialog {
+  box-sizing: border-box;
+  width: min(340px, calc(100% - 32px));
+  padding: 20px;
+  border: 2px solid #843d29;
+  border-radius: 20px;
+  background: #fff2dc;
+  color: #672e20;
+  box-shadow: 0 6px 28px #30130f60;
+  font: 500 16px/1.45 system-ui, sans-serif;
+}
+
+.game-ad-dialog::backdrop { background: #30130f9e; }
+.game-ad-dialog h2 { margin: 0; font-size: 24px; }
+.game-ad-dialog p { margin: 10px 0; }
+
+.game-ad-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.game-ad-actions:has(button:not([hidden])) { margin-top: 18px; }
+.game-ad-actions button {
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 2px solid #843d29;
+  border-radius: 14px;
+  background: #fff2dc;
+  color: #672e20;
+  font: 700 14px/1.15 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.game-ad-actions button:first-child { background: #843d29; color: #fff2dc; }
+.game-ad-actions button:focus-visible { outline: 3px solid #3c664e; outline-offset: 2px; }

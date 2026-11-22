@@ -5,7 +5,7 @@ import { FreeBoosterCelebration } from './freeBoosterCelebration';
 import type { BoosterButton, Point, StackGestures, Target } from './gestures';
 import { JokerArt } from './jokerArt';
 import {
-  BOARD_FOOTER_SPACE, BOARD_TOP, contains, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
+  BOARD_FOOTER_SPACE, BOARD_TOP, contains, footerCenterY, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
   stackTarget, VIEW_WIDTH, viewport,
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
@@ -25,7 +25,9 @@ const INK = '#672e20';
 const GOLD = 0xab591a;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
-const FOOTER_STATUS_X = 239;
+const FOOTER_STATUS_X = 63;
+const HINT_WIDTH = 90;
+const HINT_HEIGHT = 36;
 const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
 const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
@@ -164,7 +166,7 @@ export class GameScene {
   private readonly arrow = new SelectionArrow();
   private readonly hintArrow = new SelectionArrow();
   private readonly hintButton = new Container({ visible: false });
-  private readonly hintBounds = { x: VIEW_WIDTH - 106, y: 0, width: 90, height: BOARD_FOOTER_SPACE };
+  private readonly hintBounds = { x: 336.25 - HINT_WIDTH / 2, y: 0, width: HINT_WIDTH, height: HINT_HEIGHT };
   private readonly hintStatus: Text;
   private readonly boosterControls: BoosterControls;
   private readonly boosterCue = new BoosterCue();
@@ -336,11 +338,12 @@ export class GameScene {
     this.kitchen.scale.set(cover);
     this.kitchen.position.set(width / 2, height / 2);
     this.scrim.clear().rect(0, 0, width, height).fill({ color: 0x4e2019, alpha: 0.6 });
-    this.status.y = this.fit.height - BOARD_FOOTER_SPACE / 2;
+    const footerY = footerCenterY(this.fit.height);
+    this.status.y = footerY - 9;
     this.hintStatus.y = this.status.y;
-    this.boosterPrompt.y = this.status.y;
+    this.boosterPrompt.y = footerY + 9;
     this.boosterControls.resize(this.fit.height);
-    this.hintBounds.y = this.fit.height - BOARD_FOOTER_SPACE;
+    this.hintBounds.y = footerY - HINT_HEIGHT / 2;
     this.hintButton.position.set(this.hintBounds.x, this.hintBounds.y);
     this.results.resize(this.fit.height);
   }

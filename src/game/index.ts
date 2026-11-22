@@ -586,6 +586,30 @@ export function useStackSweep(state: GameState): GameState {
   return previewStackSweep(state) ?? state;
 }
 
+export function previewExtraChance(state: GameState): GameState | null {
+  if (!state.gameOver) return null;
+  const { stacks, capacity, movesLeft } = state;
+  const test = (candidate: string[][]): GameState | null => {
+    const next = { ...state, stacks: candidate, gameOver: false };
+    return hasQuickScore(candidate, capacity, movesLeft, () => hasScoringMove(candidate, capacity)) &&
+      !isGameOver(next) ? next : null;
+  };
+
+  // Try opening a single stack first. A broader rescue removes at most two
+  // exposed layers and leaves any active Joker intact. Preflight spends no RNG.
+  const peel = (stack: string[]): string[] => stack.at(-1) === JOKER ? stack.slice() : stack.slice(0, -1);
+  const once = stacks.map(peel);
+  const twice = once.map(peel);
+  for (const [before, after] of [[stacks, once], [once, twice]]) {
+    for (const [index, exposed] of after.entries()) {
+      if (exposed.length === before[index].length) continue;
+      const next = test(stacks.map((pile, i) => (i === index ? exposed : pile).slice()));
+      if (next) return next;
+    }
+  }
+  return test(once) ?? test(twice);
+}
+
 export function move(
   state: GameState, from: number, to: number, rng: () => number = Math.random,
   onDough?: (inserts: readonly DoughInsert[]) => void,

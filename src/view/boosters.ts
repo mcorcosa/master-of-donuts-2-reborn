@@ -2,17 +2,24 @@ import { Container, Graphics, Sprite, Text, type Texture } from 'pixi.js';
 import { createBoosterMedallion, MEDALLION_ART_SIZE } from './boosterMedallion';
 import type { BoosterDropLanding, BoosterDropTarget } from './freeBoosterCelebration';
 import type { BoosterButton, Point } from './gestures';
-import { BOARD_FOOTER_SPACE, contains } from './layout';
+import { contains, footerCenterY } from './layout';
 import { unit } from './movePlayback';
 
 const BUTTONS = [
-  { kind: 'joker', x: 40 },
-  { kind: 'sweep', x: 98 },
+  { kind: 'joker', x: 156.25 },
+  { kind: 'sweep', x: 233.75 },
 ] as const;
-const MEDALLION_SCALE = 1.25;
+const MEDALLION_DIAMETER = 57.5;
+// The gold bezel spans 32.4 units inside the 40-unit texture.
+const MEDALLION_SCALE = MEDALLION_DIAMETER / 32.4;
 const MEDALLION_SIZE = MEDALLION_ART_SIZE * MEDALLION_SCALE;
-const RING_RADIUS = 20.9;
+const MEDALLION_RADIUS = MEDALLION_DIAMETER / 2;
+const RING_RADIUS = MEDALLION_RADIUS + 0.9;
+const HIT_RADIUS = MEDALLION_RADIUS + 4.5;
+const ARMED_RADIUS = MEDALLION_RADIUS + 2.6;
+const LANDING_RADIUS = MEDALLION_RADIUS + 1.55;
 const BADGE_INK = 0x572947;
+const TAG_BOUNDS = { x: -11, y: -5.6, width: 22, height: 11.2 };
 
 export interface BoosterButtonView {
   mode: 'ad' | 'charging' | 'locked' | 'loading' | 'free' | 'held';
@@ -29,34 +36,34 @@ export interface BoosterFooterView {
 }
 
 function medallionButton(parent: Container, kind: BoosterButton, x: number, jokerArt: Texture) {
-  const root = parent.addChild(new Container({ x, y: 13, label: kind }));
+  const root = parent.addChild(new Container({ x, label: kind }));
   const armed = kind === 'joker' ? root.addChild(new Graphics({ visible: false })
-    .circle(0, -0.25, 22.1).stroke({ color: 0xffd678, width: 4.4, alpha: 0.46 })
-    .circle(0, -0.25, 22.1).stroke({ color: 0xfff8d1, width: 1.5 })) : undefined;
+    .circle(0, 0, ARMED_RADIUS).stroke({ color: 0xffd678, width: 3.8, alpha: 0.46 })
+    .circle(0, 0, ARMED_RADIUS).stroke({ color: 0xfff8d1, width: 1.5 })) : undefined;
   const texture = createBoosterMedallion(kind, jokerArt);
   const face = root.addChild(new Sprite({ texture, anchor: 0.5 }));
   face.width = face.height = MEDALLION_SIZE;
   const glow = root.addChild(new Graphics({ visible: false, label: 'free booster landing glow' })
-    .circle(0, -0.6, 21).stroke({ color: 0xffbe50, width: 3.8, alpha: 0.65 })
-    .circle(0, -0.6, 21).stroke({ color: 0xfff5be, width: 1.6 }));
+    .circle(0, 0, LANDING_RADIUS).stroke({ color: 0xffbe50, width: 3.8, alpha: 0.65 })
+    .circle(0, 0, LANDING_RADIUS).stroke({ color: 0xfff5be, width: 1.6 }));
   const meter = root.addChild(new Container({ visible: false }));
   meter.addChild(new Graphics().circle(0, 0, RING_RADIUS).stroke({ color: 0x70452d, width: 1.55, alpha: 0.62 }));
   const progress = meter.addChild(new Graphics());
 
-  const badge = root.addChild(new Container({ x: 13.5, y: -12 }));
+  const badge = root.addChild(new Container({ x: 10.8 * MEDALLION_SCALE, y: -9.6 * MEDALLION_SCALE }));
   badge.scale.set(MEDALLION_SCALE);
   const play = badge.addChild(new Graphics().circle(0, 0, 5).fill(0x542a2c)
     .stroke({ color: 0xfff4d9, width: 0.6 })
     .circle(0, -0.25, 4.3).fill(0xfff6dd)
     .poly([-1.05, -2.45, 2.24, -0.26, -1.05, 1.87]).fill(BADGE_INK));
   const tag = badge.addChild(new Container());
-  tag.addChild(new Graphics().roundRect(-11, -5.6, 22, 11.2, 4.1).fill(0xfff6dd)
+  const { x: tagX, y: tagY, width, height } = TAG_BOUNDS;
+  tag.addChild(new Graphics().roundRect(tagX, tagY, width, height, 4.1).fill(0xfff6dd)
     .stroke({ color: 0x70452d, width: 0.85 }));
   const badgeText = tag.addChild(new Text({ text: '', anchor: 0.5, style: {
     fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize: 8, fontWeight: '700', fill: BADGE_INK,
   } }));
-  return { kind, root, texture, face, glow, armed, meter, progress, badge, play, tag, badgeText, fill: 0,
-    bounds: { x: x - 28, y: -8, width: 56, height: BOARD_FOOTER_SPACE + 8 } };
+  return { kind, root, texture, face, glow, armed, meter, progress, badge, play, tag, badgeText, fill: 0 };
 }
 
 export class BoosterControls {
@@ -71,7 +78,7 @@ export class BoosterControls {
   }
 
   resize(height: number): void {
-    this.root.y = height - BOARD_FOOTER_SPACE;
+    this.root.y = footerCenterY(height);
   }
 
   dropTarget(kind: BoosterButton): BoosterDropTarget {
@@ -85,7 +92,10 @@ export class BoosterControls {
       if (!pulse && !glow.visible) continue;
       glow.visible = pulse !== null;
       glow.alpha = pulse?.glow ?? 0;
-      face.width = face.height = MEDALLION_SIZE * (pulse?.scale ?? 1);
+      const scale = pulse?.scale ?? 1;
+      // Keep the bottom edge of the gold bezel seated during the landing bounce.
+      face.y = -(scale - 1) * MEDALLION_RADIUS;
+      face.width = face.height = MEDALLION_SIZE * scale;
     }
   }
 
@@ -116,8 +126,14 @@ export class BoosterControls {
 
   hit(point: Point): BoosterButton | undefined {
     if (!this.root.visible) return undefined;
-    const local = { x: point.x, y: point.y - this.root.y };
-    return this.buttons.find(button => contains(button.bounds, local))?.kind;
+    const y = point.y - this.root.y;
+    return this.buttons.find(({ root, badge, tag }) => {
+      const x = point.x - this.root.x - root.x;
+      if (Math.hypot(x, y) <= HIT_RADIUS) return true;
+      if (!badge.visible) return false;
+      const local = { x: (x - badge.x) / MEDALLION_SCALE, y: (y - badge.y) / MEDALLION_SCALE };
+      return tag.visible ? contains(TAG_BOUNDS, local) : Math.hypot(local.x, local.y) <= 5.3;
+    })?.kind;
   }
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
-  JOKER, matchedRunLength, move, previewStackSweep, resolveMatch, useJokerBooster, useStackSweep,
+  JOKER, matchedRunLength, move, previewExtraChance, previewStackSweep, resolveMatch, useJokerBooster, useStackSweep,
 } from './index';
 
 const lowest = () => 0;
@@ -43,6 +43,52 @@ function bruteCanScore(
   }
   return false;
 }
+
+describe('Extra Chance preflight', () => {
+  it('opens a real full-board terminal with a deterministic, legal scoring move', () => {
+    const before = board([
+      ['gold', 'red', 'yellow', 'gold', 'yellow'],
+      ['red', 'yellow', 'gold', 'gold'],
+      ['yellow', 'gold', 'red', 'yellow'],
+    ], { movesLeft: 1 });
+    const full = move({ ...move(before, 0, 1, lowest), movesLeft: 1 }, 1, 2, lowest);
+    expect(full.gameOver).toBe(true);
+    expect(full.stacks.map(stack => stack.length)).toEqual([5, 5, 5]);
+    const terminal = { ...full, score: 400, combo: 3 };
+    for (const stack of terminal.stacks) Object.freeze(stack);
+    Object.freeze(terminal.stacks);
+    Object.freeze(terminal);
+    const rescued = previewExtraChance(terminal);
+    expect(rescued).toEqual(previewExtraChance(terminal));
+    expect(rescued).toMatchObject({ score: 400, combo: 3, level: 1, capacity: 5, movesLeft: full.movesLeft, gameOver: false });
+    expect(bruteCanScore(rescued!.stacks, rescued!.capacity, 2)).toBe(true);
+  });
+
+  it('rescues a pressure terminal with vacancies without resetting its pressure or progress', () => {
+    const before = board([
+      ['gray', 'blue', 'purple'], ['green', 'blue', 'gray', 'gray', 'purple'], ['purple', 'green', 'purple', 'blue', 'blue'],
+    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 2 });
+    const terminal = move(before, 1, 0, lowest);
+    expect(terminal).toMatchObject({ gameOver: true, movesLeft: 1 });
+    expect(terminal.stacks.map(stack => stack.length)).toEqual([4, 4, 5]);
+    const rescued = previewExtraChance(terminal);
+    expect(rescued).toMatchObject({ gameOver: false, movesLeft: 1, score: 500, level: 2, nextLevelScore: 1500 });
+    expect(bruteCanScore(rescued!.stacks, rescued!.capacity, 1)).toBe(true);
+  });
+
+  it('preserves a Joker and suppresses the offer when the bounded rescue cannot find a route', () => {
+    const terminal = board([
+      ['red', 'gold', 'blue', 'blue', 'red'], ['gold', 'red', 'green', 'purple', JOKER], ['purple', 'gold', 'red', 'gold', 'purple'],
+    ], { level: 7, movesLeft: 1, gameOver: true });
+    const rescued = previewExtraChance(terminal);
+    expect(rescued!.stacks[1].at(-1)).toBe(JOKER);
+    expect(canMove(rescued!, 1, 0)).toBe(true);
+    expect(move(rescued!, 1, 0, lowest).score).toBeGreaterThan(terminal.score);
+    const alternating = ['blue', 'red', 'green', 'gold', 'purple'];
+    expect(previewExtraChance(board([alternating, alternating, alternating], { movesLeft: 1, gameOver: true }))).toBeNull();
+    expect(previewExtraChance({ ...terminal, gameOver: false })).toBeNull();
+  });
+});
 
 describe('Setup hints', () => {
   it('finds the shortest four-transfer route on the reported level 11 board', () => {

@@ -623,6 +623,42 @@ describe('move presentation', () => {
     scene.root.destroy({ children: true });
   });
 
+  it('fits the centered medallions and their badges inside a shared footer with separate hit areas', () => {
+    const scene = makeScene();
+    const dense = { ...state, capacity: 10, stacks: Array.from({ length: 8 }, () => Array(10).fill('blue')) };
+    const ready = { mode: 'held', usable: true } as const;
+    const free = { mode: 'free', usable: true } as const;
+    for (const board of [state, dense]) {
+      scene.draw(board);
+      scene.setHintAvailable(true);
+      scene.setBoosterControls({ joker: free, sweep: ready, progress: 0, armed: true, visible: true, adUnavailable: false });
+      const controls = scene['boosterControls'];
+      const joker = controls.dropTarget('joker');
+      const sweep = controls.dropTarget('sweep');
+      const { x, y, width, height } = scene['hintBounds'];
+      const footerY = scene['fit'].height - 34;
+      expect([joker.x, sweep.x, x + width / 2]).toEqual([156.25, 233.75, 336.25]);
+      expect([joker.y, sweep.y, y + height / 2]).toEqual([footerY, footerY, footerY]);
+      expect(joker.size * 32.4 / 40).toBeCloseTo(57.5);
+      expect([width, height]).toEqual([90, 36]);
+      expect(scene.hit({ x: joker.x - 32, y: footerY }, 'tap')).toBe('joker');
+      expect(scene.hit({ x: sweep.x + 28.5, y: footerY }, 'tap')).toBe('sweep');
+      expect(scene.hit({ x: sweep.x, y: footerY - 29 }, 'tap')).toBe('sweep');
+      const badge = { x: joker.x + 37, y: footerY - 17 };
+      expect(scene.hit(badge, 'tap')).toBe('joker');
+      expect(scene.hit({ x: (joker.x + sweep.x) / 2, y: footerY }, 'tap')).toBe('outside');
+      expect(scene.hit({ x: 278, y: footerY }, 'tap')).toBe('outside');
+      expect(scene.hit({ x: x + width / 2, y: footerY }, 'tap')).toBe('hint');
+
+      scene.setBoosterControls({ joker: ready, sweep: ready, progress: 0, armed: false, visible: true, adUnavailable: false });
+      expect(scene.hit(badge, 'tap')).toBe('outside');
+      const bottom = scene['stacks'][1];
+      expect(bottom.hit.y + bottom.hit.height).toBeLessThanOrEqual(footerY - 34);
+      expect(scene.hit({ x: bottom.slot.x, y: bottom.hit.y + bottom.hit.height - 1 }, 'tap')).toBe(1);
+    }
+    scene.root.destroy({ children: true });
+  });
+
   it('presses before selection and keeps the release hit area stable', () => {
     const scene = makeScene();
     scene.draw(state);

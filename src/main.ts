@@ -1,7 +1,7 @@
 import { Application, Assets } from 'pixi.js';
 import { createBrowserPersistence, createWebPlatform, scopedBrowserStorage } from '@playbridge/web';
 import { BrowserQuality } from './performance/browserQuality';
-import { BOOSTER_REWARDED_PLACEMENT, createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './platform/facebook';
+import { createRebornFacebookPlatform, type FacebookHostSDK, loadFacebookSDK } from './platform/facebook';
 import { createFriendsScores } from './platform/friendsScores';
 import { browserScoreStorage, isLegacyFacebookScoreOrigin, PersonalScores } from './platform/personalScores';
 import { startGame } from './platform/startup';
@@ -25,8 +25,17 @@ async function main(): Promise<void> {
   const boardName = __FACEBOOK__ ? import.meta.env.VITE_DONUTS_FRIENDS_BOARD?.trim() ?? '' : '';
   const facebook = __FACEBOOK__ ? createRebornFacebookPlatform(
     () => loadFacebookSDK(() => window.FBInstant), boardName, createBrowserPersistence(storage),
-    import.meta.env.VITE_DONUTS_BOOSTER_REWARDED_PLACEMENT,
-    import.meta.env.VITE_DONUTS_REMOVE_ADS_SKU,
+    {
+      placements: {
+        'play-again': import.meta.env.VITE_DONUTS_PLAY_AGAIN_INTERSTITIAL_PLACEMENT,
+        joker: import.meta.env.VITE_DONUTS_JOKER_REWARDED_PLACEMENT,
+        sweep: import.meta.env.VITE_DONUTS_SWEEP_REWARDED_PLACEMENT,
+        'extra-chance': import.meta.env.VITE_DONUTS_EXTRA_CHANCE_REWARDED_PLACEMENT,
+      },
+      removeAdsSku: import.meta.env.VITE_DONUTS_REMOVE_ADS_SKU,
+      getHistoryStorage: () => window.localStorage,
+      isForeground: () => !document.hidden && document.hasFocus(),
+    },
   ) : null;
   const platform = facebook?.services ?? createWebPlatform(storage);
   const personalScores = new PersonalScores(jokerPlaytest
@@ -56,9 +65,7 @@ async function main(): Promise<void> {
       jokerPlaytest,
       personalScores,
       getFriendsScores: () => facebook && createFriendsScores(platform, boardName, facebook.submitScore),
-      watchBoosterAd: platform.capabilities().rewardedAds === 'available' ? isCurrent => platform.ads.request({
-        kind: 'rewarded', placement: BOOSTER_REWARDED_PLACEMENT, isCurrent,
-      }) : undefined,
+      monetization: facebook?.monetization,
       quality,
       onPause: callback => platform.lifecycle.onPause(callback),
       onResultsVisibilityChange(visible) {
@@ -67,12 +74,15 @@ async function main(): Promise<void> {
       },
     });
   });
+  if (facebook) app.stage.once('destroyed', () => facebook.monetization.destroy());
 
   const purchase = facebook?.removeAds ?? (removeAdsDemo ? (await import('./platform/removeAdsDemo')).createRemoveAdsDemo() : null);
   if (purchase) {
+    if (removeAdsDemo) void purchase.refresh();
     const { mountRemoveAds } = await import('./view/removeAds');
     const demoCopy = removeAdsDemo ? { title: 'Remove Ads Demo', description: 'Practice checkout. No payment is collected.' } : undefined;
-    const view = mountRemoveAds(document, purchase, callback => platform.lifecycle.onPause(callback), demoCopy);
+    const view = mountRemoveAds(document, purchase, callback => platform.lifecycle.onPause(callback), demoCopy,
+      open => facebook?.monetization.setModalOpen(open));
     setRemoveAdsVisible = view.setVisible;
     setRemoveAdsVisible(!resultsVisible);
     app.stage.once('destroyed', view.destroy);

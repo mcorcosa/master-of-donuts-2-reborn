@@ -3,13 +3,15 @@ import type { Application } from 'pixi.js';
 import { GameSound } from '../audio/GameSound';
 import {
   canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
-  JOKER, move, useJokerBooster, useStackSweep,
+  JOKER, move, previewExtraChance, useJokerBooster, useStackSweep,
 } from '../game';
 import { RunBoosters } from '../game/boosters';
 import type { BrowserQuality } from '../performance/browserQuality';
 import { FrameLoop } from '../performance/frameLoop';
 import type { FriendsScores } from '../platform/friendsScores';
+import type { AdPlacement, GameMonetization } from '../platform/monetization';
 import type { PersonalScores } from '../platform/personalScores';
+import { AdDialog, type AdDialogContent } from './adDialog';
 import type { BoosterButtonView, BoosterFooterView } from './boosters';
 import { GameOverPresentation } from './gameOverPresentation';
 import { type BoosterButton, type Point, StackGestures } from './gestures';
@@ -48,6 +50,21 @@ interface ScoreCredit {
   level: LevelReveal | null;
 }
 
+interface AdPlayback {
+  attempted: boolean;
+  hostPausedDuringAttempt: boolean;
+  timedOut: boolean;
+  recovered: boolean;
+  outcome?: AdOutcome;
+  recovery?: AdDialogContent;
+  pending?: AdDialogContent;
+  isCurrent: () => boolean;
+  finish: (outcome: AdOutcome) => void;
+}
+
+const boosterNames = { joker: 'Joker', sweep: 'Stack Sweep' } as const;
+const resultNumber = new Intl.NumberFormat();
+
 function scoreDisplay({ score, level, rank, nextLevelScore }: GameState, levelStartScore: number): ScoreDisplay {
   return { score, level, rank, nextLevelScore, levelStartScore };
 }
@@ -67,14 +84,14 @@ interface GameResultsOptions {
   jokerPlaytest: boolean;
   personalScores: Pick<PersonalScores, 'record'>;
   getFriendsScores(): FriendsScores | null;
-  watchBoosterAd?(isCurrent: () => boolean): Promise<AdOutcome>;
+  monetization?: GameMonetization;
   quality: BrowserQuality;
   onPause?(callback: () => void): () => void;
   onResultsVisibilityChange?(visible: boolean): void;
 }
 
 export async function mountGame(app: Application, {
-  jokerPlaytest, personalScores, getFriendsScores, watchBoosterAd, quality, onPause, onResultsVisibilityChange,
+  jokerPlaytest, personalScores, getFriendsScores, monetization, quality, onPause, onResultsVisibilityChange,
 }: GameResultsOptions): Promise<void> {
   const [art] = await Promise.all([loadArt(), preloadScoreFont().catch(error => {
     console.warn('The bundled score font could not be loaded.', error);
@@ -84,6 +101,7 @@ export async function mountGame(app: Application, {
   const { canvas, renderer, stage } = app;
   const document = canvas.ownerDocument;
   const window = document.defaultView!;
+  const adDialog = monetization ? new AdDialog(document) : null;
   const createRun = jokerPlaytest ? (): GameState => ({
     stacks: [[JOKER], ['red', 'blue'], ['red', 'blue']],
     score: 0, combo: 0, level: 1, rank: 'Dough Enthusiast', capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
@@ -98,6 +116,13 @@ export async function mountGame(app: Application, {
   let results: ResultsSession | null = null;
   let resultsDrag: { id: number; y: number } | null = null;
   let gameOver: GameOverPresentation | null = null;
+  let abandonment: GameOverPresentation | null = null;
+  let extraChance: GameState | null = null;
+  let extraChanceUsed = false;
+  let resultsVisible = false;
+  let adPlayback: AdPlayback | null = null;
+  let leaving = false;
+  let reportedPlaying: boolean | undefined;
   let levelStartScore = 0;
   let displayed = scoreDisplay(state, levelStartScore);
   const credits: ScoreCredit[] = [];
@@ -109,7 +134,7 @@ export async function mountGame(app: Application, {
   let pending: { playback: MatchPlayback; level: LevelReveal | null; inserts: readonly DoughInsert[]; popAt: number | null } | null = null;
   let landing: { at: number; color: string } | null = null;
   let tapOnlyPress = false;
-  let queuedMove: { from: number; to: number } | null = null;
+  const queuedStackTaps: number[] = [];
   let arrowPointer: { point: Point; destination: number | null } | null = null;
   let hintCache: { state: GameState; eligible: boolean; result?: ReturnType<typeof findSetupHint> } | null = null;
   let hintAvailable = false;
@@ -144,7 +169,7 @@ export async function mountGame(app: Application, {
   }
 
   function boardAnimating(): boolean {
-    return pending !== null || scene.moveAnimating || scene.stackUnlockAnimating || scene.effectsAnimating ||
+    return pending !== null || queuedStackTaps.length > 0 || scene.moveAnimating || scene.stackUnlockAnimating || scene.effectsAnimating ||
       scene.selectionAnimating || (feedback !== null && !motion.matches) ||
       credits.length > 0 || levels.length > 0 || (!motion.matches && scene.boosterCueDeadline > 0);
   }
@@ -160,7 +185,7 @@ export async function mountGame(app: Application, {
 
   function queueDeadline(now: number): void {
     let next = hintStatusUntil;
-    const gameOverDeadline = results ? 0 : gameOver?.deadline(motion.matches) ?? 0;
+    const gameOverDeadline = results || adDialog?.element.open ? 0 : gameOver?.deadline(motion.matches) ?? 0;
     if (gameOverDeadline && (!next || gameOverDeadline < next)) next = gameOverDeadline;
     if (feedback && motion.matches) {
       const feedbackEnds = feedback.started + feedback.duration;
@@ -183,10 +208,10 @@ export async function mountGame(app: Application, {
   }
 
   function queueWarmup(): void {
-    if (!warmup || cancelWarmup || state.gameOver || document.hidden || hostPaused || gestures.active || needsAnimation()) return;
+    if (!warmup || cancelWarmup || state.gameOver || !foreground() || adPlayback?.attempted || gestures.active || needsAnimation()) return;
     const run = (deadline?: IdleDeadline) => {
       cancelWarmup = undefined;
-      if (!warmup || state.gameOver || document.hidden || hostPaused || gestures.active || needsAnimation()) return;
+      if (!warmup || state.gameOver || !foreground() || adPlayback?.attempted || gestures.active || needsAnimation()) return;
       if (!deadline || deadline.timeRemaining() >= WARMUP_MIN_IDLE_MS) {
         try {
           if (warmup.next().done) warmup = null;
@@ -267,7 +292,8 @@ export async function mountGame(app: Application, {
   }
 
   function syncHintAvailability(): boolean {
-    const settled = !state.gameOver && !boosters.claiming && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
+    const settled = !state.gameOver && !adPlayback && !adDialog?.element.open &&
+      !boosters.claiming && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
     if (settled && hintCache?.state !== state) hintCache = { state, eligible: canRequestSetupHint(state) };
     const available = settled && hintCache?.eligible === true;
     if (available !== hintAvailable) {
@@ -277,31 +303,43 @@ export async function mountGame(app: Application, {
     return available;
   }
 
-  function canOfferBoosters(): boolean {
-    return !!watchBoosterAd && focused && !document.hidden && !pageHidden && !hostPaused;
+  function visibleAndFocused(): boolean {
+    return focused && !pageHidden && !document.hidden && !leaving && (document.hasFocus?.() ?? true);
+  }
+
+  function foreground(): boolean {
+    return visibleAndFocused() && !hostPaused;
+  }
+
+  function otherDialogOpen(): boolean {
+    return adDialog !== null && Array.from(document.querySelectorAll('dialog[open]')).some(dialog => dialog !== adDialog.element);
   }
 
   function syncBoosterClock(now: number): void {
-    boosters.setActive(!state.gameOver && canOfferBoosters(), now);
+    const playing = !state.gameOver && foreground() && !adPlayback && !adDialog?.element.open && !otherDialogOpen();
+    if (monetization && reportedPlaying !== playing) {
+      reportedPlaying = playing;
+      monetization.setPlaying(playing);
+    }
+    boosters.setActive(playing && !!(monetization?.available('joker') || monetization?.available('sweep')), now);
   }
 
   function syncBoosterAvailability(now = performance.now()): BoosterFooterView {
     const visible = !state.gameOver;
-    const settled = visible && !pending && !queuedMove && !scene.moveAnimating && !scene.stackUnlockAnimating &&
+    const settled = visible && !pending && !queuedStackTaps.length && !scene.moveAnimating && !scene.stackUnlockAnimating &&
       !scene.effectsAnimating && !scene.boosterCueDeadline && !credits.length && !levels.length &&
-      !boosters.claiming && !hostPaused && !document.hidden && !pageHidden;
+      !boosters.claiming && !adPlayback && !adDialog?.element.open && !hostPaused && !document.hidden && !pageHidden;
     if (settled && boosterCache?.state !== state) {
       // Keep the validated Sweep board so a completed press commits the exact preview.
       boosterCache = { state, joker: canUseJokerBooster(state), swept: useStackSweep(state) };
     }
     const progress = Math.floor(boosters.progress(now) * 100) / 100;
-    const canOffer = !!watchBoosterAd && boosters.hasOffersLeft;
     const button = (kind: BoosterButton, legal: boolean): BoosterButtonView => {
       const source = boosters.source(kind);
       if (source) return { usable: legal, mode: source === 'free' ? 'free' : 'held' };
       if (boosters.claiming === kind) return { usable: false, mode: 'loading' };
-      if (!canOffer) return { usable: false, mode: 'locked' };
-      return { usable: false, mode: legal && canOfferBoosters() && boosters.canClaim(kind, now) ? 'ad' : 'charging' };
+      if (!boosters.hasOffersLeft || !monetization?.available(kind)) return { usable: false, mode: 'locked' };
+      return { usable: false, mode: legal && foreground() && boosters.canClaim(kind, now) ? 'ad' : 'charging' };
     };
     const joker = button('joker', settled && boosterCache?.joker === true);
     const sweep = button('sweep', settled && boosterCache !== null && boosterCache.swept !== state);
@@ -322,27 +360,41 @@ export async function mountGame(app: Application, {
     syncBoosterAvailability(now);
   }
 
-  async function claimBooster(kind: BoosterButton): Promise<void> {
+  function offerBooster(kind: BoosterButton): void {
     const run = boosters;
-    if (!watchBoosterAd || !run.beginClaim(kind, performance.now())) return;
+    if (!adDialog || !foreground() || !monetization?.available(kind)) return;
     jokerArmed = false;
-    adStatusUntil = 0;
     gestures.reset();
     clearHint();
     updateInteraction();
+    const name = boosterNames[kind];
+    adDialog.show({
+      title: name,
+      description: kind === 'joker'
+        ? 'Watch an ad to earn a Joker. Use it to turn the top donut of one stack into a wildcard.'
+        : 'Watch an ad to earn a Stack Sweep. Use it to remove the top donut from each stack.',
+      primary: { label: 'Watch ad', activate: event => {
+        if (event.isTrusted && hostPaused) wake();
+        if (!foreground() || otherDialogOpen() || !monetization.available(kind) ||
+            run !== boosters || !run.beginClaim(kind, performance.now())) return;
+        if (event.isTrusted) sound.activate();
+        adStatusUntil = 0;
+        requestAd(kind, () => boosters === run && !state.gameOver, outcome => {
+          run.finishClaim(outcome.status === 'completed');
+          if (outcome.status !== 'completed' && outcome.status !== 'cancelled') {
+            adStatusUntil = performance.now() + AD_STATUS_MS;
+          }
+        }, { title: name, description: 'Opening ad…' });
+      } },
+      secondary: { label: 'Cancel', activate: () => {
+        adDialog.hide();
+        syncGameOverVisibility();
+        syncControls();
+        frames.invalidate();
+      } },
+    });
+    syncGameOverVisibility();
     syncControls();
-    frames.invalidate();
-    const isCurrentRun = () => !events.signal.aborted && boosters === run && !state.gameOver;
-    let outcome: AdOutcome = { status: 'failed', attempted: false };
-    try { outcome = await watchBoosterAd(() => isCurrentRun() && canOfferBoosters()); }
-    catch { /* Keep the offer available after a host error. */ }
-    if (!isCurrentRun()) return;
-    run.finishClaim(outcome.status === 'completed');
-    const now = performance.now();
-    if (outcome.status !== 'completed' && outcome.status !== 'cancelled') adStatusUntil = now + AD_STATUS_MS;
-    if (outcome.attempted && focused && !document.hidden && !pageHidden) wake();
-    syncBoosterClock(now);
-    syncControls(now);
     frames.invalidate();
   }
 
@@ -396,15 +448,165 @@ export async function mountGame(app: Application, {
   }
 
   function syncGameOverVisibility(now = performance.now()): void {
-    gameOver?.setVisible(focused && !pageHidden && !document.hidden && !hostPaused, now);
+    gameOver?.setVisible(foreground() && !adPlayback?.attempted && !otherDialogOpen(), now);
     syncBoosterClock(now);
     queueDeadline(now);
+  }
+
+  function setResultsVisible(visible: boolean): void {
+    if (resultsVisible === visible) return;
+    resultsVisible = visible;
+    onResultsVisibilityChange?.(visible);
+  }
+
+  function finalizeGameOver(presentation: GameOverPresentation, now = performance.now()): void {
+    if (presentation.finalize(now)) monetization?.runCompleted();
+  }
+
+  function declineExtraChance(presentation: GameOverPresentation): void {
+    if (gameOver !== presentation || !extraChance) return;
+    extraChance = null;
+    adDialog?.hide();
+    finalizeGameOver(presentation);
+    syncGameOverVisibility();
+    frames.invalidate();
+  }
+
+  function offerExtraChance(presentation: GameOverPresentation, rescued: GameState): void {
+    if (!adDialog || adDialog.element.open) return;
+    const title = 'Extra Chance';
+    const score = resultNumber.format(presentation.run.score);
+    adDialog.show({
+      title,
+      description: `Score ${score}. Watch an ad to open space on the board and keep playing this run.`,
+      primary: { label: 'Watch ad', activate: event => {
+        if (event.isTrusted && hostPaused) wake();
+        if (!foreground() || otherDialogOpen() || adPlayback || gameOver !== presentation) return;
+        if (!monetization?.available('extra-chance')) {
+          declineExtraChance(presentation);
+          return;
+        }
+        if (event.isTrusted) sound.activate();
+        extraChanceUsed = true;
+        requestAd('extra-chance', () => gameOver === presentation && extraChance === rescued, outcome => {
+          if (outcome.status !== 'completed') {
+            declineExtraChance(presentation);
+            return;
+          }
+          abandonment = presentation;
+          gameOver = null;
+          extraChance = null;
+          state = rescued;
+          gestures.reset();
+          scene.showGameOverCue(null, motion.matches);
+          setResultsVisible(false);
+          draw();
+        }, { title, description: 'Opening ad…' });
+      } },
+      secondary: { label: 'Skip · See results', activate: () => declineExtraChance(presentation) },
+    });
+    setResultsVisible(true);
+    syncGameOverVisibility();
+  }
+
+  function requestAd(placement: AdPlacement, isCurrent: () => boolean,
+    finish: AdPlayback['finish'], pending?: AdDialogContent): void {
+    if (!monetization || adPlayback) return;
+    const lease: AdPlayback = {
+      attempted: false, hostPausedDuringAttempt: false, timedOut: false, recovered: false, isCurrent, finish, pending,
+    };
+    adPlayback = lease;
+    const current = () => !leaving && !events.signal.aborted && adPlayback === lease && lease.isCurrent();
+    const canShow = () => current() && foreground() && !otherDialogOpen();
+    const options = {
+      isCurrent: current,
+      canShow,
+      onAttempt() {
+        if (!current()) return;
+        lease.attempted = true;
+        silencePresentation();
+        stopWarmup();
+        quality.frames.interrupt();
+        syncPlaybackSuspension();
+        syncGameOverVisibility();
+      },
+      onRecovery(resume?: () => void) {
+        if (!current()) return;
+        if (resume) lease.timedOut = true;
+        lease.recovery = resume ? {
+          title: 'Ad interrupted',
+          description: 'Once the ad has closed, return to the game.',
+          primary: { label: 'Return to game', activate: event => {
+            if (!current() || !visibleAndFocused() || otherDialogOpen() || lease.recovered) return;
+            if (event.isTrusted) sound.activate();
+            wake();
+            if (!canShow()) return;
+            lease.recovered = true;
+            lease.recovery = undefined;
+            refreshAdPlayback();
+            resume();
+          } },
+        } : undefined;
+        refreshAdPlayback();
+      },
+    };
+    if (pending) adDialog?.show(pending);
+    syncGameOverVisibility();
+    syncControls();
+    frames.invalidate();
+
+    const settle = (outcome: AdOutcome) => {
+      if (!current()) return;
+      const unconfirmed = outcome.status === 'completed' && (lease.timedOut || !lease.attempted || !outcome.attempted);
+      lease.outcome = unconfirmed ? { status: 'failed', attempted: lease.attempted } : outcome;
+      // A pause before a native show has no ad return event to clear it.
+      if (hostPaused && !lease.hostPausedDuringAttempt) {
+        lease.recovery = {
+          title: 'Game paused',
+          description: 'Return to the game when you’re ready.',
+          primary: { label: 'Return to game', activate: () => {
+            if (current() && !otherDialogOpen()) wake();
+          } },
+        };
+      }
+      refreshAdPlayback();
+    };
+    const fail = () => settle({ status: 'failed', attempted: lease.attempted });
+    try { void monetization.request(placement, options).then(settle, fail); }
+    catch { fail(); }
+  }
+
+  function refreshAdPlayback(): void {
+    const lease = adPlayback;
+    if (!lease || leaving || !lease.isCurrent()) return;
+    // Some hosts only send onPause for the native ad. The settled outcome
+    // releases that pause when the browser is already visible and focused.
+    if (lease.outcome && lease.hostPausedDuringAttempt && visibleAndFocused()) hostPaused = false;
+    if (lease.outcome && foreground() && !otherDialogOpen()) {
+      adPlayback = null;
+      adDialog?.hide();
+      lease.finish(lease.outcome);
+      syncPlaybackSuspension();
+      syncGameOverVisibility();
+      syncControls();
+      frames.invalidate();
+    } else if (lease.recovery && visibleAndFocused() && !otherDialogOpen()) {
+      adDialog?.show(lease.recovery);
+    } else if (lease.pending) {
+      adDialog?.show(lease.pending);
+    } else {
+      adDialog?.hide();
+    }
   }
 
   function advanceGameOver(now: number): void {
     if (!gameOver || results) return;
     const completed = gameOver.advance(now, !boardAnimating());
     scene.showGameOverCue(gameOver.cueProgress(now), motion.matches);
+    if (extraChance && gameOver.ready && !adPlayback) {
+      if (monetization?.available('extra-chance')) offerExtraChance(gameOver, extraChance);
+      else declineExtraChance(gameOver);
+    }
     if (!completed) return;
     const present = (view: ResultsSession['view']) => {
       scene.showResults(view);
@@ -412,7 +614,7 @@ export async function mountGame(app: Application, {
     };
     results = new ResultsSession(completed, jokerPlaytest ? null : getFriendsScores(), present);
     scene.showResults(results.view);
-    onResultsVisibilityChange?.(true);
+    setResultsVisible(true);
   }
 
   function advanceScore(now: number): void {
@@ -474,7 +676,7 @@ export async function mountGame(app: Application, {
     clearHint();
     cancelBoosterPresentation();
     pending = null;
-    queuedMove = null;
+    queuedStackTaps.length = 0;
     tapOnlyPress = false;
     feedback = null;
     arrowPointer = null;
@@ -490,7 +692,7 @@ export async function mountGame(app: Application, {
     // Compare the CSS viewport so an earlier DPR change cannot affect this touch rule.
     const heightChange = renderedSize ? Math.abs(viewportHeight - renderedSize.height) : 0;
     const canRetainSelection = renderedSize?.width === viewportWidth && heightChange > 0 &&
-      heightChange <= BROWSER_CHROME_HEIGHT_CHANGE && !gestures.active && !pending &&
+      heightChange <= BROWSER_CHROME_HEIGHT_CHANGE && !gestures.active && !pending && !queuedStackTaps.length &&
       !scene.moveAnimating && !scene.stackUnlockAnimating;
     if (!canRetainSelection) gestures.reset();
     renderedSize = { width: viewportWidth, height: viewportHeight };
@@ -524,9 +726,14 @@ export async function mountGame(app: Application, {
   }
 
   function down(event: PointerEvent): void {
-    if (hostPaused && !document.hidden) wake();
-    const locked = pending !== null || scene.stackUnlockAnimating;
-    if (boosters.claiming || queuedMove || resultsDrag || event.button !== 0 ||
+    const hadAdPlayback = adPlayback !== null;
+    if (hostPaused && (!monetization || event.isTrusted)) {
+      if (event.isTrusted && document.hasFocus?.()) focused = true;
+      wake();
+    }
+    const locked = pending !== null || scene.stackUnlockAnimating || queuedStackTaps.length > 0;
+    if (leaving || hostPaused || hadAdPlayback || adPlayback || adDialog?.element.open || otherDialogOpen() ||
+        boosters.claiming || resultsDrag || event.button !== 0 ||
         (locked && event.pointerType !== 'touch' && event.pointerType !== 'mouse')) return;
     const { client, local, target } = hit(event, 'tap');
     if (results && !gestures.active && scene.canScrollResults(local)) {
@@ -541,7 +748,7 @@ export async function mountGame(app: Application, {
       const button = syncBoosterAvailability()[target];
       if (!button.usable && button.mode !== 'ad') return;
     }
-    if (!gestures.start(event.pointerId, client, target, event.pointerType, jokerArmed)) return;
+    if (!gestures.start(event.pointerId, client, target, event.pointerType, jokerArmed, queuedStackTaps.at(-1))) return;
     if (event.isTrusted && event.pointerType === 'mouse' && !document.hidden && !pageHidden && !hostPaused) sound.activate();
     tapOnlyPress = locked;
     if (!locked) {
@@ -573,7 +780,7 @@ export async function mountGame(app: Application, {
   }
 
   function wheelResults(event: WheelEvent): void {
-    if (!results || resultsDrag || event.ctrlKey || event.metaKey) return;
+    if (!results || adPlayback || resultsDrag || event.ctrlKey || event.metaKey) return;
     const client = { x: event.clientX, y: event.clientY };
     const local = toScene(client);
     if (!scene.canScrollResults(local)) return;
@@ -585,7 +792,7 @@ export async function mountGame(app: Application, {
 
   function track(event: PointerEvent): void {
     if (trackResultsDrag(event)) return;
-    const locked = pending !== null || scene.stackUnlockAnimating;
+    const locked = pending !== null || scene.stackUnlockAnimating || queuedStackTaps.length > 0;
     const held = gestures.owns(event.pointerId);
     const idleMouse = !locked && !gestures.active && event.pointerType === 'mouse' && gestures.source !== null;
     if (!held && !idleMouse) return;
@@ -597,9 +804,10 @@ export async function mountGame(app: Application, {
       return;
     }
     if (locked) return;
-    const tracking = held ? gestures.dragSource !== null : event.buttons === 0;
-    const next = tracking && (target === null || typeof target === 'number')
-      ? { point: local, destination: target }
+    const destination = held ? gestures.destination : target;
+    const tracking = held ? destination !== null : event.buttons === 0;
+    const next = tracking && (destination === null || typeof destination === 'number')
+      ? { point: local, destination }
       : null;
     const redraw = changed || arrowPointer !== null || next !== null;
     arrowPointer = next;
@@ -619,20 +827,14 @@ export async function mountGame(app: Application, {
     if (event.isTrusted && event.pointerType !== 'mouse' && !document.hidden && !pageHidden && !hostPaused) sound.activate();
     frames.invalidate();
     const { client, target } = hit(event, jokerArmed ? 'tap' : 'swipe');
-    if (tapOnlyPress) {
-      gestures.update(event.pointerId, client, target);
-      if (gestures.dragSource !== null) {
-        cancel(event);
-        return;
-      }
-    }
+    const action = gestures.finish(event.pointerId, client, target, tapOnlyPress);
     tapOnlyPress = false;
-    const action = gestures.finish(event.pointerId, client, target);
     arrowPointer = null;
-    if (pending || scene.stackUnlockAnimating) {
-      if (action?.kind === 'move') queuedMove = action;
+    if (action?.kind === 'stack-tap') {
+      queuedStackTaps.push(action.stack);
       return;
     }
+    if (pending || scene.stackUnlockAnimating || queuedStackTaps.length) return;
     if (action?.kind === 'hint') {
       if (syncHintAvailability() && hintCache) {
         jokerArmed = false;
@@ -647,7 +849,7 @@ export async function mountGame(app: Application, {
     }
     if (action?.kind === 'joker') {
       const button = syncBoosterAvailability().joker;
-      if (button.mode === 'ad') { void claimBooster('joker'); return; }
+      if (button.mode === 'ad') { offerBooster('joker'); return; }
       if (button.usable) {
         jokerArmed = !jokerArmed;
         gestures.reset();
@@ -669,27 +871,16 @@ export async function mountGame(app: Application, {
     }
     if (action?.kind === 'sweep') {
       const button = syncBoosterAvailability().sweep;
-      if (button.mode === 'ad') void claimBooster('sweep');
+      if (button.mode === 'ad') offerBooster('sweep');
       else if (button.usable && boosterCache) commitBooster('sweep', boosterCache.swept);
       return;
     }
     if (action?.kind === 'restart') {
-      results?.close();
-      results = null;
-      gameOver = null;
-      scene.showResults(null);
-      onResultsVisibilityChange?.(false);
-      state = createRun();
-      boosters = new RunBoosters();
-      adStatusUntil = 0;
-      bestCombo = 0;
-      levelStartScore = 0;
-      cancelPresentation();
-      gestures.reset();
-      quality.frames.interrupt();
-      applyQuality();
-      draw();
-      syncControls();
+      const outgoing = results;
+      if (!outgoing || adPlayback) return;
+      if (monetization?.available('play-again')) {
+        if (foreground()) requestAd('play-again', () => results === outgoing, restart);
+      } else restart();
       return;
     }
     if (action?.kind === 'personal' || action?.kind === 'friends') {
@@ -708,6 +899,29 @@ export async function mountGame(app: Application, {
       feedback = { target: action.to, started: performance.now(), duration: 750 };
     }
     updateInteraction();
+  }
+
+  function restart(): void {
+    results?.close();
+    results = null;
+    gameOver = null;
+    abandonment = null;
+    extraChance = null;
+    extraChanceUsed = false;
+    scene.showResults(null);
+    setResultsVisible(false);
+    state = createRun();
+    boosters = new RunBoosters();
+    adStatusUntil = 0;
+    bestCombo = 0;
+    levelStartScore = 0;
+    cancelPresentation();
+    gestures.reset();
+    quality.frames.interrupt();
+    applyQuality();
+    draw();
+    syncGameOverVisibility();
+    syncControls();
   }
 
   function commitBooster(kind: BoosterButton, next: GameState, selected?: number): void {
@@ -743,13 +957,15 @@ export async function mountGame(app: Application, {
     if (state.gameOver) {
       cancelFreeBoosterPresentation();
       const { score, level } = state;
-      const presentation = new GameOverPresentation({ score, level, bestCombo }, started, personalScores, () => {
+      const presentation = new GameOverPresentation({ score, level, bestCombo }, personalScores, () => {
         if (gameOver === presentation && !results) frames.invalidate();
       });
       gameOver = presentation;
+      extraChance = !extraChanceUsed && !jokerPlaytest && monetization?.available('extra-chance') ? previewExtraChance(state) : null;
+      if (!extraChance) finalizeGameOver(presentation, started);
       syncGameOverVisibility(started);
       gestures.reset();
-      queuedMove = null;
+      queuedStackTaps.length = 0;
       feedback = null;
     }
     const playback = beginMatch(before, state, from, to, started, motion.matches);
@@ -802,6 +1018,22 @@ export async function mountGame(app: Application, {
     frames.invalidate();
   }
 
+  function playQueuedTaps(now: number): void {
+    // Resolve each tap against the board left by the previous transfer.
+    // A transfer can start another match, so let playback run before taking the next pair.
+    for (let stack = queuedStackTaps.shift(); stack !== undefined; stack = queuedStackTaps.shift()) {
+      const action = gestures.tapStack(stack);
+      if (action?.kind === 'move') {
+        finishVisibleMove();
+        checkBoardSettled();
+        commitMove(action.from, action.to);
+        return;
+      }
+      if (action?.kind === 'blocked') feedback = { target: action.to, started: now, duration: 750 };
+    }
+    updateInteraction(now);
+  }
+
   function renderFrame(timestamp: number): boolean {
     syncViewport();
     if (painted && needsAnimation()) quality.frames.sample(timestamp);
@@ -829,14 +1061,9 @@ export async function mountGame(app: Application, {
     } else if (feedback || scene.selectionAnimating) updateInteraction(now);
     scene.showMove(now);
     if (landing && now >= landing.at) playLanding();
-    if (wasLocked && !pending && !scene.stackUnlockAnimating) {
-      if (queuedMove) {
-        const { from, to } = queuedMove;
-        queuedMove = null;
-        finishVisibleMove();
-        checkBoardSettled();
-        if (canMove(state, from, to)) commitMove(from, to);
-      } else updateInteraction(now);
+    if (!pending && !scene.stackUnlockAnimating) {
+      if (queuedStackTaps.length) playQueuedTaps(now);
+      else if (wasLocked) updateInteraction(now);
     }
     if (hintStatusUntil && now >= hintStatusUntil) clearHint();
     if (adStatusUntil && now >= adStatusUntil) adStatusUntil = 0;
@@ -857,29 +1084,49 @@ export async function mountGame(app: Application, {
     return continuing;
   }
 
+  function syncPlaybackSuspension(): void {
+    frames.setSuspended(document.hidden || pageHidden || hostPaused || adPlayback?.attempted === true || leaving);
+  }
+
   function suspend(): void {
     resultsDrag = null;
     silencePresentation();
     cancelBoosterPresentation();
     syncGameOverVisibility();
     quality.frames.interrupt();
-    frames.setSuspended(true);
+    syncPlaybackSuspension();
     stopWarmup();
   }
 
   function wake(): void {
-    if (document.hidden || pageHidden) return;
+    if (!visibleAndFocused()) return;
     hostPaused = false;
+    refreshAdPlayback();
     syncGameOverVisibility();
-    frames.setSuspended(false);
+    syncPlaybackSuspension();
     wakeViewport();
+  }
+
+  function modalChanged(): void {
+    refreshAdPlayback();
+    syncGameOverVisibility();
+    syncControls();
+    frames.invalidate();
+  }
+
+  function abandon(): void {
+    if (leaving) return;
+    leaving = true;
+    const terminal = gameOver ?? abandonment;
+    if (terminal) finalizeGameOver(terminal);
+    syncBoosterClock(performance.now());
   }
 
   function settleInterruptedPlay(): void {
     resultsDrag = null;
     clearHint();
     cancelBoosterPresentation();
-    if (pending || scene.stackUnlockAnimating) {
+    if (pending || scene.stackUnlockAnimating || queuedStackTaps.length) {
       gestures.reset();
       cancelPresentation();
       draw();
@@ -919,6 +1166,7 @@ export async function mountGame(app: Application, {
   window.addEventListener('pointercancel', cancel, options);
   window.addEventListener('blur', () => {
     focused = false;
+    refreshAdPlayback();
     syncGameOverVisibility();
     settleInterruptedPlay();
   }, options);
@@ -927,8 +1175,9 @@ export async function mountGame(app: Application, {
     wake();
   }, options);
   window.addEventListener('resize', wakeViewport, options);
-  window.addEventListener('pagehide', () => {
+  window.addEventListener('pagehide', event => {
     pageHidden = true;
+    if (event.persisted === false) abandon();
     suspend();
   }, options);
   window.addEventListener('pageshow', () => {
@@ -947,19 +1196,30 @@ export async function mountGame(app: Application, {
   }, options);
 
   if (document.hidden) suspend();
+  syncGameOverVisibility();
   if (renderFrame(performance.now())) frames.invalidate();
   const unsubscribePause = onPause?.(() => {
     hostPaused = true;
+    if (adPlayback?.attempted) adPlayback.hostPausedDuringAttempt = true;
     suspend();
     settleInterruptedPlay();
   });
+  // The purchase dialog is mounted separately. Observe native modal transitions
+  // so opening it between frames still stops both gameplay clocks.
+  const modalObserver = adDialog && typeof MutationObserver === 'function' ? new MutationObserver(records => {
+    if (records.some(record => record.target !== adDialog.element && record.target.nodeName === 'DIALOG')) modalChanged();
+  }) : null;
+  modalObserver?.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open'] });
 
   const close = () => scene.root.destroy({ children: true });
   stage.once('destroyed', close);
   scene.root.once('destroyed', () => {
+    abandon();
     results?.close();
     gameOver = null;
     events.abort();
+    modalObserver?.disconnect();
+    adDialog?.destroy();
     sound.destroy();
     unsubscribePause?.();
     stopWarmup();

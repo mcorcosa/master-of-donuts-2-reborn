@@ -1,8 +1,18 @@
 import { PlatformError, type Outcome, type Persistence, type PlatformServices } from '@playbridge/core';
 import { createFacebookPlatform, type FacebookLeaderboard, type FacebookLeaderboardEntry, type FacebookSDK, type FacebookServices } from '@playbridge/facebook';
+import { Monetization, type AdPlacement } from './monetization';
+import { MonetizationAdInventory } from './monetizationAdInventory';
+import { MonetizationHistory } from './monetizationHistory';
 import { RemoveAds } from './removeAds';
 
-export const BOOSTER_REWARDED_PLACEMENT = 'booster';
+const REWARDED_PLACEMENTS = ['joker', 'sweep', 'extra-chance'] as const;
+
+interface FacebookMonetizationOptions {
+  placements?: Partial<Record<AdPlacement, string>>;
+  removeAdsSku?: string;
+  getHistoryStorage?: () => Pick<Storage, 'getItem' | 'setItem'>;
+  isForeground?: () => boolean;
+}
 
 interface HostLeaderboardEntry extends Pick<FacebookLeaderboardEntry, 'getRank' | 'getScore'> {
   getPlayer(): { getID?(): string | null; getName(): string };
@@ -50,20 +60,28 @@ export async function loadFacebookSDK(getSDK: () => FacebookHostSDK | undefined)
   });
 }
 
-function supportedLeaderboard(sdk: FacebookHostSDK): FacebookHostSDK['getLeaderboardAsync'] {
+function supportedAPIs(sdk: FacebookHostSDK): ReadonlySet<string> | null {
   try {
-    const getLeaderboard = sdk.getLeaderboardAsync;
-    if (typeof getLeaderboard !== 'function') return undefined;
     const probe = sdk.getSupportedAPIs;
-    if (probe === undefined) return getLeaderboard.bind(sdk);
+    if (probe === undefined) return null;
     const apis = probe.call(sdk);
-    if (Array.isArray(apis) && apis.every(api => typeof api === 'string') &&
-        apis.some(api => api === 'getLeaderboardAsync' || api === 'FBInstant.getLeaderboardAsync')) {
-      return getLeaderboard.bind(sdk);
+    if (Array.isArray(apis) && [...apis].every(api => typeof api === 'string')) {
+      return new Set(apis.map(api => api.replace(/^FBInstant\./, '')));
     }
   } catch {
-    // This optional probe must not prevent the board or personal scores from loading.
+    // Optional capabilities never block startup.
   }
+  return new Set();
+}
+
+function boundMethod<K extends 'getLeaderboardAsync' | 'getRewardedVideoAsync' | 'getInterstitialAdAsync'>(
+  host: FacebookHostSDK, key: K, probe: () => ReadonlySet<string> | null,
+): FacebookHostSDK[K] | undefined {
+  try {
+    const method = host[key];
+    if (typeof method !== 'function' || probe()?.has(key) === false) return;
+    return method.bind(host) as FacebookHostSDK[K];
+  } catch { /* An unavailable host method is optional. */ }
 }
 
 async function unsupportedLeaderboardOperation(): Promise<never> {
@@ -99,10 +117,19 @@ export function createRebornFacebookPlatform(
   awaitSDK: () => Promise<FacebookHostSDK>,
   boardName: string,
   persistence: Persistence,
-  boosterPlacementId = '',
-  removeAdsSku = '',
-): { services: Omit<PlatformServices, 'purchases'>; removeAds: RemoveAds; submitScore: (score: number) => Promise<Outcome> } {
+  options: FacebookMonetizationOptions = {},
+): { services: Omit<PlatformServices, 'purchases'>; removeAds: RemoveAds; monetization: Monetization;
+  submitScore: (score: number) => Promise<Outcome> } {
+  const interstitialPlacement = options.placements?.['play-again']?.trim() ?? '';
+  const rewardedPlacements = Object.fromEntries(REWARDED_PLACEMENTS.map(placement =>
+    [placement, options.placements?.[placement]?.trim() ?? '']));
+  const anyRewarded = Object.values(rewardedPlacements).some(Boolean);
+  const isForeground = options.isForeground ?? (() => true);
+  const inventory = new MonetizationAdInventory();
   let sdk: FacebookSDK | undefined;
+  let getInterstitial: FacebookSDK['getInterstitialAdAsync'];
+  let getRewarded: FacebookSDK['getRewardedVideoAsync'];
+  let admittedRewarded: string | undefined;
   let getLeaderboard: FacebookHostSDK['getLeaderboardAsync'];
   let probeLeaderboard: (() => FacebookHostSDK['getLeaderboardAsync']) | undefined;
   let initializing = false;
@@ -115,9 +142,9 @@ export function createRebornFacebookPlatform(
   }
   const platform: FacebookServices = createFacebookPlatform({
     getSDK: () => sdk,
-    rewardedPlacements: { [BOOSTER_REWARDED_PLACEMENT]: boosterPlacementId.trim() },
-    initialRewarded: BOOSTER_REWARDED_PLACEMENT,
-    interstitialAllowed: () => removeAds.ownership === 'inactive',
+    rewardedPlacements,
+    interstitialPlacement,
+    interstitialAllowed: () => monetization.canPreloadInterstitial,
     checkoutActive: () => removeAds.checkoutActive,
     async awaitSDK() {
       const host = await awaitSDK();
@@ -125,7 +152,11 @@ export function createRebornFacebookPlatform(
         initializeAsync: () => host.initializeAsync(),
         async startGameAsync() {
           await host.startGameAsync();
-          if (boardName) probeLeaderboard = () => supportedLeaderboard(host);
+          let capabilities: ReadonlySet<string> | null | undefined;
+          const probe = () => capabilities === undefined ? (capabilities = supportedAPIs(host)) : capabilities;
+          if (boardName) probeLeaderboard = () => boundMethod(host, 'getLeaderboardAsync', probe);
+          if (interstitialPlacement) getInterstitial = boundMethod(host, 'getInterstitialAdAsync', probe);
+          if (anyRewarded) getRewarded = boundMethod(host, 'getRewardedVideoAsync', probe);
         },
         setLoadingProgress(progress) {
           // The pinned adapter signals completion during initialize. Reborn finishes after its first render.
@@ -134,10 +165,28 @@ export function createRebornFacebookPlatform(
         onPause: callback => host.onPause?.(callback),
         logEvent: name => host.logEvent(name),
         get player() { return host.player; },
-        get payments() { return host.payments; },
+        get payments() {
+          try {
+            const payments = host.payments;
+            return typeof payments?.onReady === 'function' && typeof payments.getPurchasesAsync === 'function'
+              ? payments : undefined;
+          }
+          catch { return undefined; }
+        },
+        get getInterstitialAdAsync() {
+          const create = getInterstitial;
+          return create && ((id: string) => inventory.acquire(`interstitial:${id}`, () => create(id),
+            () => monetization.canPreloadInterstitial));
+        },
         get getRewardedVideoAsync() {
-          const getAd = host.getRewardedVideoAsync;
-          return typeof getAd === 'function' ? getAd.bind(host) : undefined;
+          const create = getRewarded;
+          if (!create || admittedRewarded === undefined) return;
+          return (id: string) => {
+            if (id !== admittedRewarded) return Promise.reject(new Error('Rewarded ad was not requested.'));
+            // PlayBridge can refill after show. Rewarded native loads require a new opt-in.
+            admittedRewarded = undefined;
+            return inventory.acquire(`rewarded:${id}`, () => create(id), () => true);
+          };
         },
         get getLeaderboardAsync() {
           const getBoard = selectedLeaderboard();
@@ -147,23 +196,77 @@ export function createRebornFacebookPlatform(
     },
   });
   const { purchases, ...platformServices } = platform;
+  const monetization: Monetization = new Monetization({
+    history: new MonetizationHistory(options.getHistoryStorage, () => Date.now(), () => crypto.randomUUID()),
+    supported: placement => placement === 'play-again'
+      ? !!getInterstitial && !!interstitialPlacement
+      : !!getRewarded && !!rewardedPlacements[placement],
+    interstitialAllowed: (): boolean => removeAds.ownership === 'inactive',
+    checkoutActive: (): boolean => removeAds.checkoutActive,
+    isForeground,
+    interstitialReady: () => platform.ads.interstitialReady(),
+    async requestAd(request) {
+      if (request.kind === 'rewarded') {
+        const id = rewardedPlacements[request.placement];
+        if (!inventory.canAcquire(`rewarded:${id}`)) return { status: 'unavailable', attempted: false };
+        admittedRewarded = id;
+      }
+      try {
+        return await platform.ads.request({ ...request, onAttempt() {
+          admittedRewarded = undefined;
+          request.onAttempt?.();
+        } });
+      } finally { admittedRewarded = undefined; }
+    },
+  });
   const removeAds = new RemoveAds({
     purchases,
-    sku: removeAdsSku,
-    // Enable checkout only when the actual automatic interstitial integration can serve ads.
-    automaticAdsEnabled: () => false,
-    canOpenCheckout: () => !platform.ads.showing,
-    ownershipChanged: () => platform.ads.syncInterstitial(),
+    sku: options.removeAdsSku,
+    automaticAdsEnabled: () => !!getInterstitial && !!interstitialPlacement,
+    canOpenCheckout: () => isForeground() && !monetization.adBusy,
+    ownershipChanged: () => monetization.prepareInterstitial(),
+    checkoutChanged: () => monetization.checkoutChanged(),
   });
-  const services = {
+  let started = false;
+  const services: Omit<PlatformServices, 'purchases'> = {
     ...platformServices,
     persistence,
+    capabilities() {
+      return {
+        ...platform.capabilities(),
+        interstitialAds: !interstitialPlacement || !started ? 'unavailable' : getInterstitial ? 'available' : 'unsupported',
+        rewardedAds: !anyRewarded || !started ? 'unavailable' : getRewarded ? 'available' : 'unsupported',
+      };
+    },
+    ads: {
+      async request({ kind, placement, isCurrent = () => true, onAttempt = () => {} }) {
+        if ((kind === 'interstitial' && placement === 'play-again') ||
+            (kind === 'rewarded' && REWARDED_PLACEMENTS.some(rewarded => rewarded === placement))) {
+          return monetization.request(placement as AdPlacement, { isCurrent, canShow: isCurrent, onAttempt, onRecovery() {} });
+        }
+        return { status: 'unsupported', attempted: false };
+      },
+    },
     lifecycle: {
       ...platform.lifecycle,
       async initialize() {
         initializing = true;
         try { await platform.lifecycle.initialize(); }
         finally { initializing = false; }
+      },
+      async start() {
+        await platform.lifecycle.start();
+        if (started) return;
+        started = true;
+        let playerId: string | null = null;
+        if (getInterstitial) {
+          try {
+            const identity = platform.identity();
+            if (identity.status === 'completed') playerId = identity.value;
+          } catch { /* An unavailable identity disables automatic ad history. */ }
+        }
+        monetization.start(playerId);
+        void removeAds.refresh();
       },
     },
   };
@@ -183,5 +286,5 @@ export function createRebornFacebookPlatform(
       return { status: error instanceof PlatformError ? error.status : 'failed', error };
     }
   }
-  return { services, removeAds, submitScore };
+  return { services, removeAds, monetization, submitScore };
 }

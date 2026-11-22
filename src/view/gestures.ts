@@ -10,8 +10,11 @@ export type BoosterButton = BoosterKind;
 type ButtonAction = ResultsAction | 'hint' | BoosterButton;
 export type Target = number | ButtonAction | 'outside' | null;
 
+type Transfer = { kind: 'move' | 'blocked'; from: number; to: number };
+
 export type GestureResult =
-  | { kind: 'move' | 'blocked'; from: number; to: number }
+  | Transfer
+  | { kind: 'stack-tap'; stack: number }
   | { kind: 'joker-target'; stack: number }
   | { kind: ButtonAction };
 
@@ -28,9 +31,13 @@ interface Press {
   maxDistanceSquared: number;
   neighbor: number | null;
   destinationGrace: boolean;
+  dropSlop: number;
+  lastDrop: { stack: number; point: Point } | null;
 }
 
 const DESTINATION_TAP_GRACE = 6;
+const TOUCH_DROP_SLOP = 24;
+const POINTER_DROP_SLOP = 12;
 
 export class StackGestures {
   private press: Press | null = null;
@@ -74,17 +81,18 @@ export class StackGestures {
       ? press.target : null;
   }
 
-  start(id: number, point: Point, target: Target, pointerType = 'mouse', jokerTarget = false): boolean {
+  start(id: number, point: Point, target: Target, pointerType = 'mouse', jokerTarget = false, previousQueuedTap?: number): boolean {
     if (this.press) return false;
     const swipeDistance = pointerType === 'touch' ? 12 : 10;
-    const destinationTap = pointerType === 'touch' &&
-      this.selection !== null && typeof target === 'number' && target !== this.selection;
+    const tapAnchor = previousQueuedTap ?? this.selection;
+    const destinationTap = pointerType === 'touch' && tapAnchor !== null && typeof target === 'number' && target !== tapAnchor;
     this.press = {
       id, origin: point, target, hover: target, dragged: false, jokerTarget,
       mouseStackPress: pointerType === 'mouse' && typeof target === 'number',
       swipeDistanceSquared: swipeDistance ** 2,
       destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
       maxDistanceSquared: 0, neighbor: null, destinationGrace: destinationTap,
+      dropSlop: pointerType === 'touch' ? TOUCH_DROP_SLOP : POINTER_DROP_SLOP, lastDrop: null,
     };
     return true;
   }
@@ -113,44 +121,71 @@ export class StackGestures {
         ? target !== press.target && distanceSquared >= threshold
         : press.maxDistanceSquared >= threshold;
     }
-    press.hover = target;
-    return wasDragged !== press.dragged || previous !== target;
+    press.hover = this.resolveDrop(press, point, target);
+    return wasDragged !== press.dragged || previous !== press.hover;
   }
 
-  finish(id: number, point: Point, target: Target): GestureResult | null {
+  private resolveDrop(press: Press, point: Point, target: Target): Target {
+    const from = this.dragSource;
+    if (from === null) return target;
+    if (typeof target === 'number' && this.canMove(from, target)) {
+      press.lastDrop = { stack: target, point };
+      return target;
+    }
+    // Keep the last valid destination through a small slip. Measure from the
+    // last direct hit so repeated moves in the gap can't carry it across the board.
+    const last = press.lastDrop;
+    if ((target === null || target === 'outside') && last &&
+        Math.hypot(point.x - last.point.x, point.y - last.point.y) <= press.dropSlop && this.canMove(from, last.stack)) {
+      return last.stack;
+    }
+    press.lastDrop = null;
+    return target;
+  }
+
+  finish(id: number, point: Point, target: Target, deferStackTap = false): GestureResult | null {
     const press = this.press;
     if (!press || press.id !== id) return null;
     this.update(id, point, target);
     this.press = null;
-    if (target === 'outside' ||
-        ((target === 'hint' || target === 'joker' || target === 'sweep') && press.target !== target)) return null;
+    const release = press.hover;
+    if (release === 'outside' ||
+        ((release === 'hint' || release === 'joker' || release === 'sweep') && press.target !== release)) return null;
+
+    if (deferStackTap) {
+      return !press.dragged && typeof press.target === 'number' ? { kind: 'stack-tap', stack: press.target } : null;
+    }
 
     if (press.jokerTarget && typeof press.target === 'number') {
-      return !press.dragged && target === press.target && this.hasDonuts(target)
-        ? { kind: 'joker-target', stack: target } : null;
+      return !press.dragged && release === press.target && this.hasDonuts(release)
+        ? { kind: 'joker-target', stack: release } : null;
     }
 
     if (press.dragged) {
       const from = press.target;
-      if (typeof from === 'number' && typeof target === 'number' && from !== target && this.hasDonuts(from)) {
-        return this.attempt(from, target);
+      if (typeof from === 'number' && typeof release === 'number' && from !== release && this.hasDonuts(from)) {
+        return this.attempt(from, release);
       }
       return null;
     }
 
     const pressed = press.target;
-    if (typeof pressed !== 'number') return pressed !== null && pressed === target ? { kind: pressed } : null;
-    if (pressed === this.selection) {
+    if (typeof pressed === 'number') return this.tapStack(pressed);
+    return pressed !== null && pressed === release ? { kind: pressed } : null;
+  }
+
+  tapStack(stack: number): Transfer | null {
+    if (stack === this.selection) {
       this.selection = null;
     } else if (this.selection !== null) {
-      return this.attempt(this.selection, pressed);
-    } else if (this.hasDonuts(pressed)) {
-      this.selection = pressed;
+      return this.attempt(this.selection, stack);
+    } else if (this.hasDonuts(stack)) {
+      this.selection = stack;
     }
     return null;
   }
 
-  private attempt(from: number, to: number): GestureResult {
+  private attempt(from: number, to: number): Transfer {
     if (!this.canMove(from, to)) {
       this.selection = from;
       return { kind: 'blocked', from, to };
