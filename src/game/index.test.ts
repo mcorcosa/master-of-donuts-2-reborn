@@ -136,19 +136,65 @@ describe('Setup hints', () => {
     expect(move(ready, 2, 1, lowest).score).toBe(150);
   });
 
-  it('does not use a refill-only rescue as a hint', () => {
+  it('hints a known-donut rescue that needs the pressure refill to pass first', () => {
     const game = board([
       ['blue', 'gold', 'gold', 'gold', 'blue'], ['red', 'yellow', 'yellow'], ['yellow', 'blue', 'gold', 'gold', 'blue'],
     ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 2 });
     expect(canRequestSetupHint(game)).toBe(true);
     expect(bruteCanScore(game.stacks, game.capacity, game.movesLeft)).toBe(false);
-    expect(findSetupHint(game)).toBeNull();
+    expect(findSetupHint(game)).toEqual({ from: 0, to: 1 });
 
     const miss = move(game, 0, 1, lowest);
     expect(miss).toMatchObject({ gameOver: false, movesLeft: 1, score: 500 });
     const refilled = move(miss, 0, 1, lowest);
     expect(refilled).toMatchObject({ gameOver: false, movesLeft: 6, score: 500 });
+    expect(canRequestSetupHint(refilled)).toBe(false);
+    expect(findSetupHint(refilled)).toBeNull();
     expect(move(refilled, 1, 0, lowest).score).toBe(610);
+  });
+
+  it.each([
+    {
+      snapshot: board([['blue', 'yellow', 'yellow'], ['blue', 'choco', 'purple', 'purple', 'blue'], ['yellow', 'blue', 'choco', 'choco']],
+        { level: 2, score: 1181, nextLevelScore: 1500 }),
+      firstLive: 4, route: [[2, 0], [2, 0], [1, 2], [1, 2], [1, 2], [0, 1], [0, 1]], finalScore: 1291,
+    },
+    {
+      snapshot: board([['green', 'yellow', 'choco', 'blue', 'blue'], ['green', 'yellow', 'green', 'green', 'yellow'], ['yellow', 'blue', 'green', 'choco', 'choco']],
+        { capacity: 6, level: 3, score: 2494, nextLevelScore: 2600 }),
+      firstLive: 5, route: [[1, 0], [2, 1], [2, 1], [0, 2], [0, 2], [0, 2], [1, 0], [1, 0]], finalScore: 2614,
+    },
+  ])('adjudicates the reported countdown boundary and verifies a scoring hint', ({ snapshot, firstLive, route, finalScore }) => {
+    const stacks = snapshot.stacks.map(stack => stack.slice());
+    stacks[0].push(stacks[2].pop()!);
+    for (let counter = 1; counter <= 8; counter++) {
+      const rng = vi.fn(lowest);
+      const onDough = vi.fn();
+      const settled = move({ ...snapshot, stacks, movesLeft: counter + 1 }, 0, 2, rng, onDough);
+      expect(settled.stacks).toEqual(snapshot.stacks);
+      expect(settled).toMatchObject({ movesLeft: counter, score: snapshot.score, gameOver: counter < firstLive });
+      expect(findSetupHint(settled)).toEqual(counter < firstLive ? null : { from: route[0][0], to: route[0][1] });
+      expect(rng).not.toHaveBeenCalled();
+      expect(onDough).not.toHaveBeenCalled();
+    }
+
+    for (const draw of [lowest, () => 0.5, highest]) {
+      let current = { ...snapshot, movesLeft: firstLive };
+      const rng = vi.fn(draw);
+      for (const [index, [from, to]] of route.entries()) {
+        expect(canMove(current, from, to)).toBe(true);
+        const dough = vi.fn();
+        const next = move(current, from, to, rng, dough);
+        if (index + 1 === firstLive) {
+          expect(dough.mock.lastCall?.[0]).toEqual([{ stack: expect.any(Number), depth: 0, color: expect.not.stringMatching(/^joker$/) }]);
+          expect(rng).toHaveBeenCalledTimes(2);
+          expect(next.movesLeft).toBe(6 + Math.floor(draw() * 3));
+        }
+        if (index + 1 < route.length) expect(next.score).toBe(snapshot.score);
+        current = next;
+      }
+      expect(current.score).toBe(finalScore);
+    }
   });
 
   it('limits requests to nonterminal boards with one to three vacancies and enough pressure budget', () => {
@@ -905,18 +951,19 @@ describe('Master of Donuts 2 rules', () => {
     expect(scored.stacks.flat()).not.toContain(JOKER);
   });
 
-  it('allows a pressure donut to become a scoring donor in a nearly empty stack', () => {
+  it('rules out a hypothetical pressure donor, then uses that color on an actually refilled board', () => {
     const full = ['gold', 'red', 'blue', 'red', 'blue', 'red', 'blue', 'red', 'blue', 'red'];
     const game = board([
       [], full.slice(0, -1), full, ['gold', 'blue', 'red', 'blue', 'red', 'blue', 'red', 'gold', 'gold', 'blue'],
       ...Array.from({ length: 4 }, () => full.slice()),
     ], { capacity: 10, level: 45, score: 129000, nextLevelScore: 131100, movesLeft: 2 });
     const ready = move(game, 2, 1, lowest);
-    expect(ready).toMatchObject({ score: 129000, movesLeft: 1, gameOver: false });
+    expect(ready).toMatchObject({ score: 129000, movesLeft: 1, gameOver: true });
     expect(bruteCanScore(ready.stacks, 10, 1)).toBe(false);
     const rng = vi.fn(lowest);
     const onDough = vi.fn();
-    const filled = move(ready, 3, 2, rng, onDough);
+    // Independently start with an actual pressure move due. Its real draws become known.
+    const filled = move({ ...ready, gameOver: false }, 3, 2, rng, onDough);
     expect(filled).toMatchObject({ score: 129000, movesLeft: 6, gameOver: false });
     expect(filled.stacks[0].at(-1)).toBe('gold');
     expect(onDough.mock.lastCall?.[0]).toHaveLength(10);

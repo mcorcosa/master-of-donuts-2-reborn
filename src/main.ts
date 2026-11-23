@@ -6,6 +6,7 @@ import { createFriendsScores } from './platform/friendsScores';
 import { browserScoreStorage, isLegacyFacebookScoreOrigin, PersonalScores } from './platform/personalScores';
 import { startGame } from './platform/startup';
 import { mountGame } from './view';
+import { loadFirstMatch } from './view/firstMatch';
 import './styles.css';
 
 declare const __FACEBOOK__: boolean;
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
     });
     await mountGame(app, {
       jokerPlaytest,
+      firstMatch: jokerPlaytest || removeAdsDemo ? null : await loadFirstMatch(platform.persistence),
       personalScores,
       getFriendsScores: () => facebook && createFriendsScores(platform, boardName, facebook.submitScore),
       monetization: facebook?.monetization,

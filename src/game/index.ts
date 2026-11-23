@@ -35,8 +35,9 @@ const FALLBACK_SCORE_GAP = 3200;
 const FIRST_SHUFFLED_LEVEL = 2;
 const STARTING_CAPACITY = 5;
 const STARTING_COLOR_COUNT = 3;
-const PRESSURE_SEARCH_LIMIT = 512;
-const SETUP_HINT_SEARCH_LIMIT = 512;
+const SCORING_SEARCH_LIMIT = 1024;
+const MIN_PRESSURE_INTERVAL = 6;
+const UNKNOWN_DOUGH = '\uffff';
 // Height, stack and color, in the same order as the full-shuffle experiment.
 const UPGRADE_ORDERS = ['HSC', 'HCS', 'SHC', 'SCH', 'CHS', 'CSH'] as const;
 const paletteKey = Symbol('palette');
@@ -62,7 +63,7 @@ function randomColor(colors: string[], rng: () => number): string {
 }
 
 function rollPressureInterval(rng: () => number): number {
-  return 6 + Math.floor(rng() * 3);
+  return MIN_PRESSURE_INTERVAL + Math.floor(rng() * 3);
 }
 
 function topPair(stack: readonly string[] | string): string | undefined {
@@ -176,152 +177,99 @@ export function canRequestSetupHint(state: GameState): boolean {
 
 export function findSetupHint(state: GameState): { from: number; to: number } | null {
   if (!canRequestSetupHint(state)) return null;
+  const proof = proveBoardScore(state);
+  return proof.kind === 'verified-route' ? proof.first : null;
+}
 
-  const { capacity, movesLeft } = state;
+type SetupTransfer = { from: number; to: number };
+type ScoreProof = { kind: 'verified-route'; first: SetupTransfer } | { kind: 'proven-dead' } | { kind: 'inconclusive' };
+type ProofPosition = { stacks: string[]; beforePressure: number; guaranteedMoves: number; first?: SetupTransfer };
+
+function couldScoreWithUnknown(triple: string, joker: string): boolean {
+  const known = [...triple].filter(piece => piece !== UNKNOWN_DOUGH);
+  const natural = known.filter(piece => piece !== joker);
+  return known.length - natural.length <= 1 && natural.every(piece => piece === natural[0]);
+}
+
+function proveBoardScore(state: GameState, space = totalSpace(state.stacks, state.capacity)): ScoreProof {
+  const { capacity, movesLeft, level } = state;
+  const refillCount = pressureRefillCount(level);
+  if (space === 0) return { kind: 'proven-dead' };
+  // Restrict the dense proof to at most two vacancies after the first refill.
+  if (space > refillCount + 2) return { kind: 'inconclusive' };
+
   const colors = [...new Set(state.stacks.flat())];
   const tokens = new Map(colors.map((color, i) => [color, String.fromCharCode(i + 1)]));
-  const initial = state.stacks.map((stack) => stack.map((color) => tokens.get(color)).join(''));
-  const joker = tokens.get(JOKER);
-  const queue: { stacks: string[]; misses: number; first: { from: number; to: number } | null }[] = [
-    { stacks: initial, misses: 0, first: null },
-  ];
-  // Without pressure, stack labels do not affect whether a position can score.
-  const key = (stacks: string[]) => stacks.slice().sort().join('\0');
-  const seen = new Set([key(initial)]);
+  const initial = state.stacks.map(stack => stack.map(color => tokens.get(color)).join(''));
+  const joker = tokens.get(JOKER) ?? JOKER;
+  const queue: ProofPosition[] = [];
+  const seen = new Set<string>();
+  let capped = false;
+  let inconclusive = false;
+
+  function enqueue(position: ProofPosition): void {
+    const { stacks, beforePressure, guaranteedMoves } = position;
+    // A surviving refill depends on index order and the exact countdown. After
+    // it, later inserts can be omitted for loss proofs: they take space and
+    // can be skipped as move sources, but cannot supply a scoring ingredient.
+    const key = beforePressure > 0 && refillCount < space ? `${beforePressure}:${stacks.join('\0')}` :
+      `${guaranteedMoves > 0 ? 'safe' : 'open'}:${stacks.slice().sort().join('\0')}`;
+    if (seen.has(key)) return;
+    if (queue.length === SCORING_SEARCH_LIMIT) { capped = true; return; }
+    seen.add(key);
+    queue.push(position);
+  }
+  enqueue({ stacks: initial, beforePressure: movesLeft, guaranteedMoves: movesLeft });
 
   for (let i = 0; i < queue.length; i++) {
-    const { stacks, misses, first } = queue[i];
-    if (first && hasScoringMove(stacks, capacity, joker)) return first;
-    if (misses + 1 >= movesLeft) continue;
+    const { stacks, beforePressure, guaranteedMoves, first } = queue[i];
+    if (guaranteedMoves === 0 && (inconclusive || capped)) continue;
+    const open = stacks.flatMap((stack, index) => stack.length < capacity ? [index] : []);
+    for (let from = 0; from < stacks.length; from++) {
+      const incoming = stacks[from].at(-1);
+      if (incoming === undefined) continue;
+      for (const to of open) {
+        if (from === to) continue;
+        const triple = stacks[to].slice(-2) + incoming;
+        const candidate = first ?? { from, to };
+        const hasUnknown = triple.includes(UNKNOWN_DOUGH);
+        if (!hasUnknown && resolveMatch(stacks[to], incoming, joker)) {
+          if (guaranteedMoves > 0) return { kind: 'verified-route', first: candidate };
+          inconclusive = true;
+          continue;
+        }
+        // A batch that fills the board can only stop early on a dead one-slot board.
+        if (capped || (beforePressure === 1 && refillCount >= space)) continue;
 
-    // Breadth first, then source/destination index order. A final scoring move
-    // does not spend pressure, so at most movesLeft - 1 setup misses can precede it.
-    for (let from = 0; from < stacks.length && queue.length < SETUP_HINT_SEARCH_LIMIT; from++) {
-      for (let to = 0; to < stacks.length && queue.length < SETUP_HINT_SEARCH_LIMIT; to++) {
-        if (!canTransfer(stacks, capacity, from, to)) continue;
         const after = stacks.slice();
-        after[to] += stacks[from].at(-1);
+        after[to] += incoming;
         after[from] = stacks[from].slice(0, -1);
-        const position = key(after);
-        if (seen.has(position)) continue;
-        seen.add(position);
-        queue.push({ stacks: after, misses: misses + 1, first: first ?? { from, to } });
+        let witness = Math.max(0, guaranteedMoves - 1);
+        if (beforePressure === 1) {
+          for (let insert = 0; insert < refillCount; insert++) {
+            let shortest = 0;
+            for (let stack = 1; stack < after.length; stack++) {
+              if (after[stack].length < after[shortest].length) shortest = stack;
+            }
+            after[shortest] = UNKNOWN_DOUGH + after[shortest];
+          }
+          // A witness must score no later than the earliest possible next refill.
+          witness = MIN_PRESSURE_INTERVAL;
+        } else if (witness > 0 && hasUnknown && triple.length === 3 && couldScoreWithUnknown(triple, joker)) {
+          // A real roll could score instead of making this setup transfer.
+          witness = 0;
+        }
+        enqueue({ stacks: after, beforePressure: Math.max(0, beforePressure - 1), guaranteedMoves: witness, first: candidate });
       }
     }
   }
-  return null;
+  return { kind: inconclusive || capped ? 'inconclusive' : 'proven-dead' };
 }
 
-function canScoreAfterPressure(
-  board: string[], capacity: number, count: number, colors: string[], joker: string | undefined,
-  claimNode: () => boolean,
-): boolean {
-  const filled = board.slice();
-  function insert(remaining: number): boolean {
-    // Any roll of 6–8 permits the single setup miss a one-vacancy board may need.
-    if (remaining === 0) return canScoreWithOneVacancy(filled, capacity, 2, joker);
-
-    let shortest = 0;
-    for (let i = 1; i < filled.length; i++) {
-      if (filled[i].length < filled[shortest].length) shortest = i;
-    }
-    const stack = filled[shortest];
-    // With fewer than three donuts, a bottom insert can affect a fixed pair or
-    // a movable top. Deeper inserts only change the height used by refill selection.
-    const visible = stack.length < 3;
-    const choices = visible ? colors : ['\uffff'];
-    const pair = topPair(stack);
-    for (const color of choices) {
-      if (color === pair) continue;
-      if (visible && !claimNode()) return true;
-      filled[shortest] = color + stack;
-      const canScore = insert(remaining - 1);
-      filled[shortest] = stack;
-      if (canScore) return true;
-    }
-    return false;
-  }
-  return insert(count);
-}
-
-function canEscapePressure(state: RunState, space: number, refillCount: number): boolean {
-  // With one vacancy only the cap-height donuts can move. To score, either
-  // use the existing opening or move it once to a stack whose fixed top pair can score.
-  if (space === 1) return canScoreWithOneVacancy(state.stacks, state.capacity, state.movesLeft);
-
-  const { stacks, capacity, movesLeft } = state;
-  const leavesVacancy = space === refillCount + 1;
-  if (hasScoringMove(stacks, capacity)) return true;
-  if (movesLeft <= 1 && !leavesVacancy) return false;
-
-  const inventory = new Map<string, { code: string; count: number }>();
-  function colorEntry(color: string): { code: string; count: number } {
-    let entry = inventory.get(color);
-    if (!entry) {
-      entry = { code: String.fromCharCode(inventory.size + 1), count: 0 };
-      inventory.set(color, entry);
-    }
-    return entry;
-  }
-  const board = stacks.map((stack) => stack.map((color) => {
-    const entry = colorEntry(color);
-    entry.count++;
-    return entry.code;
-  }).join(''));
-  const joker = inventory.get(JOKER)?.code;
-  if (!leavesVacancy && ![...inventory].some(([color, { count }]) =>
-    color !== JOKER && count + Number(joker !== undefined) >= 3)) return false;
-
-  let refillColors: string[] = [];
-  if (leavesVacancy) {
-    // A real run's palette is fixed. Plain snapshots can rebuild it from the
-    // board before the pressure move, so include every possible normal color.
-    const palette = state[paletteKey]?.slice(0, activeColorCount(state)) ?? [...new Set([...inventory.keys(), ...COLORS])];
-    refillColors = palette.filter((color) => color !== JOKER).map((color) => colorEntry(color).code);
-  }
-
-  const visited = new Map<string, number>();
-  let nodes = 0;
-  function claimNode(): boolean {
-    if (nodes === PRESSURE_SEARCH_LIMIT) return false;
-    nodes++;
-    return true;
-  }
-  function visit(remaining: number): boolean {
-    // Refill ties depend on stack order and the batch fires at exactly zero.
-    const key = leavesVacancy ? `${remaining}\0${board.join('\0')}` : board.slice().sort().join('\0');
-    if ((visited.get(key) ?? -1) >= remaining) return false;
-    if (!claimNode()) return true; // Inconclusive is still playable.
-    visited.set(key, remaining);
-    if (remaining === 0) return canScoreAfterPressure(board, capacity, refillCount, refillColors, joker, claimNode);
-    if (hasScoringMove(board, capacity, joker)) return true;
-    if (remaining === 1 && !leavesVacancy) return false;
-
-    // No transfer here can score, so each legal transfer uses one setup miss.
-    for (let from = 0; from < board.length; from++) {
-      const source = board[from];
-      if (!source) continue;
-      for (let to = 0; to < board.length; to++) {
-        const target = board[to];
-        if (from === to || target.length >= capacity) continue;
-        board[from] = source.slice(0, -1);
-        board[to] = target + source.at(-1);
-        const playable = visit(remaining - 1);
-        board[from] = source;
-        board[to] = target;
-        if (playable) return true;
-      }
-    }
-    return false;
-  }
-  return visit(movesLeft);
-}
-
-function isGameOver(state: RunState): boolean {
+function isGameOver(state: GameState): boolean {
   const space = totalSpace(state.stacks, state.capacity);
-  if (space === 0) return true;
-  const count = pressureRefillCount(state.level);
-  return space <= count + 1 && !canEscapePressure(state, space, count);
+  return space <= pressureRefillCount(state.level) + 2 && !hasScoringMove(state.stacks, state.capacity) &&
+    proveBoardScore(state, space).kind === 'proven-dead';
 }
 
 function hasQuickScore<T>(stacks: T[][], capacity: number, movesLeft: number, canScore: () => boolean): boolean {

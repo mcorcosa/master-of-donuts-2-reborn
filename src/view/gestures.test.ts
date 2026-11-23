@@ -96,6 +96,33 @@ describe('stack gestures', () => {
     expect(gestures.source).toBe(0);
   });
 
+  it.each(['mouse', 'touch'])('selects on the first %s release after crossing a gap and returning', device => {
+    const gestures = fixture();
+    gestures.start(1, left, 0, device);
+    gestures.update(1, { x: left.x, y: left.y - 19 }, null);
+    gestures.finish(1, left, 0);
+    expect(gestures.source).toBe(0);
+    expect(tap(gestures, 1, right)).toEqual({ kind: 'move', from: 0, to: 1 });
+  });
+
+  it('selects after 14 pixels of touch drift within the first stack', () => {
+    const gestures = fixture();
+    gestures.start(1, left, 0, 'touch');
+    const end = { x: left.x + 14, y: left.y };
+    gestures.update(1, end, 0);
+    expect(gestures.dragSource).toBeNull();
+    gestures.finish(1, end, 0);
+    expect(gestures.source).toBe(0);
+    expect(tap(gestures, 1, right)).toEqual({ kind: 'move', from: 0, to: 1 });
+  });
+
+  it('cancels a first press released in a distant gap', () => {
+    const gestures = fixture();
+    gestures.start(1, left, 0, 'touch');
+    gestures.finish(1, right, null);
+    expect(gestures.source).toBeNull();
+  });
+
   it('keeps the pressed target through small movement over its edge', () => {
     const gestures = fixture();
     tap(gestures, 0);

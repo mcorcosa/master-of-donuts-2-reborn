@@ -12,7 +12,9 @@ import type { FriendsScores } from '../platform/friendsScores';
 import type { AdPlacement, GameMonetization } from '../platform/monetization';
 import type { PersonalScores } from '../platform/personalScores';
 import { AdDialog, type AdDialogContent } from './adDialog';
+import { installBoardDebug } from './boardDebug';
 import type { BoosterButtonView, BoosterFooterView } from './boosters';
+import { arrangeFirstMatch, findFirstMatch, type FirstMatchProgress } from './firstMatch';
 import { GameOverPresentation } from './gameOverPresentation';
 import { type BoosterButton, type Point, StackGestures } from './gestures';
 import { VIEW_WIDTH } from './layout';
@@ -26,6 +28,7 @@ import { GOAL_GLEAM_MS, type ScoreDisplay } from './scoreBar';
 
 const MOUSE_BOARD_EDGE_SLOP = 6;
 const BROWSER_CHROME_HEIGHT_CHANGE = 96;
+const FIRST_MATCH_GUIDE_DELAY_MS = 250;
 const MIN_CREDIT_SPACING_MS = 55;
 const HINT_STATUS_MS = 1500;
 const AD_STATUS_MS = 2000;
@@ -82,6 +85,7 @@ function levelReveal(before: GameState, after: GameState, reduced: boolean): Lev
 
 interface GameResultsOptions {
   jokerPlaytest: boolean;
+  firstMatch?: FirstMatchProgress | null;
   personalScores: Pick<PersonalScores, 'record'>;
   getFriendsScores(): FriendsScores | null;
   monetization?: GameMonetization;
@@ -91,7 +95,7 @@ interface GameResultsOptions {
 }
 
 export async function mountGame(app: Application, {
-  jokerPlaytest, personalScores, getFriendsScores, monetization, quality, onPause, onResultsVisibilityChange,
+  jokerPlaytest, firstMatch, personalScores, getFriendsScores, monetization, quality, onPause, onResultsVisibilityChange,
 }: GameResultsOptions): Promise<void> {
   const [art] = await Promise.all([loadArt(), preloadScoreFont().catch(error => {
     console.warn('The bundled score font could not be loaded.', error);
@@ -111,7 +115,13 @@ export async function mountGame(app: Application, {
   const touchAction = canvas.style.touchAction;
   canvas.style.touchAction = 'none';
 
+  let firstMatchProgress = jokerPlaytest ? null : firstMatch;
+  let firstMatchGuideAt = 0;
+  let firstMatchGuideBoard: GameState | undefined;
+  let firstMatchMove: ReturnType<typeof findFirstMatch> = null;
   let state = createRun();
+  if (firstMatchProgress) state = arrangeFirstMatch(state);
+  const boardDebug = import.meta.env.MODE === 'board-debug' ? installBoardDebug(window, () => state) : undefined;
   let bestCombo = 0;
   let results: ResultsSession | null = null;
   let resultsDrag: { id: number; y: number } | null = null;
@@ -185,6 +195,7 @@ export async function mountGame(app: Application, {
 
   function queueDeadline(now: number): void {
     let next = hintStatusUntil;
+    if (firstMatchGuideAt && (!next || firstMatchGuideAt < next)) next = firstMatchGuideAt;
     const gameOverDeadline = results || adDialog?.element.open ? 0 : gameOver?.deadline(motion.matches) ?? 0;
     if (gameOverDeadline && (!next || gameOverDeadline < next)) next = gameOverDeadline;
     if (feedback && motion.matches) {
@@ -324,15 +335,20 @@ export async function mountGame(app: Application, {
     boosters.setActive(playing && !!(monetization?.available('joker') || monetization?.available('sweep')), now);
   }
 
+  function boosterLegality() {
+    if (boosterCache?.state !== state) {
+      // Keep the validated Sweep board so a completed press commits the exact preview.
+      boosterCache = { state, joker: canUseJokerBooster(state), swept: useStackSweep(state) };
+    }
+    return boosterCache;
+  }
+
   function syncBoosterAvailability(now = performance.now()): BoosterFooterView {
     const visible = !state.gameOver;
     const settled = visible && !pending && !queuedStackTaps.length && !scene.moveAnimating && !scene.stackUnlockAnimating &&
       !scene.effectsAnimating && !scene.boosterCueDeadline && !credits.length && !levels.length &&
       !boosters.claiming && !adPlayback && !adDialog?.element.open && !hostPaused && !document.hidden && !pageHidden;
-    if (settled && boosterCache?.state !== state) {
-      // Keep the validated Sweep board so a completed press commits the exact preview.
-      boosterCache = { state, joker: canUseJokerBooster(state), swept: useStackSweep(state) };
-    }
+    const legal = settled ? boosterLegality() : null;
     const progress = Math.floor(boosters.progress(now) * 100) / 100;
     const button = (kind: BoosterButton, legal: boolean): BoosterButtonView => {
       const source = boosters.source(kind);
@@ -341,8 +357,8 @@ export async function mountGame(app: Application, {
       if (!boosters.hasOffersLeft || !monetization?.available(kind)) return { usable: false, mode: 'locked' };
       return { usable: false, mode: legal && foreground() && boosters.canClaim(kind, now) ? 'ad' : 'charging' };
     };
-    const joker = button('joker', settled && boosterCache?.joker === true);
-    const sweep = button('sweep', settled && boosterCache !== null && boosterCache.swept !== state);
+    const joker = button('joker', legal?.joker === true);
+    const sweep = button('sweep', legal !== null && legal.swept !== state);
     if (!joker.usable) jokerArmed = false;
     const adUnavailable = adStatusUntil > now;
     if (!boosterDisplay || joker.mode !== boosterDisplay.joker.mode || joker.usable !== boosterDisplay.joker.usable ||
@@ -416,6 +432,27 @@ export async function mountGame(app: Application, {
   function clearHint(): void {
     hintStatusUntil = 0;
     scene.clearHint();
+  }
+
+  function stopFirstMatch(): void {
+    if (!firstMatchProgress) return;
+    firstMatchProgress = null;
+    firstMatchGuideAt = 0;
+    firstMatchGuideBoard = undefined;
+    firstMatchMove = null;
+    scene.hideFirstMatchGuide();
+  }
+
+  function renderFirstMatchGuide(now: number): boolean {
+    if (!firstMatchProgress || !painted || now < firstMatchGuideAt) return false;
+    firstMatchGuideAt = 0;
+    if (firstMatchGuideBoard !== state) {
+      firstMatchGuideBoard = state;
+      firstMatchMove = findFirstMatch(state);
+    }
+    const active = foreground() && !adPlayback && !adDialog?.element.open && !otherDialogOpen();
+    const handMotion = motion.matches ? 'reduced' : active ? 'animate' : 'paused';
+    return scene.showFirstMatchGuide(scene.moveAnimating ? null : firstMatchMove, now, handMotion);
   }
 
   function updateInteraction(now = performance.now()): void {
@@ -496,6 +533,7 @@ export async function mountGame(app: Application, {
           abandonment = presentation;
           gameOver = null;
           extraChance = null;
+          boardDebug?.applied(state, rescued, { kind: 'extra-chance' });
           state = rescued;
           gestures.reset();
           scene.showGameOverCue(null, motion.matches);
@@ -902,6 +940,7 @@ export async function mountGame(app: Application, {
   }
 
   function restart(): void {
+    stopFirstMatch();
     results?.close();
     results = null;
     gameOver = null;
@@ -911,6 +950,7 @@ export async function mountGame(app: Application, {
     scene.showResults(null);
     setResultsVisible(false);
     state = createRun();
+    boardDebug?.restart();
     boosters = new RunBoosters();
     adStatusUntil = 0;
     bestCombo = 0;
@@ -931,6 +971,7 @@ export async function mountGame(app: Application, {
       const color = stack.at(-1);
       return color === undefined || (selected !== undefined && selected !== index) ? [] : [{ stack: index, color }];
     });
+    boardDebug?.applied(state, next, kind === 'joker' ? { kind, stackIndex: selected! } : { kind });
     state = next;
     jokerArmed = false;
     gestures.reset();
@@ -947,11 +988,17 @@ export async function mountGame(app: Application, {
     // Commit once so interrupted playback can immediately draw the resolved board.
     state = move(before, from, to, undefined, dough => { inserts = dough; });
     if (state === before) return;
+    boardDebug?.applied(before, state, { kind: 'transfer', fromStackIndex: from, toStackIndex: to }, inserts);
+    if (firstMatchProgress && state.score > before.score) {
+      void firstMatchProgress.complete();
+      stopFirstMatch();
+    }
     bestCombo = Math.max(bestCombo, state.combo ?? 0);
     const started = performance.now();
     boosters.start();
-    const awarded = !state.gameOver && state.combo === 5
-      ? boosters.grantComboDrop(state.combo, canUseJokerBooster(state) ? 'joker' : 'sweep')
+    const dropLegality = !state.gameOver && state.combo === 5 ? boosterLegality() : null;
+    const awarded = dropLegality
+      ? boosters.grantComboDrop(5, { joker: dropLegality.joker, sweep: dropLegality.swept !== state })
       : undefined;
     syncBoosterClock(started);
     if (state.gameOver) {
@@ -1075,17 +1122,21 @@ export async function mountGame(app: Application, {
     advanceGameOver(now);
     syncControls(now);
     if (!timedWork() && !gestures.active && gestures.source === null) applyQuality();
+    const guideAnimating = renderFirstMatchGuide(now);
     app.render();
+    if (!painted && firstMatchProgress) firstMatchGuideAt = performance.now() + FIRST_MATCH_GUIDE_DELAY_MS;
     painted = true;
     const continuing = needsAnimation();
     if (!continuing) quality.frames.pause();
     queueDeadline(now);
     queueWarmup();
-    return continuing;
+    return continuing || guideAnimating;
   }
 
   function syncPlaybackSuspension(): void {
-    frames.setSuspended(document.hidden || pageHidden || hostPaused || adPlayback?.attempted === true || leaving);
+    const suspended = document.hidden || pageHidden || hostPaused || adPlayback?.attempted === true || leaving;
+    if (suspended && firstMatchProgress) scene.pauseFirstMatchGuide();
+    frames.setSuspended(suspended);
   }
 
   function suspend(): void {
@@ -1166,6 +1217,7 @@ export async function mountGame(app: Application, {
   window.addEventListener('pointercancel', cancel, options);
   window.addEventListener('blur', () => {
     focused = false;
+    if (firstMatchProgress) scene.pauseFirstMatchGuide();
     refreshAdPlayback();
     syncGameOverVisibility();
     settleInterruptedPlay();
@@ -1214,6 +1266,7 @@ export async function mountGame(app: Application, {
   const close = () => scene.root.destroy({ children: true });
   stage.once('destroyed', close);
   scene.root.once('destroyed', () => {
+    boardDebug?.dispose();
     abandon();
     results?.close();
     gameOver = null;

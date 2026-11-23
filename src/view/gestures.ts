@@ -25,7 +25,7 @@ interface Press {
   hover: Target;
   dragged: boolean;
   jokerTarget: boolean;
-  mouseStackPress: boolean;
+  dragTrigger: 'travel' | 'leave-stack' | 'another-stack';
   swipeDistanceSquared: number;
   destinationDistanceSquared: number;
   maxDistanceSquared: number;
@@ -86,9 +86,15 @@ export class StackGestures {
     const swipeDistance = pointerType === 'touch' ? 12 : 10;
     const tapAnchor = previousQueuedTap ?? this.selection;
     const destinationTap = pointerType === 'touch' && tapAnchor !== null && typeof target === 'number' && target !== tapAnchor;
+    let dragTrigger: Press['dragTrigger'] = 'travel';
+    if (typeof target === 'number') {
+      // Queued taps can still become the source when earlier moves are replayed.
+      if (!jokerTarget && (this.selection === null || previousQueuedTap !== undefined)) dragTrigger = 'another-stack';
+      else if (pointerType === 'mouse') dragTrigger = 'leave-stack';
+    }
     this.press = {
       id, origin: point, target, hover: target, dragged: false, jokerTarget,
-      mouseStackPress: pointerType === 'mouse' && typeof target === 'number',
+      dragTrigger,
       swipeDistanceSquared: swipeDistance ** 2,
       destinationDistanceSquared: (swipeDistance + (destinationTap ? DESTINATION_TAP_GRACE : 0)) ** 2,
       maxDistanceSquared: 0, neighbor: null, destinationGrace: destinationTap,
@@ -115,11 +121,10 @@ export class StackGestures {
         } else press.neighbor = target;
       }
       const threshold = press.destinationGrace ? press.destinationDistanceSquared : press.swipeDistanceSquared;
-      // A mouse can travel the width of a stack while clicking it. Only leaving
-      // that stack beyond ordinary pointer jitter can turn its press into a drag.
-      press.dragged = press.mouseStackPress
-        ? target !== press.target && distanceSquared >= threshold
-        : press.maxDistanceSquared >= threshold;
+      if (press.dragTrigger === 'travel') press.dragged = press.maxDistanceSquared >= threshold;
+      else if (target !== press.target && distanceSquared >= threshold) {
+        press.dragged = press.dragTrigger === 'leave-stack' || typeof target === 'number';
+      }
     }
     press.hover = this.resolveDrop(press, point, target);
     return wasDragged !== press.dragged || previous !== press.hover;
@@ -149,6 +154,8 @@ export class StackGestures {
     this.update(id, point, target);
     this.press = null;
     const release = press.hover;
+    if (release === null && press.dragTrigger === 'another-stack' &&
+        press.maxDistanceSquared >= press.swipeDistanceSquared) return null;
     if (release === 'outside' ||
         ((release === 'hint' || release === 'joker' || release === 'sweep') && press.target !== release)) return null;
 

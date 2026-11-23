@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RunBoosters } from './boosters';
+
+const bothUsable = { joker: true, sweep: true };
 
 describe('run boosters', () => {
   it('starts on the first move and counts foreground time toward the next offer', () => {
@@ -53,24 +55,26 @@ describe('run boosters', () => {
 
   it('uses a separate one-drop budget at combo five with a fallback for occupied slots', () => {
     const run = new RunBoosters();
+    const rng = vi.fn(() => 0);
     run.start();
     run.setActive(true, 0);
-    expect(run.grantComboDrop(4, 'joker')).toBeUndefined();
+    expect(run.grantComboDrop(4, bothUsable, rng)).toBeUndefined();
     expect(run.source('joker')).toBeUndefined();
     expect(run.beginClaim('joker', 45_000)).toBe(true);
     run.finishClaim(true);
-    expect(run.grantComboDrop(5, 'joker')).toBe('sweep');
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBe('sweep');
     expect(run.source('joker')).toBe('ad');
     expect(run.source('sweep')).toBe('free');
     expect(run.spend('sweep')).toBe(true);
     expect(run.spend('sweep')).toBe(false);
-    expect(run.grantComboDrop(5, 'sweep')).toBeUndefined();
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBeUndefined();
     expect(run.source('sweep')).toBeUndefined();
+    expect(rng).not.toHaveBeenCalled();
 
     const replay = new RunBoosters();
     expect(replay.source('joker')).toBeUndefined();
     expect(replay.progress(999_000)).toBe(0);
-    expect(replay.grantComboDrop(5, 'joker')).toBe('joker');
+    expect(replay.grantComboDrop(5, bothUsable, rng)).toBe('joker');
     expect(replay.source('joker')).toBe('free');
     expect(replay.hasOffersLeft).toBe(true);
   });
@@ -85,10 +89,57 @@ describe('run boosters', () => {
     expect(run.beginClaim('sweep', 120_000)).toBe(true);
     run.finishClaim(true);
 
-    expect(run.grantComboDrop(5, 'joker')).toBeUndefined();
+    const rng = vi.fn(() => 0);
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBeUndefined();
     expect(run.spend('joker')).toBe(true);
-    expect(run.grantComboDrop(6, 'joker')).toBeUndefined();
+    expect(run.grantComboDrop(6, bothUsable, rng)).toBeUndefined();
     expect(run.source('joker')).toBeUndefined();
-    expect(run.grantComboDrop(5, 'joker')).toBe('joker');
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBe('joker');
+    expect(rng).not.toHaveBeenCalled();
+  });
+
+  it.each([[0.499, 'joker'], [0.5, 'sweep']] as const)('splits the drop at 0.5 with one draw for %f', (roll, kind) => {
+    const rng = vi.fn(() => roll);
+    const run = new RunBoosters();
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBe(kind);
+    expect(run.source(kind)).toBe('free');
+    expect(rng).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { joker: true, sweep: false, kind: 'joker' },
+    { joker: false, sweep: true, kind: 'sweep' },
+    { joker: false, sweep: false, kind: 'sweep' },
+  ] as const)('chooses $kind with Joker usable=$joker and Sweep usable=$sweep without rolling', ({ joker, sweep, kind }) => {
+    const rng = vi.fn(() => 0.99);
+    expect(new RunBoosters().grantComboDrop(5, { joker, sweep }, rng)).toBe(kind);
+    expect(rng).not.toHaveBeenCalled();
+  });
+
+  it.each(['joker', 'sweep'] as const)('excludes a pending %s ad even when both boosters are usable', pending => {
+    const rng = vi.fn(() => 0.99);
+    const run = new RunBoosters();
+    run.start();
+    run.setActive(true, 0);
+    expect(run.beginClaim(pending, 45_000)).toBe(true);
+    const other = pending === 'joker' ? 'sweep' : 'joker';
+    expect(run.grantComboDrop(5, bothUsable, rng)).toBe(other);
+    expect(run.source(pending)).toBeUndefined();
+    run.finishClaim(true);
+    expect(run.source(pending)).toBe('ad');
+    expect(run.source(other)).toBe('free');
+    expect(rng).not.toHaveBeenCalled();
+  });
+
+  it('gives the remaining credit when the only usable booster is already held', () => {
+    const rng = vi.fn(() => 0);
+    const run = new RunBoosters();
+    run.start();
+    run.setActive(true, 0);
+    expect(run.beginClaim('sweep', 45_000)).toBe(true);
+    run.finishClaim(true);
+    expect(run.grantComboDrop(5, { joker: false, sweep: true }, rng)).toBe('joker');
+    expect(run.source('sweep')).toBe('ad');
+    expect(rng).not.toHaveBeenCalled();
   });
 });

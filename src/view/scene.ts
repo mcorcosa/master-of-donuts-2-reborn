@@ -1,6 +1,7 @@
 import { Assets, Container, DOMAdapter, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
 import { type DoughInsert, type GameState, JOKER } from '../game';
 import { BoosterControls, BoosterCue, type BoosterFooterView } from './boosters';
+import { FirstMatchHand, type FirstMatchHandMotion } from './firstMatchHand';
 import { FreeBoosterCelebration } from './freeBoosterCelebration';
 import type { BoosterButton, Point, StackGestures, Target } from './gestures';
 import { JokerArt } from './jokerArt';
@@ -165,6 +166,7 @@ export class GameScene {
   private readonly flight: Sprite;
   private readonly arrow = new SelectionArrow();
   private readonly hintArrow = new SelectionArrow();
+  private readonly firstMatchHand = new FirstMatchHand();
   private readonly hintButton = new Container({ visible: false });
   private readonly hintBounds = { x: 336.25 - HINT_WIDTH / 2, y: 0, width: HINT_WIDTH, height: HINT_HEIGHT };
   private readonly hintStatus: Text;
@@ -251,6 +253,7 @@ export class GameScene {
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
     this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
+      this.firstMatchHand.root,
       this.boosterCue.root, this.celebration.root, this.hud, this.matchEffects, this.freeBooster.root);
 
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
@@ -437,6 +440,27 @@ export class GameScene {
   clearHint(): void {
     this.hintArrow.hide();
     this.hintStatus.text = '';
+  }
+
+  showFirstMatchGuide(move: { from: number; to: number } | null, now: number, motion: FirstMatchHandMotion): boolean {
+    if (!move) {
+      this.hideFirstMatchGuide();
+      return false;
+    }
+
+    const offset = this.layout.donutHeight * 0.86;
+    const source = this.topPosition(move.from);
+    const destination = this.topPosition(move.to);
+    return this.firstMatchHand.show(move, { x: source.x, y: source.y - offset },
+      { x: destination.x, y: destination.y - offset }, now, motion);
+  }
+
+  pauseFirstMatchGuide(): void {
+    this.firstMatchHand.pause();
+  }
+
+  hideFirstMatchGuide(): void {
+    this.firstMatchHand.hide();
   }
 
   draw(state: GameState): void {

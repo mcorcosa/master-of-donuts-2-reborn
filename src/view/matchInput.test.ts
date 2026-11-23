@@ -10,8 +10,10 @@ import type { FriendScore, FriendsScores } from '../platform/friendsScores';
 import type { AdPlacement, AdRequestOptions, GameMonetization } from '../platform/monetization';
 import { browserScoreStorage, type CompletedResults, PERSONAL_SCORES_KEY, PersonalScores } from '../platform/personalScores';
 import type { BoosterFooterView } from './boosters';
+import type { FirstMatchProgress } from './firstMatch';
+import type { FirstMatchHandMotion } from './firstMatchHand';
 import { FREE_BOOSTER_FLIGHT_MS, FREE_BOOSTER_HOLD_MS, FREE_BOOSTER_LANDING_MS } from './freeBoosterCelebration';
-import { GAME_OVER_CUE_MS, GAME_OVER_HOLD_MS, GAME_OVER_RECORD_LIMIT_MS } from './gameOverPresentation';
+import { GAME_OVER_CUE_MS, GAME_OVER_LEAD_IN_MS, GAME_OVER_RECORD_LIMIT_MS, GAME_OVER_REVEAL_MS } from './gameOverPresentation';
 import type { BoosterButton, Point, StackGestures } from './gestures';
 import { mountGame } from './index';
 import { layoutStacks, stackHit, stackTarget } from './layout';
@@ -41,6 +43,9 @@ const scene = vi.hoisted(() => ({
   warmup: function* () {}, releasePreparedText: vi.fn(),
   showInteraction: vi.fn(), showJoker: vi.fn(), topPosition: vi.fn(),
   setHintAvailable: vi.fn(), showHint: vi.fn(), clearHint: vi.fn(),
+  showFirstMatchGuide: vi.fn((move: { from: number; to: number } | null, _now: number, motion: FirstMatchHandMotion) =>
+    move !== null && motion === 'animate'),
+  hideFirstMatchGuide: vi.fn(), pauseFirstMatchGuide: vi.fn(),
   setBoosterControls: vi.fn<(view: BoosterFooterView) => void>(), boosterCueDeadline: 0,
   startBoosterCue: vi.fn<(kind: BoosterButton, targets: readonly { stack: number; color: string }[], now: number, reduced: boolean) => void>(),
   showBoosterCue: vi.fn(), cancelBoosterCue: vi.fn(),
@@ -64,6 +69,13 @@ const initial: GameState = {
 const getFriendsScores = vi.fn<() => FriendsScores | null>();
 const settleResults = () => new Promise<void>(resolve => setImmediate(resolve));
 
+function finishGameOverReveal(tick: (time: number) => void, settledAt: number): void {
+  const cueAt = settledAt + GAME_OVER_LEAD_IN_MS;
+  tick(cueAt);
+  tick(cueAt + GAME_OVER_CUE_MS);
+  tick(settledAt + GAME_OVER_REVEAL_MS);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(createGame).mockReturnValue(initial);
@@ -80,6 +92,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
 
@@ -119,6 +132,7 @@ async function setup(
   reduced = false, search = '', devicePixelRatio = 1, scores?: Pick<PersonalScores, 'record'>,
   watchBoosterAd?: (isCurrent: () => boolean) => Promise<AdOutcome>,
   gameMonetization?: GameMonetization,
+  firstMatch?: FirstMatchProgress,
 ) {
   let now = 0;
   let refillEnds = 0;
@@ -241,7 +255,7 @@ async function setup(
     },
   } : undefined);
   await mountGame(app as unknown as Application, {
-    jokerPlaytest, personalScores, getFriendsScores, monetization, quality, onResultsVisibilityChange,
+    jokerPlaytest, firstMatch, personalScores, getFriendsScores, monetization, quality, onResultsVisibilityChange,
     onPause(callback) { pause = callback; return () => { pause = () => {}; }; },
   });
   const dialog = body.children[0];
@@ -284,11 +298,147 @@ async function setup(
     window.dispatchEvent(new Event('resize'));
     tick(now);
   };
-  return { window, document, renderer, render: app.render, resizeViewport, pointer, tap, wheel, match, tick,
+  return { window: window as typeof window & Pick<Window, 'rebornBoardSnapshot'>,
+    document, renderer, render: app.render, resizeViewport, pointer, tap, wheel, match, tick,
     motion, localStorage, sessionStorage, onResultsVisibilityChange, suspendFromHost: () => pause(),
     clickDialog, dialog, destroy, setOtherModalOpen,
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
+
+describe('board diagnostics', () => {
+  it('does not install the getter in the ordinary mode', async () => {
+    const { window } = await setup();
+    expect(window).not.toHaveProperty('rebornBoardSnapshot');
+  });
+
+  it('observes a terminal transfer before the overlay and preserves detached data across replay', async () => {
+    vi.stubEnv('MODE', 'board-debug');
+    const { window, match, tap, tick, destroy } = await setup(true);
+    const read = window.rebornBoardSnapshot!;
+    const opening = read();
+    expect(opening).toMatchObject({ current: { runId: 1, gameOver: false, lastAction: null }, lastGameOver: null });
+    vi.mocked(move).mockReturnValueOnce(initial);
+    match();
+    expect(read()).toEqual(opening);
+
+    const terminal = { ...initial, movesLeft: 6, gameOver: true, stacks: [['gold', 'blue'],
+      ['red', 'green', 'red', 'red', 'red', 'red'], ['yellow', 'blue']] };
+    const insertion = { stack: 0, depth: 0, color: 'gold' };
+    vi.mocked(move).mockImplementationOnce((_state, _from, _to, _rng, reportRefills) => {
+      reportRefills?.([insertion]);
+      return terminal;
+    });
+    match();
+    const captured = read();
+    const { runId, lastAction, ...after } = captured.current;
+    const { runId: _initialRun, lastAction: _initialAction, ...before } = opening.current;
+    expect(lastAction).toEqual({ kind: 'transfer', fromStackIndex: 0, toStackIndex: 1, refillInsertions: [insertion] });
+    expect(after).toMatchObject({ movesLeft: 6, gameOver: true, stacks: terminal.stacks.map((colorsBottomFirst, index) => ({ index, colorsBottomFirst })) });
+    expect(captured.lastGameOver).toEqual({ runId, before, after, action: lastAction });
+    expect(scene.showResults).not.toHaveBeenCalled();
+    expect(() => JSON.stringify(captured)).not.toThrow();
+
+    const editable = read();
+    editable.current.stacks[0].colorsBottomFirst.length = 0;
+    editable.current.lastAction!.refillInsertions[0].depth = 99;
+    editable.lastGameOver!.before.stacks.reverse();
+    editable.lastGameOver!.after.score = -1;
+    expect(read()).toEqual(captured);
+
+    tick(1000);
+    await settleResults();
+    finishGameOverReveal(tick, 1000);
+    expect(scene.showResults).toHaveBeenCalledOnce();
+    expect(read()).toEqual(captured);
+    tap(300);
+    expect(read()).toEqual({ current: { ...opening.current, runId: 2 }, lastGameOver: captured.lastGameOver });
+    destroy();
+    expect(window).not.toHaveProperty('rebornBoardSnapshot');
+  });
+});
+
+describe('first-match input', () => {
+  async function setupFirstMatch(reduced = true) {
+    const { createGame: deal } = await vi.importActual<typeof import('../game')>('../game');
+    vi.mocked(createGame).mockReturnValueOnce(deal(() => 0.25));
+    const complete = vi.fn(async () => {});
+    const game = await setup(reduced, '', 1, undefined, undefined, undefined, { complete });
+    return { ...game, complete };
+  }
+
+  it('renders the board first and keeps the guide through selection and resizing', async () => {
+    const game = await setupFirstMatch();
+    expect(game.render).toHaveBeenCalledOnce();
+    expect(scene.showFirstMatchGuide).not.toHaveBeenCalled();
+    game.tick(300);
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 0, to: 1 }, 300, 'reduced');
+    game.resizeViewport(320, 650);
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 0, to: 1 }, 300, 'reduced');
+    game.tap(50);
+    game.tick(316);
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 0, to: 1 }, 316, 'reduced');
+    expect(game.complete).not.toHaveBeenCalled();
+    game.tap(150);
+    game.tick(1000);
+    expect(game.complete).toHaveBeenCalledOnce();
+    expect(scene.hideFirstMatchGuide).toHaveBeenCalledOnce();
+    expect(scene.startMatch).toHaveBeenCalledOnce();
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(100);
+  });
+
+  it('updates the suggestion after a miss and accepts a different scoring transfer', async () => {
+    const game = await setupFirstMatch();
+    game.tick(300);
+    game.tap(150);
+    game.tap(50);
+    game.tick(500);
+    expect(game.complete).not.toHaveBeenCalled();
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 1, to: 0 }, 500, 'reduced');
+    game.pointer('pointerdown', 150, 1, 'touch', 1);
+    game.pointer('pointermove', 50, 1, 'touch', 1);
+    game.pointer('pointerup', 50, 1, 'touch');
+    game.tick(1500);
+    expect(game.complete).toHaveBeenCalledOnce();
+    expect(scene.hideFirstMatchGuide).toHaveBeenCalledOnce();
+    expect(scene.startMatch).toHaveBeenCalledOnce();
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(100);
+  });
+
+  it('counts a match made before the guide appears', async () => {
+    const game = await setupFirstMatch();
+    game.match();
+    game.tick(500);
+    expect(game.complete).toHaveBeenCalledOnce();
+    expect(scene.showFirstMatchGuide).not.toHaveBeenCalled();
+    expect(scene.hideFirstMatchGuide).toHaveBeenCalledOnce();
+    expect(scene.drawScore.mock.lastCall?.[0].score).toBe(100);
+  });
+
+  it('drives the hand only while visible and returns to idle after a match', async () => {
+    const game = await setupFirstMatch(false);
+    game.tick(300);
+    game.tick(316);
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 0, to: 1 }, 316, 'animate');
+
+    game.document.hidden = true;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    game.tick(1000);
+    expect(scene.pauseFirstMatchGuide).toHaveBeenCalledOnce();
+    expect(game.render).toHaveBeenCalledTimes(3);
+
+    game.document.hidden = false;
+    game.document.dispatchEvent(new Event('visibilitychange'));
+    game.tick(1016);
+    expect(scene.showFirstMatchGuide).toHaveBeenLastCalledWith({ from: 0, to: 1 }, 1016, 'animate');
+    game.match();
+    expect(scene.hideFirstMatchGuide).toHaveBeenCalledOnce();
+    game.tick(2000);
+    game.tick(3000);
+    const settledRenders = game.render.mock.calls.length;
+    game.tick(4000);
+    expect(game.render).toHaveBeenCalledTimes(settledRenders);
+  });
+});
 
 describe('game view monetization', () => {
   const full: GameState = {
@@ -299,7 +449,7 @@ describe('game view monetization', () => {
       ['red', 'blue', 'red', 'blue', 'red', 'blue'],
     ],
   };
-  const terminalAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
+  const terminalAt = 1000 + GAME_OVER_REVEAL_MS;
   const makeMonetization = (...placements: AdPlacement[]) => ({
     available: vi.fn((placement: AdPlacement) => placements.includes(placement)),
     request: vi.fn<GameMonetization['request']>().mockResolvedValue({ status: 'unavailable', attempted: false }),
@@ -311,8 +461,7 @@ describe('game view monetization', () => {
     game.match();
     game.tick(start + 1000);
     await settleResults();
-    game.tick(start + 1000 + GAME_OVER_HOLD_MS);
-    game.tick(start + terminalAt);
+    finishGameOverReveal(game.tick, start + 1000);
   };
 
   it('counts foreground play transitions between frames and pauses for a purchase modal', async () => {
@@ -409,6 +558,7 @@ describe('game view monetization', () => {
   });
 
   it('preserves booster inventory and best combo across a successful Extra Chance and records the final run once', async () => {
+    vi.stubEnv('MODE', 'board-debug');
     const monetization = makeMonetization('extra-chance');
     let settle!: (outcome: AdOutcome) => void;
     monetization.request.mockImplementation((_placement, ad) => {
@@ -423,18 +573,24 @@ describe('game view monetization', () => {
       return x === 300 ? 'restart' : x === 320 ? 'friends' : x === 340 ? 'submit' : null;
     });
     const game = await setup(true, '', 1, undefined, undefined, monetization);
+    vi.spyOn(Math, 'random').mockReturnValueOnce(0.25);
     vi.mocked(move).mockReturnValueOnce({ ...initial, combo: 5 });
     game.match();
     game.tick(1000);
     vi.mocked(move).mockReturnValueOnce(full);
     game.match();
+    const read = game.window.rebornBoardSnapshot!;
+    const terminalSnapshot = read();
     game.tick(2000);
     await settleResults();
-    game.tick(5999);
+    game.tick(2249);
     expect(game.dialog.open).toBe(false);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
-    game.tick(6000);
+    game.tick(2250);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
+    game.tick(2750);
+    expect(game.dialog.open).toBe(false);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     game.tick(6499);
     expect(game.dialog.open).toBe(false);
     game.tick(6500);
@@ -450,10 +606,13 @@ describe('game view monetization', () => {
     settle({ status: 'completed', attempted: true });
     await settleResults();
     expect(scene.draw.mock.lastCall?.[0]).toBe(full);
+    expect(read()).toEqual(terminalSnapshot);
     game.window.dispatchEvent(new Event('focus'));
     const revived = scene.draw.mock.lastCall?.[0];
     expect(revived).toMatchObject({ ...full, gameOver: false, stacks: expect.any(Array) });
     expect(revived?.stacks).not.toEqual(full.stacks);
+    expect(read()).toMatchObject({ current: { runId: terminalSnapshot.current.runId, gameOver: false,
+      lastAction: { kind: 'extra-chance', refillInsertions: [] } }, lastGameOver: terminalSnapshot.lastGameOver });
     expect(scene.setBoosterControls.mock.lastCall?.[0].joker.mode).toBe('free');
     expect(createGame).toHaveBeenCalledOnce();
     expect(game.localStorage.setItem).not.toHaveBeenCalled();
@@ -464,8 +623,7 @@ describe('game view monetization', () => {
     game.tap(50);
     game.tick(terminalAt + 2000);
     await settleResults();
-    game.tick(terminalAt + 2000 + GAME_OVER_HOLD_MS);
-    game.tick(terminalAt + 2000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    finishGameOverReveal(game.tick, terminalAt + 2000);
     expect(game.dialog.open).toBe(false);
     expect(monetization.runCompleted).toHaveBeenCalledOnce();
     expect(game.localStorage.setItem).toHaveBeenCalledOnce();
@@ -782,19 +940,22 @@ describe('game view match playback', () => {
   });
 
   it.each(['mouse', 'touch'])('claims and uses a Joker only on complete %s releases', async pointerType => {
+    vi.stubEnv('MODE', 'board-debug');
     const board = { ...initial, stacks: [['red', 'blue', 'green'], [], ['gold', 'gold', 'red'], []], combo: 3 };
     vi.mocked(createGame).mockReturnValueOnce(board);
     const watch = vi.fn(async (isCurrent: () => boolean): Promise<AdOutcome> => {
       expect(isCurrent()).toBe(true);
       return { status: 'completed', attempted: true };
     });
-    const { pointer, tap, tick, clickDialog } = await setup(false, '', 1, undefined, watch);
+    const { pointer, tap, tick, clickDialog, window } = await setup(false, '', 1, undefined, watch);
     const press = (x: number, id = 1) => pointer('pointerdown', x, id, pointerType, 1);
     const release = (x: number, id = 1) => pointer('pointerup', x, id, pointerType);
     const click = (x: number) => { press(x); release(x); };
     tap(50);
     tap(350);
     tick(45_000);
+    const read = window.rebornBoardSnapshot!;
+    const beforeClaim = read();
 
     press(397);
     expect(watch).not.toHaveBeenCalled();
@@ -826,11 +987,13 @@ describe('game view match playback', () => {
     press(50);
     release(50, 2);
     expect(scene.startBoosterCue).not.toHaveBeenCalled();
+    expect(read()).toEqual(beforeClaim);
     release(50);
     expect(scene.draw.mock.lastCall?.[0]).toMatchObject({
       ...claimed, stacks: [['red', JOKER], [], ['gold', 'gold', 'red'], ['green']],
     });
     expect(scene.startBoosterCue).toHaveBeenLastCalledWith('joker', [{ stack: 0, color: 'blue' }], 45_000, false);
+    expect(read().current.lastAction).toEqual({ kind: 'joker', stackIndex: 0, refillInsertions: [] });
     tick(45_230);
     click(397);
     expect(watch).toHaveBeenCalledOnce();
@@ -879,12 +1042,13 @@ describe('game view match playback', () => {
   });
 
   it('announces a free Sweep at 5× after score credit and wakes once to end the reduced-motion hold', async () => {
+    vi.stubEnv('MODE', 'board-debug');
     const board = {
       ...initial, score: 0, nextLevelScore: 5000, combo: 4,
       stacks: [['red'], ['red', 'red'], [JOKER, 'blue']],
     };
     vi.mocked(createGame).mockReturnValueOnce(board);
-    const { match, tap, tick, render } = await setup(true);
+    const { match, tap, tick, render, window } = await setup(true);
     expect(footer()).toMatchObject({ sweep: { mode: 'locked' } });
     match();
     tick(229);
@@ -910,6 +1074,7 @@ describe('game view match playback', () => {
       ...before, stacks: before.stacks.map(stack => stack.slice(0, -1)),
     });
     expect(scene.startBoosterCue).toHaveBeenLastCalledWith('sweep', expect.any(Array), 2000, true);
+    expect(window.rebornBoardSnapshot!().current.lastAction).toEqual({ kind: 'sweep', refillInsertions: [] });
     expect(footer().sweep).toEqual({ mode: 'locked', usable: false });
     tick(2016);
     const cuePainted = render.mock.calls.length;
@@ -921,7 +1086,36 @@ describe('game view match playback', () => {
     expect(render).toHaveBeenCalledTimes(cuePainted + 1);
   });
 
+  it.each([[0.25, 'joker'], [0.75, 'sweep']] as const)(
+    'announces and displays the actual free booster after the same fifth match with roll %f', async (roll, kind) => {
+      const flavors = ['red', 'blue', 'green', 'gold', 'yellow', 'purple', 'choco', 'gray'];
+      const stacks = flavors.map((_, index) => Array.from({ length: index === 1 || index === 6 ? 9 : 10 },
+        (_, depth) => flavors[(index + depth) % flavors.length]));
+      stacks[5][9] = 'red';
+      stacks[6][7] = stacks[6][8] = 'red';
+      const board = { ...initial, stacks, combo: 4, capacity: 10, level: 16, score: 34_000, nextLevelScore: 38_300 };
+      vi.mocked(createGame).mockReturnValueOnce(board);
+      const { tap, tick } = await setup();
+      const refillRng = vi.fn(() => 0);
+      const expected = vi.mocked(move).getMockImplementation()!(board, 5, 6, refillRng);
+      const rng = vi.spyOn(Math, 'random').mockReturnValue(roll);
+      for (const _ of refillRng.mock.calls) rng.mockReturnValueOnce(0);
+      tap(550);
+      tap(650);
+      tick(540);
+      tick(850);
+
+      expect(expected).toMatchObject({ score: 34_350, combo: 5 });
+      expect(scene.draw.mock.lastCall?.[0]).toEqual(expected);
+      expect(rng).toHaveBeenCalledTimes(refillRng.mock.calls.length + 1);
+      expect(footer()[kind]).toEqual({ mode: 'free', usable: true });
+      expect(footer()[kind === 'joker' ? 'sweep' : 'joker'].mode).toBe('locked');
+      expect(scene.startFreeBoosterCelebration).toHaveBeenCalledExactlyOnceWith(kind, 850, false);
+    },
+  );
+
   it('announces a free Joker after the same match’s level celebration and keeps stack input live', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, combo: 4 });
     const game = await setup();
     game.match();
@@ -967,6 +1161,7 @@ describe('game view match playback', () => {
   });
 
   it.each(['blur', 'resize'])('cancels an uncredited Joker reveal on %s and retains the award', async reason => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, combo: 4, nextLevelScore: 5000 });
     const game = await setup();
     game.match();
@@ -981,6 +1176,7 @@ describe('game view match playback', () => {
   });
 
   it('dismisses the free-booster reveal when the awarded booster is used during its hold', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     vi.mocked(createGame).mockReturnValueOnce({ ...initial, combo: 4, nextLevelScore: 5000 });
     const { match, tap, tick } = await setup();
     match();
@@ -1013,6 +1209,7 @@ describe('game view match playback', () => {
   });
 
   it('drops incomplete booster presses across resize and resume without using inventory', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     const board = { ...initial, combo: 4, nextLevelScore: 5000 };
     vi.mocked(createGame).mockReturnValueOnce(board);
     const { document, match, pointer, resizeViewport, tap, tick } = await setup(true);
@@ -1047,6 +1244,7 @@ describe('game view match playback', () => {
   });
 
   it('resets the free drop and ad timer at Play Again', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     const board = { ...initial, combo: 4, nextLevelScore: 5000 };
     const watch = vi.fn<() => Promise<AdOutcome>>();
     vi.mocked(createGame).mockReturnValueOnce(board);
@@ -1062,8 +1260,7 @@ describe('game view match playback', () => {
     expect(footer().visible).toBe(false);
     await settleResults();
     tick(16_000);
-    tick(16_000 + GAME_OVER_HOLD_MS);
-    tick(16_000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    finishGameOverReveal(tick, 16_000);
     tap(300);
     expect(scene.draw.mock.lastCall?.[0]).toBe(initial);
     expect(footer()).toMatchObject({ visible: true, progress: 0, joker: { mode: 'charging' }, sweep: { mode: 'charging' } });
@@ -1108,8 +1305,7 @@ describe('game view match playback', () => {
     await settleResults();
     expect(localStorage.setItem).not.toHaveBeenCalled();
     expect(sessionStorage.setItem).toHaveBeenCalledTimes(1);
-    tick(1370 + GAME_OVER_HOLD_MS);
-    tick(1370 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    finishGameOverReveal(tick, 1370);
     expect(getFriendsScores).not.toHaveBeenCalled();
     tap(300);
     expect(scene.draw.mock.lastCall?.[0]).toEqual(opening);
@@ -1707,8 +1903,9 @@ describe('game view match playback', () => {
       JSON.stringify([{ score: 1555, level: 2, bestCombo: 0 }]));
     expect(scene.showResults).not.toHaveBeenCalled();
     expect(scene.drawScore.mock.lastCall?.[0].score).toBe(1555);
-    const cueAt = 230 + 4000;
-    const popupAt = cueAt + 500;
+    const cueAt = 230 + 250;
+    const cueEnds = cueAt + 500;
+    const popupAt = 230 + 4500;
     const priorRenders = render.mock.calls.length;
     tick(cueAt - 1);
     tap(50);
@@ -1720,14 +1917,24 @@ describe('game view match playback', () => {
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     tick(cueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
-    tick(popupAt - 1);
+    tick(cueEnds - 1);
     tap(300);
     expect(createGame).toHaveBeenCalledTimes(1);
     expect(scene.showResults).not.toHaveBeenCalled();
     expect(render).toHaveBeenCalledTimes(priorRenders + 1);
+    tick(cueEnds);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
+    tick(popupAt - 1);
+    tap(50);
+    tap(150);
+    tap(300);
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(createGame).toHaveBeenCalledTimes(1);
+    expect(scene.showResults).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(priorRenders + 2);
     tick(popupAt);
     expect(scene.showResults.mock.lastCall?.[0]).toMatchObject({ tab: 'personal', friends: null });
-    expect(render).toHaveBeenCalledTimes(priorRenders + 2);
+    expect(render).toHaveBeenCalledTimes(priorRenders + 3);
     expect(localStorage.setItem).toHaveBeenCalledTimes(1);
     tap(300);
     expect(createGame).toHaveBeenCalledTimes(2);
@@ -1755,24 +1962,24 @@ describe('game view match playback', () => {
     tick(3100);
     await settleResults();
 
-    tick(3500);
+    tick(3150);
     window.dispatchEvent(new Event('blur'));
-    tick(7500);
+    tick(7150);
     resizeViewport(375, 700);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, false);
     window.dispatchEvent(new Event('focus'));
-    tick(7900);
+    tick(7200);
     document.hidden = true;
     document.dispatchEvent(new Event('visibilitychange'));
-    tick(11900);
+    tick(11200);
     document.hidden = false;
     document.dispatchEvent(new Event('visibilitychange'));
-    tick(12300);
+    tick(11250);
     suspendFromHost();
-    tick(16300);
+    tick(15250);
     expect(scene.showResults).not.toHaveBeenCalled();
     window.dispatchEvent(new Event('focus'));
-    const cueAt = 16300 + 4000 - 3 * 400;
+    const cueAt = 15250 + 250 - 3 * 50;
     tick(cueAt - 1);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, false);
     tick(cueAt);
@@ -1794,16 +2001,30 @@ describe('game view match playback', () => {
     window.dispatchEvent(new Event('pageshow'));
     tick(resumeCueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, true);
-    const popupAt = resumeCueAt + 300;
+    const cueEnds = resumeCueAt + 300;
+    tick(cueEnds - 1);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0.4, true);
+    expect(scene.showResults).not.toHaveBeenCalled();
+    tick(cueEnds);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
+    tick(cueEnds + 1000);
+    document.hidden = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    const resumeInspectionAt = cueEnds + 5000;
+    tick(resumeInspectionAt);
+    expect(scene.showResults).not.toHaveBeenCalled();
+    document.hidden = false;
+    document.dispatchEvent(new Event('visibilitychange'));
+    const popupAt = resumeInspectionAt + 2750;
     tick(popupAt - 1);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).not.toHaveBeenCalled();
     tick(popupAt);
-    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).toHaveBeenCalledTimes(1);
     expect(move).toHaveBeenCalledTimes(1);
   });
 
-  it('opens results after the cue if score recording rejects', async () => {
+  it('opens results after the reveal if score recording rejects', async () => {
     const record = vi.fn(async () => { throw new Error('Storage is unavailable'); });
     const { match, tick } = await setup(true, '', 1, { record });
     vi.mocked(move).mockReturnValueOnce({ ...initial, gameOver: true });
@@ -1811,15 +2032,13 @@ describe('game view match playback', () => {
     tick(16);
     await settleResults();
     expect(record).toHaveBeenCalledExactlyOnceWith({ score: 1390, level: 2, bestCombo: 0 });
-    tick(16 + GAME_OVER_HOLD_MS);
-    expect(scene.showResults).not.toHaveBeenCalled();
-    tick(16 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    finishGameOverReveal(tick, 16);
     expect(scene.showResults.mock.lastCall?.[0]?.personal).toEqual({
       run: { score: 1390, level: 2, bestCombo: 0 }, rows: [], isPersonalBest: false,
     });
   });
 
-  it('waits for the hold and cue after a stalled recording expires and ignores its late completion after replay', async () => {
+  it('finishes the inspection after a stalled recording expires and ignores its late completion after replay', async () => {
     let complete!: (results: CompletedResults) => void;
     const record = vi.fn(() => new Promise<CompletedResults>(resolve => { complete = resolve; }));
     const { match, tap, tick, render } = await setup(true, '', 1, { record });
@@ -1829,15 +2048,17 @@ describe('game view match playback', () => {
     await settleResults();
     expect(record).toHaveBeenCalledOnce();
     expect(GAME_OVER_RECORD_LIMIT_MS).toBe(3500);
+    const cueAt = 16 + 250;
+    const popupAt = 16 + 4500;
+    tick(cueAt);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
+    tick(cueAt + 500);
+    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     const priorRenders = render.mock.calls.length;
     tick(GAME_OVER_RECORD_LIMIT_MS);
     expect(render).toHaveBeenCalledTimes(priorRenders);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).not.toHaveBeenCalled();
-    const cueAt = 16 + 4000;
-    const popupAt = cueAt + 500;
-    tick(cueAt);
-    expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
     tick(popupAt - 1);
     expect(scene.showResults).not.toHaveBeenCalled();
     tick(popupAt);
@@ -1883,8 +2104,7 @@ describe('game view match playback', () => {
     expect(scene.showResults).not.toHaveBeenCalled();
     tick(path.length * 1000);
     await settleResults();
-    tick(path.length * 1000 + GAME_OVER_HOLD_MS);
-    tick(path.length * 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS);
+    finishGameOverReveal(tick, path.length * 1000);
     const view = scene.showResults.mock.lastCall?.[0];
     expect(view?.personal).toEqual({ run: { score: 210, level: 1, bestCombo: 2 }, isPersonalBest: true,
       rows: [{ rank: 1, score: 210, current: true }] });
@@ -1916,8 +2136,9 @@ describe('game view match playback', () => {
     expect(getFriendsScores).not.toHaveBeenCalled();
     tick(1000);
     await settleResults();
-    const popupAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
-    tick(1000 + GAME_OVER_HOLD_MS);
+    const popupAt = 1000 + GAME_OVER_REVEAL_MS;
+    tick(1000 + GAME_OVER_LEAD_IN_MS);
+    tick(1000 + GAME_OVER_LEAD_IN_MS + GAME_OVER_CUE_MS);
     expect(onResultsVisibilityChange).not.toHaveBeenCalled();
     tick(popupAt);
     expect(onResultsVisibilityChange).toHaveBeenCalledExactlyOnceWith(true);
@@ -1959,9 +2180,8 @@ describe('game view match playback', () => {
     match();
     tick(1000);
     await settleResults();
-    tick(1000 + GAME_OVER_HOLD_MS);
-    const popupAt = 1000 + GAME_OVER_HOLD_MS + GAME_OVER_CUE_MS;
-    tick(popupAt);
+    const popupAt = 1000 + GAME_OVER_REVEAL_MS;
+    finishGameOverReveal(tick, 1000);
     expect(scene.showResults.mock.lastCall?.[0]?.tab).toBe('personal');
 
     const rendered = render.mock.calls.length;

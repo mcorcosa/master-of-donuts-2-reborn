@@ -59,12 +59,21 @@ export class RunBoosters {
     this.elapsed = 0;
   }
 
-  grantComboDrop(combo: number, preferred: BoosterKind): BoosterKind | undefined {
+  grantComboDrop(combo: number, usable: Readonly<Record<BoosterKind, boolean>>, rng = Math.random): BoosterKind | undefined {
     if (combo !== 5 || this.freeGranted) return;
-    const other = preferred === 'joker' ? 'sweep' : 'joker';
-    const kind = ([preferred, other] as const)
-      .find(candidate => !this.source(candidate) && this.pending !== candidate);
-    if (!kind) return;
+    const jokerAvailable = !this.source('joker') && this.pending !== 'joker';
+    const sweepAvailable = !this.source('sweep') && this.pending !== 'sweep';
+    if (!jokerAvailable && !sweepAvailable) return;
+
+    let kind: BoosterKind;
+    if (jokerAvailable && usable.joker && sweepAvailable && usable.sweep) {
+      kind = rng() < 0.5 ? 'joker' : 'sweep';
+    } else if (jokerAvailable && (usable.joker || !sweepAvailable)) {
+      kind = 'joker';
+    } else {
+      // Keep the earned credit even when the player has to wait for a legal board.
+      kind = 'sweep';
+    }
     this.inventory[kind] = 'free';
     this.freeGranted = true;
     return kind;
