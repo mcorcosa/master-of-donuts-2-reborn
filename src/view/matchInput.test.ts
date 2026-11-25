@@ -609,7 +609,7 @@ describe('game view monetization', () => {
     expect(read()).toEqual(terminalSnapshot);
     game.window.dispatchEvent(new Event('focus'));
     const revived = scene.draw.mock.lastCall?.[0];
-    expect(revived).toMatchObject({ ...full, gameOver: false, stacks: expect.any(Array) });
+    expect(revived).toMatchObject({ ...full, gameOver: false, doughMeter: 21, stacks: expect.any(Array) });
     expect(revived?.stacks).not.toEqual(full.stacks);
     expect(read()).toMatchObject({ current: { runId: terminalSnapshot.current.runId, gameOver: false,
       lastAction: { kind: 'extra-chance', refillInsertions: [] } }, lastGameOver: terminalSnapshot.lastGameOver });
@@ -662,10 +662,10 @@ describe('game view monetization', () => {
     },
   );
 
-  it('suppresses Extra Chance for a board with no bounded rescue', async () => {
+  it('suppresses Extra Chance for an undersized board with no possible rescue', async () => {
     const monetization = makeMonetization('extra-chance');
     const game = await setup(true, '', 1, undefined, undefined, monetization);
-    await openTerminal(game, { ...full, stacks: [['blue'], ['red'], ['green']] });
+    await openTerminal(game, { ...full, stacks: [['blue']] });
     expect(game.dialog.open).toBe(false);
     expect(monetization.request).not.toHaveBeenCalled();
     expect(game.localStorage.setItem).toHaveBeenCalledOnce();
@@ -941,7 +941,7 @@ describe('game view match playback', () => {
 
   it.each(['mouse', 'touch'])('claims and uses a Joker only on complete %s releases', async pointerType => {
     vi.stubEnv('MODE', 'board-debug');
-    const board = { ...initial, stacks: [['red', 'blue', 'green'], [], ['gold', 'gold', 'red'], []], combo: 3 };
+    const board = { ...initial, stacks: [['red', 'blue', 'green'], [], ['gold', 'gold', 'red'], ['gold']], combo: 3 };
     vi.mocked(createGame).mockReturnValueOnce(board);
     const watch = vi.fn(async (isCurrent: () => boolean): Promise<AdOutcome> => {
       expect(isCurrent()).toBe(true);
@@ -970,7 +970,7 @@ describe('game view match playback', () => {
     expect(clickDialog('Watch ad')).toBe(false);
     await settleResults();
     const claimed = scene.draw.mock.lastCall![0];
-    expect(claimed.stacks).toEqual([['red', 'blue'], [], ['gold', 'gold', 'red'], ['green']]);
+    expect(claimed.stacks).toEqual([['red', 'blue'], [], ['gold', 'gold', 'red'], ['gold', 'green']]);
     expect(footer()).toMatchObject({ progress: 0, joker: { mode: 'held', usable: true }, armed: false });
     click(397);
     expect(footer().armed).toBe(true);
@@ -990,7 +990,7 @@ describe('game view match playback', () => {
     expect(read()).toEqual(beforeClaim);
     release(50);
     expect(scene.draw.mock.lastCall?.[0]).toMatchObject({
-      ...claimed, stacks: [['red', JOKER], [], ['gold', 'gold', 'red'], ['green']],
+      ...claimed, stacks: [['red', JOKER], [], ['gold', 'gold', 'red'], ['gold', 'green']],
     });
     expect(scene.startBoosterCue).toHaveBeenLastCalledWith('joker', [{ stack: 0, color: 'blue' }], 45_000, false);
     expect(read().current.lastAction).toEqual({ kind: 'joker', stackIndex: 0, refillInsertions: [] });
@@ -1044,7 +1044,7 @@ describe('game view match playback', () => {
   it('announces a free Sweep at 5× after score credit and wakes once to end the reduced-motion hold', async () => {
     vi.stubEnv('MODE', 'board-debug');
     const board = {
-      ...initial, score: 0, nextLevelScore: 5000, combo: 4,
+      ...initial, score: 0, nextLevelScore: 5000, combo: 4, doughMeter: 12,
       stacks: [['red'], ['red', 'red'], [JOKER, 'blue']],
     };
     vi.mocked(createGame).mockReturnValueOnce(board);
@@ -1066,17 +1066,21 @@ describe('game view match playback', () => {
     expect(render).toHaveBeenCalledTimes(revealPainted + 1);
     tick(2000);
     const before = scene.draw.mock.lastCall![0];
-    expect(before.combo).toBe(5);
+    expect(before).toMatchObject({ combo: 5, doughMeter: 11 });
     expect(footer().sweep).toEqual({ mode: 'free', usable: true });
     expect(scene.startBoosterCue).not.toHaveBeenCalled();
     tap(396);
+    const [flavor] = before.stacks[0];
     expect(scene.draw.mock.lastCall?.[0]).toMatchObject({
-      ...before, stacks: before.stacks.map(stack => stack.slice(0, -1)),
+      ...before, stacks: [[flavor, flavor], [], [JOKER]],
     });
     expect(scene.startBoosterCue).toHaveBeenLastCalledWith('sweep', expect.any(Array), 2000, true);
-    expect(window.rebornBoardSnapshot!().current.lastAction).toEqual({ kind: 'sweep', refillInsertions: [] });
+    expect(window.rebornBoardSnapshot!().current.lastAction).toEqual({ kind: 'sweep', refillInsertions: [
+      { stack: 0, depth: 1, color: flavor },
+    ] });
     expect(footer().sweep).toEqual({ mode: 'locked', usable: false });
     tick(2016);
+    tick(2150);
     const cuePainted = render.mock.calls.length;
     tick(2229);
     expect(render).toHaveBeenCalledTimes(cuePainted);
@@ -2074,37 +2078,40 @@ describe('game view match playback', () => {
     expect(record).toHaveBeenCalledTimes(1);
   });
 
-  it('records the best combo from earlier matches after an actual terminal refill, once across resize and replay', async () => {
+  it('records the best combo after the 28th miss, once across resize and replay', async () => {
     const game = await vi.importActual<typeof import('../game')>('../game');
-    let seed = 9;
-    let draws = 0;
-    // Keep the opening and five pressure refills on the fixture's seven-miss cadence.
-    const intervalDraws = new Set([16, 18, 20, 24, 26, 28]);
-    const rng = () => {
-      if (intervalDraws.has(++draws)) return 0.5;
-      seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
-      return seed / 2 ** 32;
+    const opening: GameState = {
+      ...initial, score: 0, level: 1, nextLevelScore: 500, doughMeter: 25,
+      stacks: [['red', 'red', 'gold'], ['gold', 'gold'], ['red', 'blue', 'red']],
     };
-    vi.mocked(createGame).mockReturnValueOnce(game.createGame(rng));
-    vi.mocked(move).mockImplementation((state, from, to, _rng, onDough) => game.move(state, from, to, rng, onDough));
+    vi.mocked(createGame).mockReturnValueOnce(opening);
+    vi.mocked(move).mockImplementation((state, from, to, _rng, onDough) => game.move(state, from, to, () => 0, onDough));
     const { tap, tick, renderer, window, localStorage } = await setup(true);
-    const path = [
-      [0, 2], [2, 1], [2, 1], [2, 0], [1, 0], [0, 1], [2, 0], [2, 0], [0, 2], [1, 0], [2, 1], [1, 2],
-      [2, 1], [0, 2], [1, 2], [0, 2], [2, 1], [0, 1], [1, 0], [1, 0], [0, 2], [1, 0], [2, 1], [1, 2],
-      [1, 2], [2, 1], [0, 1], [1, 0], [0, 1], [1, 0], [0, 1], [0, 2], [1, 0], [1, 0], [0, 1], [2, 0], [2, 1],
-    ];
-    path.forEach(([from, to], index) => {
+    const transfer = (from: number, to: number) => {
       tap(from * 100 + 50);
       tap(to * 100 + 50);
+    };
+    transfer(0, 1);
+    tick(1000);
+    transfer(2, 0);
+    tick(2000);
+    expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ score: 210, combo: 2, doughMeter: 25 });
+
+    for (let count = 26; count <= 28; count++) {
+      const board = scene.draw.mock.lastCall![0];
+      const miss = board.stacks.flatMap((source, from) => board.stacks.flatMap((target, to) =>
+        game.canMove(board, from, to) && !game.resolveMatch(target, source.at(-1)!) ? [{ from, to }] : []))[0];
+      expect(miss).toBeDefined();
+      transfer(miss.from, miss.to);
+      expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ doughMeter: count, gameOver: count === 28 });
       expect(localStorage.setItem).not.toHaveBeenCalled();
-      if (index < path.length - 1) tick((index + 1) * 1000);
-    });
-    expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ score: 210, level: 1, combo: 0, gameOver: true });
-    expect(scene.moveAnimating).toBe(true);
+      if (count < 28) tick((count - 23) * 1000);
+    }
+    expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ score: 210, level: 1, combo: 0, endReason: 'dough-meter' });
     expect(scene.showResults).not.toHaveBeenCalled();
-    tick(path.length * 1000);
+    tick(5000);
     await settleResults();
-    finishGameOverReveal(tick, path.length * 1000);
+    finishGameOverReveal(tick, 5000);
     const view = scene.showResults.mock.lastCall?.[0];
     expect(view?.personal).toEqual({ run: { score: 210, level: 1, bestCombo: 2 }, isPersonalBest: true,
       rows: [{ rank: 1, score: 210, current: true }] });

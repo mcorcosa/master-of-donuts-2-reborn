@@ -7,7 +7,9 @@ export interface GameState {
   capacity: number;
   nextLevelScore: number;
   movesLeft: number;
+  doughMeter?: number;
   gameOver: boolean;
+  endReason?: 'dough-meter';
 }
 
 export interface DoughInsert {
@@ -17,8 +19,14 @@ export interface DoughInsert {
   color: string;
 }
 
+type DoughSlot = { stack: number; depth: number };
+/** Two unchanged donuts exchange their bottom-first seats on the resolved board. */
+export type DoughSwap = readonly [DoughSlot, DoughSlot];
+
 const COLORS = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green'];
 export const JOKER = 'joker';
+export const DOUGH_METER_LIMIT = 28;
+export const LEVEL_DOUGH_RELIEF = 7;
 const FIRST_JOKER_LEVEL = 7;
 const JOKER_REFILL_INTERVAL = 45;
 const RANKS = [
@@ -102,18 +110,16 @@ function shortestStacks(stacks: string[][], capacity: number): string[][] {
   return stacks.filter((stack) => stack.length < capacity).sort((a, b) => a.length - b.length);
 }
 
-function pressureRefillCount(level: number): number {
-  return Math.floor(level / 5) + 1;
+function pressureRefillCount(level: number, space: number): number {
+  // Preserve one destination for ordinary play, even when the full batch is due.
+  return Math.min(Math.floor(level / 5) + 1, Math.max(0, space - 1));
 }
 
-function canScoreWithOneVacancy(
-  stacks: readonly (readonly string[] | string)[], capacity: number, movesLeft: number, joker = JOKER,
-): boolean {
+function canScoreWithOneVacancy(stacks: readonly string[], capacity: number, joker: string): boolean {
   const movableTops = new Set(stacks.filter((stack) => stack.length === capacity).map((stack) => stack[capacity - 1]));
   // Until the first score, transfers can only move the vacancy and the donuts
-  // above each stack's fixed prefix. Opening another prefix costs one miss.
+  // above each stack's fixed prefix.
   return stacks.some((stack) => {
-    if (movesLeft === 1 && stack.length === capacity) return false;
     const prefixTop = stack.slice(capacity - 3, capacity - 1);
     for (const incoming of movableTops) {
       if (resolveMatch(prefixTop, incoming, joker) !== null) return true;
@@ -142,7 +148,7 @@ function refill(state: RunState, inserts: DoughInsert[], colors: string[], rng: 
     if (totalSpace(stacks, capacity) <= 2) return;
   }
 
-  const count = match === undefined ? Math.min(pressureRefillCount(state.level), totalSpace(stacks, capacity)) : 1;
+  const count = match === undefined ? pressureRefillCount(state.level, totalSpace(stacks, capacity)) : 1;
   for (let i = 0; i < count; i++) {
     const [stack] = shortestStacks(stacks, capacity);
     const pair = topPair(stack);
@@ -154,8 +160,6 @@ function refill(state: RunState, inserts: DoughInsert[], colors: string[], rng: 
       if (eligible === JOKER_REFILL_INTERVAL) color = JOKER;
     }
     insertDough(state, inserts, stack, 0, color);
-    // Keep the historical early stop only if the last slot is structurally dead.
-    if (i + 1 < count && totalSpace(stacks, capacity) === 1 && !canScoreWithOneVacancy(stacks, capacity, 2)) break;
   }
 }
 
@@ -169,83 +173,72 @@ function hasScoringMove(stacks: readonly (readonly string[] | string)[], capacit
   });
 }
 
+function scoringBudget(state: GameState): number {
+  return DOUGH_METER_LIMIT - (state.doughMeter ?? 0);
+}
+
 export function canRequestSetupHint(state: GameState): boolean {
-  if (state.gameOver || state.movesLeft < 2) return false;
+  if (state.gameOver || state.movesLeft < 2 || scoringBudget(state) < 2) return false;
   const space = totalSpace(state.stacks, state.capacity);
   return space >= 1 && space <= 3 && !hasScoringMove(state.stacks, state.capacity);
 }
 
-export function findSetupHint(state: GameState): { from: number; to: number } | null {
-  if (!canRequestSetupHint(state)) return null;
-  const proof = proveBoardScore(state);
-  return proof.kind === 'verified-route' ? proof.first : null;
+export function findSetupHint(state: GameState): SetupTransfer | null {
+  return canRequestSetupHint(state) ? findScoringRoute(state, scoringBudget(state)) : null;
 }
 
 type SetupTransfer = { from: number; to: number };
-type ScoreProof = { kind: 'verified-route'; first: SetupTransfer } | { kind: 'proven-dead' } | { kind: 'inconclusive' };
-type ProofPosition = { stacks: string[]; beforePressure: number; guaranteedMoves: number; first?: SetupTransfer };
+type RoutePosition = { stacks: string[]; untilRefill: number; afterRefill: boolean; remaining: number; first?: SetupTransfer };
 
-function couldScoreWithUnknown(triple: string, joker: string): boolean {
-  const known = [...triple].filter(piece => piece !== UNKNOWN_DOUGH);
-  const natural = known.filter(piece => piece !== joker);
-  return known.length - natural.length <= 1 && natural.every(piece => piece === natural[0]);
-}
-
-function proveBoardScore(state: GameState, space = totalSpace(state.stacks, state.capacity)): ScoreProof {
+function findScoringRoute(state: GameState, remaining = Infinity): SetupTransfer | null {
   const { capacity, movesLeft, level } = state;
-  const refillCount = pressureRefillCount(level);
-  if (space === 0) return { kind: 'proven-dead' };
-  // Restrict the dense proof to at most two vacancies after the first refill.
-  if (space > refillCount + 2) return { kind: 'inconclusive' };
+  const space = totalSpace(state.stacks, capacity);
+  if (space === 0 || remaining <= 0) return null;
 
   const colors = [...new Set(state.stacks.flat())];
   const tokens = new Map(colors.map((color, i) => [color, String.fromCharCode(i + 1)]));
   const initial = state.stacks.map(stack => stack.map(color => tokens.get(color)).join(''));
   const joker = tokens.get(JOKER) ?? JOKER;
-  const queue: ProofPosition[] = [];
+  if (space === 1 && !canScoreWithOneVacancy(initial, capacity, joker)) return null;
+  const refillCount = pressureRefillCount(level, space);
+  const queue: RoutePosition[] = [];
   const seen = new Set<string>();
-  let capped = false;
-  let inconclusive = false;
 
-  function enqueue(position: ProofPosition): void {
-    const { stacks, beforePressure, guaranteedMoves } = position;
-    // A surviving refill depends on index order and the exact countdown. After
-    // it, later inserts can be omitted for loss proofs: they take space and
-    // can be skipped as move sources, but cannot supply a scoring ingredient.
-    const key = beforePressure > 0 && refillCount < space ? `${beforePressure}:${stacks.join('\0')}` :
-      `${guaranteedMoves > 0 ? 'safe' : 'open'}:${stacks.slice().sort().join('\0')}`;
+  function enqueue(position: RoutePosition): void {
+    if (queue.length >= SCORING_SEARCH_LIMIT) return;
+    const { stacks, untilRefill, afterRefill, remaining } = position;
+    // Preserve stack indices while pressure can still choose a target. Otherwise
+    // equivalent arrangements have the same future, regardless of stack order.
+    const timed = !afterRefill && untilRefill < remaining;
+    const key = timed ? untilRefill + ':' + stacks.join('\0') :
+      Number(afterRefill) + ':' + stacks.slice().sort().join('\0');
     if (seen.has(key)) return;
-    if (queue.length === SCORING_SEARCH_LIMIT) { capped = true; return; }
     seen.add(key);
     queue.push(position);
   }
-  enqueue({ stacks: initial, beforePressure: movesLeft, guaranteedMoves: movesLeft });
+  enqueue({ stacks: initial, untilRefill: refillCount ? movesLeft : Infinity, afterRefill: false, remaining });
 
-  for (let i = 0; i < queue.length; i++) {
-    const { stacks, beforePressure, guaranteedMoves, first } = queue[i];
-    if (guaranteedMoves === 0 && (inconclusive || capped)) continue;
+  for (const { stacks, untilRefill, afterRefill, remaining, first } of queue) {
     const open = stacks.flatMap((stack, index) => stack.length < capacity ? [index] : []);
     for (let from = 0; from < stacks.length; from++) {
       const incoming = stacks[from].at(-1);
       if (incoming === undefined) continue;
       for (const to of open) {
         if (from === to) continue;
-        const triple = stacks[to].slice(-2) + incoming;
+        const target = stacks[to];
+        const triple = target.slice(-2) + incoming;
         const candidate = first ?? { from, to };
-        const hasUnknown = triple.includes(UNKNOWN_DOUGH);
-        if (!hasUnknown && resolveMatch(stacks[to], incoming, joker)) {
-          if (guaranteedMoves > 0) return { kind: 'verified-route', first: candidate };
-          inconclusive = true;
-          continue;
+        // If a setup transfer scores early with fresh dough, it already meets
+        // the goal. The final scoring triple itself must use known donuts.
+        if (triple.length === 3 && !triple.includes(UNKNOWN_DOUGH) && resolveMatch(target, incoming, joker)) {
+          return candidate;
         }
-        // A batch that fills the board can only stop early on a dead one-slot board.
-        if (capped || (beforePressure === 1 && refillCount >= space)) continue;
+        if (remaining <= 1 || queue.length >= SCORING_SEARCH_LIMIT) continue;
 
         const after = stacks.slice();
         after[to] += incoming;
         after[from] = stacks[from].slice(0, -1);
-        let witness = Math.max(0, guaranteedMoves - 1);
-        if (beforePressure === 1) {
+        if (untilRefill === 1) {
           for (let insert = 0; insert < refillCount; insert++) {
             let shortest = 0;
             for (let stack = 1; stack < after.length; stack++) {
@@ -253,23 +246,132 @@ function proveBoardScore(state: GameState, space = totalSpace(state.stacks, stat
             }
             after[shortest] = UNKNOWN_DOUGH + after[shortest];
           }
-          // A witness must score no later than the earliest possible next refill.
-          witness = MIN_PRESSURE_INTERVAL;
-        } else if (witness > 0 && hasUnknown && triple.length === 3 && couldScoreWithUnknown(triple, joker)) {
-          // A real roll could score instead of making this setup transfer.
-          witness = 0;
+          // The upcoming roll can be as short as six misses. A route may cross
+          // this refill, then must score before another one could trigger.
+          const nextBudget = space - refillCount === 1 ? remaining - 1 : Math.min(remaining - 1, MIN_PRESSURE_INTERVAL);
+          enqueue({ stacks: after, untilRefill: Infinity, afterRefill: true, remaining: nextBudget, first: candidate });
+        } else {
+          enqueue({ stacks: after, untilRefill: untilRefill - 1, afterRefill, remaining: remaining - 1, first: candidate });
         }
-        enqueue({ stacks: after, beforePressure: Math.max(0, beforePressure - 1), guaranteedMoves: witness, first: candidate });
       }
     }
   }
-  return { kind: inconclusive || capped ? 'inconclusive' : 'proven-dead' };
+  return null;
+}
+interface BoardRepair {
+  swaps: readonly DoughSwap[];
+  inserts: readonly DoughInsert[];
 }
 
-function isGameOver(state: GameState): boolean {
-  const space = totalSpace(state.stacks, state.capacity);
-  return space <= pressureRefillCount(state.level) + 2 && !hasScoringMove(state.stacks, state.capacity) &&
-    proveBoardScore(state, space).kind === 'proven-dead';
+// Presentation reads the repair from the exact board that committed it.
+const boardRepairs = new WeakMap<GameState, BoardRepair>();
+
+export function getBoardRepair(state: GameState): BoardRepair | undefined {
+  return boardRepairs.get(state);
+}
+
+function ensureScoringRoute(state: GameState, refills?: DoughInsert[], landingStack?: number,
+  settledStackCount = state.stacks.length): boolean {
+  const { stacks, capacity } = state;
+  if (hasScoringMove(stacks, capacity) || findScoringRoute(state)) return true;
+
+  const inserts = refills ?? [];
+  function findInsert(stack: number, depth: number): DoughInsert | undefined {
+    for (let index = inserts.length - 1; index >= 0; index--) {
+      const insert = inserts[index];
+      if (insert.stack !== stack) continue;
+      if (insert.depth === depth) return insert;
+      if (insert.depth < depth) depth--;
+    }
+  }
+
+  const colorAt = ({ stack, depth }: DoughSlot): string | undefined => stacks[stack][depth];
+  const isLanding = ({ stack, depth }: DoughSlot) => stack === landingStack && depth === stacks[stack].length - 1;
+  const fresh = stacks.map((pile, stack) => pile.map((_, depth) => findInsert(stack, depth)));
+  const donors = new Map<string, DoughSlot[]>();
+  for (const [stack, pile] of stacks.entries()) {
+    for (let depth = pile.length - 1; depth >= 0; depth--) {
+      const seat = { stack, depth };
+      const color = pile[depth];
+      if (color === JOKER || stack >= settledStackCount || fresh[stack][depth] || isLanding(seat)) continue;
+      const available = donors.get(color) ?? [];
+      available.push(seat);
+      donors.set(color, available);
+    }
+  }
+  for (const available of donors.values()) {
+    available.sort((a, b) => (stacks[a.stack].length - a.depth) - (stacks[b.stack].length - b.depth));
+  }
+
+  let best: { swaps: DoughSwap[]; freshColors: DoughSlot[]; additions: DoughSlot[]; color: string; cost: number } | undefined;
+  for (const [to, target] of stacks.entries()) {
+    for (let pairAdd = Math.max(0, 2 - target.length); pairAdd <= 2 && target.length + pairAdd < capacity; pairAdd++) {
+      // If this stack received the player's transfer, keep that donut on top
+      // through its landing animation. Any missing ingredient goes below it.
+      if (to === landingStack && target.length >= 2 && pairAdd) break;
+      const top = target.length - 1 + (to === landingStack ? 0 : pairAdd);
+      const pair = [{ stack: to, depth: top - 1 }, { stack: to, depth: top }];
+      for (const [from, source] of stacks.entries()) {
+        if (from === to) continue;
+        for (let donorAdd = Number(source.length === 0); donorAdd <= 1 && source.length + donorAdd <= capacity; donorAdd++) {
+          if (from === landingStack && donorAdd) break;
+          const additions = [
+            ...Array.from({ length: pairAdd }, (_, i) => ({ stack: to, depth: to === landingStack ? 0 : target.length + i })),
+            ...Array.from({ length: donorAdd }, () => ({ stack: from, depth: source.length })),
+          ];
+          const slots = [...pair, { stack: from, depth: source.length + donorAdd - 1 }];
+          const contents = slots.map(colorAt);
+          if (contents.filter(color => color === JOKER).length > 1) continue;
+          const colors = new Set([...contents, ...donors.keys()].filter(color => color && color !== JOKER));
+          if (colors.size === 0) colors.add(COLORS[0]);
+          for (const color of colors) {
+            if (!color) continue;
+            let cost = additions.length * 32;
+            const swaps: DoughSwap[] = [];
+            const freshColors: DoughSlot[] = [];
+            let possible = true;
+            for (const [index, slot] of slots.entries()) {
+              const current = contents[index];
+              if (current === undefined || current === JOKER || current === color) continue;
+              if (isLanding(slot)) { possible = false; break; }
+              if (slot.stack >= settledStackCount || fresh[slot.stack][slot.depth]) {
+                cost++;
+                freshColors.push(slot);
+                continue;
+              }
+              const donor = donors.get(color)?.find(candidate =>
+                !slots.some(seat => seat.stack === candidate.stack && seat.depth === candidate.depth) &&
+                !swaps.some(([, used]) => used === candidate));
+              if (!donor) { possible = false; break; }
+              swaps.push([slot, donor]);
+              cost += 8 + (stacks[donor.stack].length - donor.depth) / 16;
+            }
+            if (possible && (!best || cost < best.cost)) best = { swaps, freshColors, additions, color, cost };
+          }
+        }
+      }
+    }
+  }
+  if (!best) return false;
+
+  const { swaps, freshColors, additions, color } = best;
+  for (const { stack, depth } of freshColors) {
+    const insert = fresh[stack][depth];
+    if (insert) insert.color = color;
+    stacks[stack][depth] = color;
+  }
+  for (const [a, b] of swaps) {
+    const original = stacks[a.stack][a.depth];
+    stacks[a.stack][a.depth] = stacks[b.stack][b.depth];
+    stacks[b.stack][b.depth] = original;
+  }
+  for (const { stack, depth } of additions) insertDough(state, inserts, stacks[stack], depth, color);
+  if (swaps.length || (!refills && inserts.length)) {
+    const below = additions.filter(({ stack, depth }) => stack === landingStack && depth === 0).length;
+    const resolved = (seat: DoughSlot) => seat.stack === landingStack ? { ...seat, depth: seat.depth + below } : seat;
+    boardRepairs.set(state, { swaps: swaps.map(([a, b]) => [resolved(a), resolved(b)]), inserts: refills ? [] : inserts });
+  }
+  return true;
 }
 
 function hasQuickScore<T>(stacks: T[][], capacity: number, movesLeft: number, canScore: () => boolean): boolean {
@@ -322,7 +424,8 @@ function completesScoringMove(stacks: RefillPiece[][], capacity: number, colors:
 }
 
 function findBottomRefill(state: GameState, trial: DoughInsert[], colors: string[], match: string): DoughInsert[] | null {
-  const { capacity, movesLeft } = state;
+  const { capacity } = state;
+  const { movesLeft } = state;
   const stacks: RefillPiece[][] = state.stacks.map(stack => stack.slice());
   const dough: FreshDough[] = trial.map(({ color }) => ({ color: color === JOKER ? match : color }));
   const placements = trial.map(({ stack }) => stack);
@@ -371,7 +474,8 @@ function refillWithContinuation(
   const trial: RunState = { ...state, stacks: cleared.map((stack) => stack.slice()) };
   const trialInserts: DoughInsert[] = [];
   refill(trial, trialInserts, colors, rng, match, jokerTriple);
-  if (hasQuickScore(trial.stacks, trial.capacity, trial.movesLeft, () => hasScoringMove(trial.stacks, trial.capacity))) {
+  if (trialInserts.some(insert => insert.color === JOKER) ||
+    hasQuickScore(trial.stacks, trial.capacity, trial.movesLeft, () => hasScoringMove(trial.stacks, trial.capacity))) {
     state.stacks = trial.stacks;
     if (trial[jokerRefillsKey] !== undefined) state[jokerRefillsKey] = trial[jokerRefillsKey];
     inserts.push(...trialInserts);
@@ -493,10 +597,12 @@ export function createGame(rng: () => number = Math.random): GameState {
     capacity: STARTING_CAPACITY,
     nextLevelScore: SCORE_TARGETS[0],
     movesLeft: rollPressureInterval(rng),
+    doughMeter: 0,
     gameOver: false,
     [paletteKey]: palette,
     [upgradePlanKey]: [],
   };
+  ensureScoringRoute(state);
   return state;
 }
 
@@ -520,6 +626,7 @@ export function useJokerBooster(state: GameState, stack: number): GameState {
   const next = { ...state, stacks: state.stacks.map(pile => pile.slice()) };
   const selected = next.stacks[stack];
   selected[selected.length - 1] = JOKER;
+  ensureScoringRoute(next, undefined, stack);
   return next;
 }
 
@@ -527,7 +634,7 @@ export function previewStackSweep(state: GameState): GameState | null {
   if (state.gameOver) return null;
   const next = { ...state, stacks: state.stacks.map(stack => stack.slice(0, -1)) };
   const hasTransfer = next.stacks.some((_, from) => next.stacks.some((_, to) => canMove(next, from, to)));
-  return hasTransfer && !isGameOver(next) ? next : null;
+  return hasTransfer && ensureScoringRoute(next) ? next : null;
 }
 
 export function useStackSweep(state: GameState): GameState {
@@ -536,26 +643,24 @@ export function useStackSweep(state: GameState): GameState {
 
 export function previewExtraChance(state: GameState): GameState | null {
   if (!state.gameOver) return null;
-  const { stacks, capacity, movesLeft } = state;
-  const test = (candidate: string[][]): GameState | null => {
-    const next = { ...state, stacks: candidate, gameOver: false };
-    return hasQuickScore(candidate, capacity, movesLeft, () => hasScoringMove(candidate, capacity)) &&
-      !isGameOver(next) ? next : null;
+  const { endReason, ...run } = state;
+  const next = {
+    ...run, stacks: state.stacks.map(stack => stack.slice()), gameOver: false,
+    doughMeter: DOUGH_METER_LIMIT - LEVEL_DOUGH_RELIEF,
   };
-
-  // Try opening a single stack first. A broader rescue removes at most two
-  // exposed layers and leaves any active Joker intact. Preflight spends no RNG.
-  const peel = (stack: string[]): string[] => stack.at(-1) === JOKER ? stack.slice() : stack.slice(0, -1);
-  const once = stacks.map(peel);
-  const twice = once.map(peel);
-  for (const [before, after] of [[stacks, once], [once, twice]]) {
-    for (const [index, exposed] of after.entries()) {
-      if (exposed.length === before[index].length) continue;
-      const next = test(stacks.map((pile, i) => (i === index ? exposed : pile).slice()));
-      if (next) return next;
-    }
+  if (totalSpace(next.stacks, next.capacity) === 0) {
+    // Full boards can also come from older fixtures. Open one vacancy, taking
+    // a natural donut and preferring a peel that needs no further board edit.
+    const candidates = next.stacks.flatMap((stack, index) => stack.at(-1) === JOKER ? [] : [index]);
+    const first = candidates[0];
+    if (first === undefined) return null;
+    const toOpen = candidates.find(index => {
+      const stacks = next.stacks.map((stack, i) => i === index ? stack.slice(0, -1) : stack);
+      return hasScoringMove(stacks, next.capacity) || findScoringRoute({ ...next, stacks });
+    });
+    next.stacks[toOpen ?? first].pop();
   }
-  return test(once) ?? test(twice);
+  return ensureScoringRoute(next) ? next : null;
 }
 
 export function move(
@@ -564,7 +669,9 @@ export function move(
 ): GameState {
   if (!canMove(state, from, to)) return state;
 
-  const next: RunState = { ...state, stacks: state.stacks.map((stack) => stack.slice()) };
+  const next: RunState & { doughMeter: number } = {
+    ...state, doughMeter: state.doughMeter ?? 0, stacks: state.stacks.map(stack => stack.slice()),
+  };
   const source = next.stacks[from];
   const target = next.stacks[to];
   const color = source.pop()!;
@@ -572,9 +679,17 @@ export function move(
   target.push(color);
   if (!matched) {
     next.combo = 0;
+    next.doughMeter++;
+    if (next.doughMeter === DOUGH_METER_LIMIT) {
+      next.gameOver = true;
+      next.endReason = 'dough-meter';
+      return next;
+    }
     next.movesLeft--;
     if (next.movesLeft > 0) {
-      next.gameOver = isGameOver(next);
+      const repairs: DoughInsert[] = [];
+      ensureScoringRoute(next, repairs, to);
+      if (repairs.length) onDough?.(repairs);
       return next;
     }
   }
@@ -592,14 +707,17 @@ export function move(
     const adjustedAward = baseAward * (10 + state.level - 1) / 10;
     next.combo = priorCombo + 1;
     next.score += adjustedAward + Math.floor(adjustedAward * Math.min(priorCombo, 5) / 10);
+    const leveledUp = next.score >= next.nextLevelScore;
+    const relief = Number(next.combo >= 5) + (leveledUp ? LEVEL_DOUGH_RELIEF : 0);
+    next.doughMeter = Math.max(0, next.doughMeter - relief);
     if (runLength === 3 && matched.jokerIndex === undefined) refill(next, inserts, colors, rng, match, true);
     else refillWithContinuation(next, inserts, colors, rng, match, from, to, runLength);
-    if (next.score >= next.nextLevelScore) advanceLevel(next, colors, rng);
+    if (leveledUp) advanceLevel(next, colors, rng);
   } else {
     refill(next, inserts, colors, rng);
     next.movesLeft = rollPressureInterval(rng);
   }
-  next.gameOver = isGameOver(next);
+  ensureScoringRoute(next, inserts, matched ? undefined : to, state.stacks.length);
   onDough?.(inserts);
   return next;
 }

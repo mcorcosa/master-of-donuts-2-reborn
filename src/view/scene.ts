@@ -1,5 +1,5 @@
 import { Assets, Container, DOMAdapter, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
-import { type DoughInsert, type GameState, JOKER } from '../game';
+import { DOUGH_METER_LIMIT, type DoughInsert, type DoughSwap, type GameState, getBoardRepair, JOKER } from '../game';
 import { BoosterControls, BoosterCue, type BoosterFooterView } from './boosters';
 import { FirstMatchHand, type FirstMatchHandMotion } from './firstMatchHand';
 import { FreeBoosterCelebration } from './freeBoosterCelebration';
@@ -30,6 +30,8 @@ const FOOTER_STATUS_X = 63;
 const HINT_WIDTH = 90;
 const HINT_HEIGHT = 36;
 const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
+const DOUGH_REPAIR_MS = 320;
+const REDUCED_DOUGH_REPAIR_MS = 240;
 const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
@@ -62,6 +64,7 @@ interface MovePresentation {
   refills: ReturnType<typeof refillPlan>;
   refillDelay: number;
   transfer?: Transfer & { landing: Point };
+  swaps: readonly DoughSwap[];
 }
 
 interface StackView {
@@ -184,6 +187,13 @@ export class GameScene {
   private readonly matchEffects = new Container();
   private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar: ScoreBar;
+  private readonly doughFill = new Graphics();
+  private readonly doughRepairCue = new Graphics({ visible: false, eventMode: 'none', label: 'dough-repair-cue' });
+  private readonly doughValue: Text;
+  private readonly doughWarning: Text;
+  private doughMeter = -1;
+  private boardSwaps: readonly DoughSwap[] = [];
+  private endReason: GameState['endReason'];
   private readonly status: Text;
   private readonly results: ResultsPanel;
   private readonly preparedText = new Map<string, () => void>();
@@ -252,13 +262,18 @@ export class GameScene {
     this.flight = sprite(this.content, Texture.EMPTY);
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
-    this.content.addChild(this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
+    this.content.addChild(this.doughRepairCue, this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
       this.firstMatchHand.root,
       this.boosterCue.root, this.celebration.root, this.hud, this.matchEffects, this.freeBooster.root);
 
     const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
     logo.anchor.set(0.5);
     logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
+    const meter = this.hud.addChild(new Container({ x: 277, y: 10, label: 'dough-meter' }));
+    meter.addChild(new Graphics().roundRect(0, 0, 115, 50, 10).fill(0xffebcf)
+      .roundRect(9, 24, 97, 6, 3).fill(0xdeb1a7), this.doughFill);
+    this.doughValue = label(meter, '', 15, 57.5, 14);
+    this.doughWarning = label(meter, '', 11, 57.5, 39, '#8e243b');
     this.hud.addChild(this.scoreBar.root);
     this.status = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
     this.hintStatus = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
@@ -356,7 +371,7 @@ export class GameScene {
     if (view) {
       this.setHintAvailable(false);
       this.clearHint();
-      this.results.show(view, this.fit.height);
+      this.results.show(view, this.fit.height, this.endReason);
     }
   }
 
@@ -474,6 +489,23 @@ export class GameScene {
     this.stacks = state.stacks.map((colors, index) => this.createStack(colors, this.layout.slots[index], this.layout));
     this.updateVacancies();
     this.gameOver = state.gameOver;
+    this.drawDoughMeter(state);
+    this.boardSwaps = getBoardRepair(state)?.swaps ?? [];
+  }
+
+  private drawDoughMeter({ doughMeter = 0, endReason }: GameState): void {
+    this.endReason = endReason;
+    if (doughMeter === this.doughMeter) return;
+    this.doughMeter = doughMeter;
+    this.doughValue.text = `Dough ${doughMeter}/${DOUGH_METER_LIMIT}`;
+    this.doughWarning.text = doughMeter === DOUGH_METER_LIMIT ? 'Dough meter full' :
+      doughMeter === DOUGH_METER_LIMIT - 1 ? 'Next miss ends run' : '';
+    const width = 97 * doughMeter / DOUGH_METER_LIMIT;
+    this.doughFill.clear();
+    if (width > 0) {
+      this.doughFill.roundRect(9, 24, width, 6, Math.min(3, width / 2))
+        .fill(doughMeter >= DOUGH_METER_LIMIT - 1 ? 0xa52640 : 0xb34861);
+    }
   }
 
   private createDonut(group: Container, color: string): Container {
@@ -544,6 +576,7 @@ export class GameScene {
       let survivor = 0;
       view.pieces = state.stacks[index].map((color, depth) => {
         const piece = motions?.[depth].entry === undefined ? remaining[survivor++] : this.createDonut(view.group, color);
+        (piece.children[1] as Sprite).texture = this.texture(color);
         return view.group.addChild(piece);
       });
       view.group.addChild(view.refillCue);
@@ -564,7 +597,9 @@ export class GameScene {
       this.stacks.push(added);
     }
     this.gameOver = state.gameOver;
-    if (inserts.length) this.playMove(refills, now, reduced);
+    this.drawDoughMeter(state);
+    this.boardSwaps = getBoardRepair(state)?.swaps ?? [];
+    if (inserts.length || this.boardSwaps.length) this.playMove(refills, now, reduced);
     else this.showMove(now);
     if (reduced) {
       this.updateVacancies();
@@ -763,7 +798,7 @@ export class GameScene {
   }
 
   startMove(inserts: readonly DoughInsert[], started: number, reduced: boolean, transfer?: Transfer): void {
-    if (!inserts.length && (!transfer || reduced)) return;
+    if (!inserts.length && !this.boardSwaps.length && (!transfer || reduced)) return;
     const refills = refillPlan(this.stacks.map(stack => stack.pieces.length), inserts);
     this.playMove(refills, started, reduced, transfer);
   }
@@ -771,7 +806,9 @@ export class GameScene {
   private playMove(refills: MovePresentation['refills'], started: number, reduced: boolean, transfer?: Transfer): void {
     const transferDelay = reduced ? REDUCED_TRANSFER_REFILL_DELAY_MS : FLIGHT_MS + LAND_MS;
     const refillDelay = transfer ? transferDelay : 0;
-    this.movePresentation = { started, reduced, refills, refillDelay };
+    const swaps = this.boardSwaps;
+    this.boardSwaps = [];
+    this.movePresentation = { started, reduced, refills, refillDelay, swaps };
     if (transfer && !reduced) {
       const { slot, pieces } = this.stacks[transfer.to];
       const depth = refills.stacks.get(transfer.to)?.at(-1)?.depth ?? pieces.length - 1;
@@ -781,6 +818,32 @@ export class GameScene {
       this.flight.height = this.layout.donutHeight;
     }
     this.showMove(started);
+  }
+
+  private showDoughRepairs(move: MovePresentation, age: number, duration: number): void {
+    const progress = move.reduced ? 1 : unit(age / (duration * 0.78));
+    const marks = this.doughRepairCue;
+    marks.clear();
+    const side = this.layout.donutWidth * 0.5;
+    for (const [a, b] of move.swaps) {
+      const first = this.stacks[a.stack].pieces[a.depth];
+      const second = this.stacks[b.stack].pieces[b.depth];
+      const firstPosition = flightPosition(second, first, progress, 18);
+      const secondPosition = flightPosition(first, second, progress, -12);
+      first.pivot.set(first.x - firstPosition.x, first.y - firstPosition.y);
+      second.pivot.set(second.x - secondPosition.x, second.y - secondPosition.y);
+      if (age >= duration) continue;
+      for (const { x, y } of [firstPosition, secondPosition]) {
+        const center = y - this.layout.donutHeight * 0.24;
+        marks.moveTo(x - side + 2, center - 5).lineTo(x - side - 2, center).lineTo(x - side + 2, center + 5)
+          .moveTo(x + side - 2, center - 5).lineTo(x + side + 2, center).lineTo(x + side - 2, center + 5);
+      }
+    }
+    marks.visible = age < duration;
+    if (!marks.visible) return;
+    marks.stroke({ color: 0x702334, width: 4.5, cap: 'round', join: 'round' });
+    marks.stroke({ color: 0xffe6a9, width: 2.3, cap: 'round', join: 'round' });
+    marks.alpha = move.reduced ? 1 : 1 - unit((age / duration - 0.65) / 0.35);
   }
 
   showMove(now: number): void {
@@ -794,7 +857,8 @@ export class GameScene {
     const { donutHeight, step } = this.layout;
     const age = now - started;
     const refillAge = age - refillDelay;
-    if (refillAge >= refillDuration(refills.duration, reduced)) {
+    const repairDuration = move.swaps.length ? (reduced ? REDUCED_DOUGH_REPAIR_MS : DOUGH_REPAIR_MS) : 0;
+    if (refillAge >= refillDuration(refills.duration, reduced) && age >= repairDuration) {
       this.finishMove();
       return;
     }
@@ -818,6 +882,7 @@ export class GameScene {
         }
       });
     }
+    if (repairDuration && (age < repairDuration || this.doughRepairCue.visible)) this.showDoughRepairs(move, age, repairDuration);
     if (!transfer) {
       this.updateVacancies();
       return;
@@ -841,6 +906,10 @@ export class GameScene {
   finishMove(): void {
     const move = this.movePresentation;
     if (!move) return;
+    for (const swap of move.swaps) {
+      for (const { stack, depth } of swap) this.stacks[stack].pieces[depth].pivot.set(0);
+    }
+    this.doughRepairCue.visible = false;
     for (const index of move.refills.stacks.keys()) {
       const { slot, pieces, refillCue } = this.stacks[index];
       refillCue.visible = false;

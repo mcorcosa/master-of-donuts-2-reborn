@@ -3,7 +3,7 @@ import type { Application } from 'pixi.js';
 import { GameSound } from '../audio/GameSound';
 import {
   canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
-  JOKER, move, previewExtraChance, useJokerBooster, useStackSweep,
+  getBoardRepair, JOKER, LEVEL_DOUGH_RELIEF, move, previewExtraChance, useJokerBooster, useStackSweep,
 } from '../game';
 import { RunBoosters } from '../game/boosters';
 import type { BrowserQuality } from '../performance/browserQuality';
@@ -108,7 +108,8 @@ export async function mountGame(app: Application, {
   const adDialog = monetization ? new AdDialog(document) : null;
   const createRun = jokerPlaytest ? (): GameState => ({
     stacks: [[JOKER], ['red', 'blue'], ['red', 'blue']],
-    score: 0, combo: 0, level: 1, rank: 'Dough Enthusiast', capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
+    score: 0, combo: 0, level: 1, rank: 'Dough Enthusiast', capacity: 5, nextLevelScore: 500, movesLeft: 7,
+    doughMeter: 0, gameOver: false,
   }) : createGame;
   const events = new AbortController();
   const options = { signal: events.signal };
@@ -515,7 +516,7 @@ export async function mountGame(app: Application, {
     const score = resultNumber.format(presentation.run.score);
     adDialog.show({
       title,
-      description: `Score ${score}. Watch an ad to open space on the board and keep playing this run.`,
+      description: `Dough meter full. Score ${score}. Watch an ad to clear ${LEVEL_DOUGH_RELIEF} dough and keep playing.`,
       primary: { label: 'Watch ad', activate: event => {
         if (event.isTrusted && hostPaused) wake();
         if (!foreground() || otherDialogOpen() || adPlayback || gameOver !== presentation) return;
@@ -539,6 +540,8 @@ export async function mountGame(app: Application, {
           scene.showGameOverCue(null, motion.matches);
           setResultsVisible(false);
           draw();
+          const repair = getBoardRepair(state);
+          if (repair) scene.startMove(repair.inserts, performance.now(), motion.matches);
         }, { title, description: 'Opening ad…' });
       } },
       secondary: { label: 'Skip · See results', activate: () => declineExtraChance(presentation) },
@@ -979,6 +982,8 @@ export async function mountGame(app: Application, {
     clearHint();
     scene.startBoosterCue(kind, targets, performance.now(), motion.matches);
     draw();
+    const repair = getBoardRepair(state);
+    if (repair) scene.startMove(repair.inserts, performance.now(), motion.matches);
     syncControls();
   }
 

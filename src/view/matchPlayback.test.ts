@@ -1,6 +1,6 @@
 import { Bounds, DOMAdapter, Sprite, Text, Texture, TextureSource } from 'pixi.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type DoughInsert, type GameState, JOKER, move } from '../game';
+import { type DoughInsert, type GameState, getBoardRepair, JOKER, move } from '../game';
 import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, VIEW_WIDTH } from './layout';
 import { LevelCelebration } from './levelCelebration';
@@ -40,6 +40,57 @@ function makeScene(): GameScene {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('dough meter presentation', () => {
+  it.each([false, true])('marks an exchange of intact donuts with reduced motion %s', reduced => {
+    const before: GameState = {
+      stacks: [['gold', 'blue', 'red'], ['green', 'blue', 'gold', 'gold', 'red'], ['red', 'green', 'red', 'blue', 'blue']],
+      capacity: 5, level: 2, score: 500, rank: 'Pastry Pupil', nextLevelScore: 1500, movesLeft: 2,
+      doughMeter: 26, gameOver: false,
+    };
+    const after = move(before, 1, 0, () => 0);
+    const [swap] = getBoardRepair(after)!.swaps;
+    expect(swap).toHaveLength(2);
+
+    const scene = makeScene();
+    const red = new Texture({ source: Texture.WHITE.source });
+    scene['art'].set('red', red);
+    scene.draw(before);
+    const start = scene.topPosition(1);
+    scene.draw(after);
+    const [first, second] = swap.map(({ stack, depth }) => scene['stacks'][stack].pieces[depth]);
+    const expectFlavors = () => {
+      for (const [index, piece] of [first, second].entries()) {
+        const { stack, depth } = swap[index];
+        expect((piece.children[1] as Sprite).texture).toBe(scene['art'].get(after.stacks[stack][depth]));
+      }
+    };
+    expect(scene['doughValue'].text).toBe('Dough 27/28');
+    expect(scene['doughWarning'].text).toBe('Next miss ends run');
+    scene.startMove([], 0, reduced, { to: 0, start, color: 'red' });
+    expect(scene['doughRepairCue'].visible).toBe(true);
+    expect(first.pivot.x).toBeCloseTo(reduced ? 0 : first.x - second.x);
+    expect(first.pivot.y).toBeCloseTo(reduced ? 0 : first.y - second.y);
+    expectFlavors();
+    scene.showMove(70);
+    expectFlavors();
+    expect(scene['doughRepairCue'].visible).toBe(true);
+    if (reduced) expect(scene['doughRepairCue'].alpha).toBe(1);
+    scene.showMove(500);
+    expect(scene['doughRepairCue'].visible).toBe(false);
+    expect(first.pivot.x).toBe(0);
+    expect(second.pivot.y).toBe(0);
+    expectFlavors();
+    scene.draw({ ...after, doughMeter: 28, gameOver: true, endReason: 'dough-meter' });
+    expect(scene['doughValue'].text).toBe('Dough 28/28');
+    expect(scene['doughWarning'].text).toBe('Dough meter full');
+    scene.draw({ ...before, doughMeter: 0 });
+    expect(scene['doughValue'].text).toBe('Dough 0/28');
+    expect(scene['doughWarning'].text).toBe('');
+    scene.root.destroy({ children: true });
+    red.destroy();
+  });
+});
 
 describe('match presentation', () => {
   it.each([

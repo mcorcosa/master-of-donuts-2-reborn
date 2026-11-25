@@ -1,11 +1,11 @@
-import type { DoughInsert, GameState } from '../game';
+import { type DoughInsert, type DoughSwap, type GameState, getBoardRepair } from '../game';
 
 type BoardAction =
   | { kind: 'transfer'; fromStackIndex: number; toStackIndex: number }
   | { kind: 'joker'; stackIndex: number }
   | { kind: 'sweep' | 'extra-chance' };
 
-type AppliedAction = BoardAction & { refillInsertions: DoughInsert[] };
+type AppliedAction = BoardAction & { refillInsertions: DoughInsert[]; doughSwaps?: readonly DoughSwap[] };
 type BoardState = ReturnType<typeof captureBoard>;
 
 interface TerminalBoard {
@@ -26,10 +26,11 @@ declare global {
   }
 }
 
-function captureBoard({ stacks, capacity, score, level, rank, nextLevelScore, movesLeft, combo, gameOver }: GameState) {
+function captureBoard({ stacks, capacity, score, level, rank, nextLevelScore, movesLeft, combo, doughMeter = 0,
+  gameOver, endReason }: GameState) {
   return {
     stacks: stacks.map((colors, index) => ({ index, colorsBottomFirst: colors.slice() })),
-    capacity, score, level, rank, nextLevelScore, movesLeft, combo: combo ?? 0, gameOver,
+    capacity, score, level, rank, nextLevelScore, movesLeft, combo: combo ?? 0, doughMeter, gameOver, endReason,
   };
 }
 
@@ -51,7 +52,9 @@ export function installBoardDebug(target: Window, currentState: () => GameState)
     applied(before: GameState, after: GameState, action: BoardAction, inserts: readonly DoughInsert[] = []): void {
       if (before === after) return;
       // Stack indices and insertion depths are zero-based. Each depth is measured before that insertion.
-      lastAction = { ...action, refillInsertions: inserts.map(insert => ({ ...insert })) };
+      const repair = getBoardRepair(after);
+      lastAction = { ...action, refillInsertions: [...inserts, ...(repair?.inserts ?? [])].map(insert => ({ ...insert })) };
+      if (repair?.swaps.length) lastAction.doughSwaps = repair.swaps;
       if (!before.gameOver && after.gameOver) {
         lastGameOver = { runId, before: captureBoard(before), after: captureBoard(after), action: lastAction };
       }

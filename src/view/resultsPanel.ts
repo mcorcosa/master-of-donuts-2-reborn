@@ -1,4 +1,5 @@
 import { Container, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
+import type { GameState } from '../game';
 import type { Point, ResultsAction } from './gestures';
 import { contains, type Rect, VIEW_WIDTH } from './layout';
 import type { ResultsView, ScoreSubmission } from './resultsSession';
@@ -128,7 +129,7 @@ export class ResultsPanel {
     }
   }
 
-  show(view: ResultsView, viewHeight: number): void {
+  show(view: ResultsView, viewHeight: number, reason?: GameState['endReason']): void {
     const { personal: { run, rows, isPersonalBest }, tab, friends } = view;
     const shell = this.shell ??= this.buildShell();
     const personalRows = rows.slice(0, SCORE_LIMIT);
@@ -137,6 +138,7 @@ export class ResultsPanel {
       this.scroll.friends = 0;
     }
     this.attach(shell.best, isPersonalBest);
+    fitText(shell.heading, reason === 'dough-meter' ? 'Dough meter full' : 'Game Over', 218);
     fitText(shell.score, number.format(run.score), 214);
     fitText(shell.level, number.format(run.level), TAB_WIDTH - 24);
     fitText(shell.combo, `${number.format(run.bestCombo)}×`, TAB_WIDTH - 24);
@@ -195,7 +197,8 @@ export class ResultsPanel {
     const companion = new Sprite({ texture: this.companionTexture, x: 290, y: 150, anchor: { x: 0.5, y: 1 } });
     companion.scale.set(Math.min(78 / companion.texture.width, 98 / companion.texture.height));
     this.root.addChild(companion);
-    label(this.root, 'Game Over', 29, 41, 29);
+    const heading = label(this.root, 'Game Over', 29, 41, 29);
+    heading.label = 'result-heading';
     label(this.root, 'Final score', 30, 73, 17, { fill: SOFT_INK });
     const score = label(this.root, '', 29, 105, 38);
     score.label = 'result-score-value';
@@ -234,7 +237,7 @@ export class ResultsPanel {
     const submit = this.button(friendsFooter, SUBMIT, SUBMISSION_LABELS.idle, 'friends-submit');
     this.drawButton(submit, SUBMIT, true);
 
-    return { backing, score, best, level, combo, restart, personalTab, friendsTab, personalButton, friendsButton,
+    return { backing, heading, score, best, level, combo, restart, personalTab, friendsTab, personalButton, friendsButton,
       deviceWithTabs, deviceWithoutTabs, list, listContent, mask, scrollbar, thumb, personalBody, friendsBody,
       friendsFooter, submit };
   }

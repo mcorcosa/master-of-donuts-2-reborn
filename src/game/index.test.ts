@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
+  canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState, getBoardRepair,
   JOKER, matchedRunLength, move, previewExtraChance, previewStackSweep, resolveMatch, useJokerBooster, useStackSweep,
 } from './index';
 
@@ -45,38 +45,36 @@ function bruteCanScore(
 }
 
 describe('Extra Chance preflight', () => {
-  it('opens a real full-board terminal with a deterministic, legal scoring move', () => {
-    const before = board([
+  it('reopens a legacy full board deterministically with seven misses of headroom', () => {
+    const terminal = board([
       ['gold', 'red', 'yellow', 'gold', 'yellow'],
-      ['red', 'yellow', 'gold', 'gold'],
-      ['yellow', 'gold', 'red', 'yellow'],
-    ], { movesLeft: 1 });
-    const full = move({ ...move(before, 0, 1, lowest), movesLeft: 1 }, 1, 2, lowest);
-    expect(full.gameOver).toBe(true);
-    expect(full.stacks.map(stack => stack.length)).toEqual([5, 5, 5]);
-    const terminal = { ...full, score: 400, combo: 3 };
+      ['red', 'yellow', 'gold', 'gold', 'red'],
+      ['yellow', 'gold', 'red', 'yellow', 'red'],
+    ], { movesLeft: 1, gameOver: true, score: 400, combo: 3 });
     for (const stack of terminal.stacks) Object.freeze(stack);
     Object.freeze(terminal.stacks);
     Object.freeze(terminal);
     const rescued = previewExtraChance(terminal);
     expect(rescued).toEqual(previewExtraChance(terminal));
-    expect(rescued).toMatchObject({ score: 400, combo: 3, level: 1, capacity: 5, movesLeft: full.movesLeft, gameOver: false });
+    expect(rescued).toMatchObject({ score: 400, combo: 3, level: 1, capacity: 5, movesLeft: 1, gameOver: false, doughMeter: 21 });
+    expect(rescued!.stacks.flat()).toHaveLength(14);
     expect(bruteCanScore(rescued!.stacks, rescued!.capacity, 2)).toBe(true);
   });
 
-  it('rescues a pressure terminal with vacancies without resetting its pressure or progress', () => {
+  it('revives a meter terminal with vacancies without resetting its pressure or progress', () => {
     const before = board([
       ['gray', 'blue', 'purple'], ['green', 'blue', 'gray', 'gray', 'purple'], ['purple', 'green', 'purple', 'blue', 'blue'],
-    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 2 });
+    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 1, doughMeter: 27 });
     const terminal = move(before, 1, 0, lowest);
-    expect(terminal).toMatchObject({ gameOver: true, movesLeft: 1 });
+    expect(terminal).toMatchObject({ gameOver: true, movesLeft: 1, doughMeter: 28, endReason: 'dough-meter' });
     expect(terminal.stacks.map(stack => stack.length)).toEqual([4, 4, 5]);
     const rescued = previewExtraChance(terminal);
-    expect(rescued).toMatchObject({ gameOver: false, movesLeft: 1, score: 500, level: 2, nextLevelScore: 1500 });
+    expect(rescued).toMatchObject({ gameOver: false, movesLeft: 1, score: 500, level: 2, nextLevelScore: 1500, doughMeter: 21 });
+    expect(rescued!.endReason).toBeUndefined();
     expect(bruteCanScore(rescued!.stacks, rescued!.capacity, 1)).toBe(true);
   });
 
-  it('preserves a Joker and suppresses the offer when the bounded rescue cannot find a route', () => {
+  it('preserves an active Joker and rejects an undersized board with no possible transfer', () => {
     const terminal = board([
       ['red', 'gold', 'blue', 'blue', 'red'], ['gold', 'red', 'green', 'purple', JOKER], ['purple', 'gold', 'red', 'gold', 'purple'],
     ], { level: 7, movesLeft: 1, gameOver: true });
@@ -84,8 +82,7 @@ describe('Extra Chance preflight', () => {
     expect(rescued!.stacks[1].at(-1)).toBe(JOKER);
     expect(canMove(rescued!, 1, 0)).toBe(true);
     expect(move(rescued!, 1, 0, lowest).score).toBeGreaterThan(terminal.score);
-    const alternating = ['blue', 'red', 'green', 'gold', 'purple'];
-    expect(previewExtraChance(board([alternating, alternating, alternating], { movesLeft: 1, gameOver: true }))).toBeNull();
+    expect(previewExtraChance(board([['red']], { gameOver: true }))).toBeNull();
     expect(previewExtraChance({ ...terminal, gameOver: false })).toBeNull();
   });
 });
@@ -104,7 +101,7 @@ describe('Setup hints', () => {
     Object.freeze(game.stacks);
     Object.freeze(game);
     expect(bruteCanScore(game.stacks, game.capacity, 3)).toBe(false);
-    expect(findSetupHint({ ...game, movesLeft: 3 })).toBeNull();
+    expect(findSetupHint({ ...game, doughMeter: 25 })).toBeNull();
     expect(findSetupHint({ ...game, movesLeft: 4 })).toEqual({ from: 2, to: 3 });
 
     const rng = vi.fn(lowest);
@@ -164,16 +161,20 @@ describe('Setup hints', () => {
         { capacity: 6, level: 3, score: 2494, nextLevelScore: 2600 }),
       firstLive: 5, route: [[1, 0], [2, 1], [2, 1], [0, 2], [0, 2], [0, 2], [1, 0], [1, 0]], finalScore: 2614,
     },
-  ])('adjudicates the reported countdown boundary and verifies a scoring hint', ({ snapshot, firstLive, route, finalScore }) => {
+  ])('repairs reported dead countdown positions and keeps the original scoring route at the safe boundary', ({ snapshot, firstLive, route, finalScore }) => {
     const stacks = snapshot.stacks.map(stack => stack.slice());
     stacks[0].push(stacks[2].pop()!);
-    for (let counter = 1; counter <= 8; counter++) {
+    for (const counter of [1, firstLive]) {
       const rng = vi.fn(lowest);
       const onDough = vi.fn();
       const settled = move({ ...snapshot, stacks, movesLeft: counter + 1 }, 0, 2, rng, onDough);
-      expect(settled.stacks).toEqual(snapshot.stacks);
-      expect(settled).toMatchObject({ movesLeft: counter, score: snapshot.score, gameOver: counter < firstLive });
-      expect(findSetupHint(settled)).toEqual(counter < firstLive ? null : { from: route[0][0], to: route[0][1] });
+      expect(settled).toMatchObject({ movesLeft: counter, score: snapshot.score, gameOver: false, doughMeter: 1 });
+      if (counter === firstLive) {
+        expect(settled.stacks).toEqual(snapshot.stacks);
+        expect(findSetupHint(settled)).toEqual({ from: route[0][0], to: route[0][1] });
+      } else {
+        expect(bruteCanScore(settled.stacks, settled.capacity, 1)).toBe(true);
+      }
       expect(rng).not.toHaveBeenCalled();
       expect(onDough).not.toHaveBeenCalled();
     }
@@ -325,7 +326,9 @@ describe('Joker', () => {
     ], { capacity: 4, movesLeft: 3 });
     const oneVacancy = move(resident, 0, 1, lowest);
     expect(oneVacancy).toMatchObject({ movesLeft: 2, score: 0, gameOver: false });
-    expect(move({ ...resident, movesLeft: 2 }, 0, 1, lowest).gameOver).toBe(true);
+    const due = move({ ...resident, movesLeft: 2 }, 0, 1, lowest);
+    expect(due.stacks).toEqual(oneVacancy.stacks);
+    expect(move(move(due, 1, 0, lowest), 2, 1, lowest).score).toBe(150);
     expect(move(move(oneVacancy, 1, 0, lowest), 2, 1, lowest).score).toBe(150);
 
     const incoming = board([
@@ -342,7 +345,7 @@ describe('Joker', () => {
     ], { capacity: 3, level: 5, movesLeft: 4 });
     const afterMiss = move(initial, 2, 1, lowest);
     expect(afterMiss).toMatchObject({ movesLeft: 3, score: 0, gameOver: false });
-    expect(move({ ...initial, movesLeft: 3 }, 2, 1, lowest).gameOver).toBe(true);
+    expect(move({ ...initial, movesLeft: 3 }, 2, 1, lowest).gameOver).toBe(false);
     const ready = move(move(afterMiss, 0, 2, lowest), 1, 2, lowest);
     expect(move(ready, 1, 0, lowest)).toMatchObject({ score: 140, movesLeft: 1 });
   });
@@ -375,7 +378,7 @@ describe('Joker', () => {
 
     for (let i = 0; i < 45; i++) expect(scoreTriple().map(dough => dough.color)).not.toContain(JOKER);
     for (let i = 0; i < 44; i++) expect(scoreTriple(ordinary, { level: 7 }).map(dough => dough.color)).not.toContain(JOKER);
-    expect(scoreTriple([['red', 'gold', 'blue'], ['blue', 'blue']], { capacity: 3 })).toHaveLength(2);
+    expect(scoreTriple([['blue', 'blue', 'blue'], ['blue', 'blue']], { capacity: 3 })).toHaveLength(2);
     expect(scoreTriple([['blue'], ['blue', 'blue', 'blue'], ['red', 'gold']], { capacity: 7 })
       .map(dough => dough.color)).not.toContain(JOKER);
     expect(scoreTriple([['blue'], ['red'], ['gold']], { movesLeft: 1 }).map(dough => dough.color)).not.toContain(JOKER);
@@ -432,7 +435,7 @@ describe('Boosters', () => {
     expect(useJokerBooster(exposed, 0)).toBe(exposed);
     const cleared = useStackSweep(exposed);
     expect(canUseJokerBooster(cleared)).toBe(true);
-    expect(useJokerBooster(cleared, 1).stacks[1]).toEqual([JOKER]);
+    expect(useJokerBooster(cleared, 1).stacks[1].at(-1)).toBe(JOKER);
   });
 
   it('preserves the natural Joker schedule and its RNG draw while a booster Joker is on the board', () => {
@@ -472,26 +475,28 @@ describe('Boosters', () => {
     expect(swept).toEqual(preview);
     expect(initial.stacks).toEqual([[], [JOKER, 'gold', 'blue'], ['blue'], ['red', 'red', 'gold']]);
     expect(canMove(swept, 1, 0)).toBe(true);
-    expect(useStackSweep(swept).stacks).toEqual([[], [JOKER], [], ['red']]);
+    const sparse = useStackSweep(swept);
+    expect(sparse.stacks.flat().sort()).toEqual([JOKER, 'red', 'red']);
+    expect(bruteCanScore(sparse.stacks, sparse.capacity, 1)).toBe(true);
     expect(previewStackSweep(createGame(lowest))).not.toBeNull();
   });
 
-  it('rejects sweeps with no ordinary transfer or whose projected board is terminal', () => {
+  it('repairs a blocked sweep projection and rejects sweeps with no ordinary transfer', () => {
     const deadProjection = board([
       ['red', 'blue', 'green', 'red'], ['gold', 'green', 'blue', 'yellow'], ['gold', 'red', 'red'],
     ], { capacity: 4, level: 20, score: 45000, nextLevelScore: 50000, movesLeft: 1 });
     expect(move(deadProjection, 0, 2, lowest).score).toBeGreaterThan(deadProjection.score);
     const projected = { ...deadProjection, stacks: deadProjection.stacks.map(stack => stack.slice(0, -1)) };
     expect(canMove(projected, 0, 1)).toBe(true);
-    const beforeProjected = {
-      ...projected, movesLeft: 2,
-      stacks: [['red', 'blue'], ['gold', 'green', 'blue', 'green'], ['gold', 'red']],
-    };
-    expect(move(beforeProjected, 1, 0, lowest)).toMatchObject({ stacks: projected.stacks, gameOver: true });
+    const swept = previewStackSweep({ ...deadProjection, doughMeter: 27 });
+    expect(swept).toMatchObject({ doughMeter: 27, gameOver: false, movesLeft: 1 });
+    const added = getBoardRepair(swept!)?.inserts ?? [];
+    expect(swept!.stacks.flat().sort()).toEqual([...projected.stacks.flat(), ...added.map(donut => donut.color)].sort());
+    expect(bruteCanScore(swept!.stacks, swept!.capacity, 1)).toBe(true);
 
     for (const state of [
       board([[], []]), board([[], ['blue'], [JOKER]]), board([['red', 'blue']], { capacity: 3 }),
-      { ...deadProjection, gameOver: true }, deadProjection,
+      { ...deadProjection, gameOver: true },
     ]) {
       expect(previewStackSweep(state)).toBeNull();
       expect(useStackSweep(state)).toBe(state);
@@ -625,13 +630,60 @@ describe('Master of Donuts 2 rules', () => {
   it('caps the bonus at 50 percent while the streak keeps counting', () => {
     const game = board([
       ['red'], ['red', 'red'], ['gold'], ['gold', 'gold'], ['yellow'], ['yellow', 'yellow'], ['blue'], ['purple'],
-    ], { combo: 4, capacity: 10, level: 16, score: 33000, nextLevelScore: 38300 });
+    ], { combo: 4, capacity: 10, level: 16, score: 33000, nextLevelScore: 38300, doughMeter: 10 });
 
     const fifth = move(game, 0, 1, lowest);
-    expect(fifth).toMatchObject({ score: 33350, combo: 5 });
+    expect(fifth).toMatchObject({ score: 33350, combo: 5, doughMeter: 9 });
     const sixth = move(fifth, 2, 3, lowest);
-    expect(sixth).toMatchObject({ score: 33725, combo: 6 });
-    expect(move(sixth, 4, 5, lowest)).toMatchObject({ score: 34100, combo: 7 });
+    expect(sixth).toMatchObject({ score: 33725, combo: 6, doughMeter: 8 });
+    expect(move(sixth, 4, 5, lowest)).toMatchObject({ score: 34100, combo: 7, doughMeter: 7 });
+  });
+
+  it.each([[3, 12, 5], [4, 12, 4], [4, 2, 0]])('drains level and combo relief additively and clamps at zero',
+    (combo, doughMeter, expected) => {
+      const game = board([['red'], ['red', 'red'], ['gold', 'yellow']], { combo, doughMeter, score: 450 });
+      const next = move(game, 0, 1, lowest);
+      expect(next).toMatchObject({ level: 2, combo: combo + 1, doughMeter: expected });
+    });
+
+  it('charges only committed misses and stops on the 28th before pressure can refill', () => {
+    let game = createGame(highest);
+    expect(game.doughMeter).toBe(0);
+    const rng = vi.fn(lowest);
+    const onDough = vi.fn();
+    for (let count = 1; count <= 28; count++) {
+      const fromTo = game.stacks.flatMap((source, from) => game.stacks.flatMap((target, to) =>
+        canMove(game, from, to) && !resolveMatch(target, source.at(-1)!) ? [{ from, to }] : []))[0];
+      expect(fromTo).toBeDefined();
+      const { from, to } = fromTo;
+      expect(move(game, from, from, rng, onDough)).toBe(game);
+      const before = count === 28 ? { ...game, movesLeft: 1 } : game;
+      rng.mockClear();
+      onDough.mockClear();
+      game = move(before, from, to, rng, onDough);
+      expect(game).toMatchObject({ doughMeter: count, score: 0, gameOver: count === 28 });
+    }
+    expect(game).toMatchObject({ endReason: 'dough-meter', combo: 0, movesLeft: 1 });
+    expect(rng).not.toHaveBeenCalled();
+    expect(onDough).not.toHaveBeenCalled();
+    expect(canMove(game, 0, 1)).toBe(false);
+    expect(move(game, 0, 1)).toBe(game);
+    expect(createGame(lowest)).toMatchObject({ doughMeter: 0, gameOver: false });
+  });
+
+  it('keeps a board with a two-transfer score at 27 dough and still charges the setup miss', () => {
+    const before = board([
+      ['red', 'yellow', 'red', 'gold'], [JOKER, 'blue', 'blue'], ['yellow', 'red', 'gold', 'blue'],
+    ], { capacity: 4, movesLeft: 2, doughMeter: 26 });
+    const ready = move(before, 0, 1, lowest);
+    expect(ready).toMatchObject({ doughMeter: 27, movesLeft: 1, gameOver: false });
+    expect(ready.stacks).toEqual([['red', 'yellow', 'red'], [JOKER, 'blue', 'blue', 'gold'], before.stacks[2]]);
+    expect(bruteCanScore(ready.stacks, ready.capacity, 1)).toBe(false);
+    expect(getBoardRepair(ready)).toBeUndefined();
+
+    const setup = move({ ...ready, doughMeter: 0 }, 1, 0, lowest);
+    expect(move(setup, 2, 1, lowest).score).toBe(150);
+    expect(move(ready, 1, 0, lowest)).toMatchObject({ doughMeter: 28, gameOver: true, endReason: 'dough-meter' });
   });
 
   it('clears all four reds above gold and makes a bottom-only continuation on the reported board', () => {
@@ -710,7 +762,7 @@ describe('Master of Donuts 2 rules', () => {
     expect(move(next, 0, 2, highest).score).toBe(34400);
   });
 
-  it('uses the top-placement rescue against fatal pressure on a dense high-level board', () => {
+  it('keeps scoring after a dense high-level match with pressure due', () => {
     const covered = ['blue', 'gold', 'yellow', 'gold', 'yellow', 'gold'];
     const full = ['gold', 'yellow', 'gold', 'yellow', 'gold', 'yellow', 'gold', 'yellow', 'gold', 'yellow'];
     const game = board([
@@ -728,8 +780,8 @@ describe('Master of Donuts 2 rules', () => {
     ]);
     expect(canMove(next, 0, 1)).toBe(true);
     const followUp = move(next, 0, 1, highest);
-    expect(bruteCanScore(followUp.stacks, followUp.capacity, 1)).toBe(false);
-    expect(followUp).toMatchObject({ score: 64784, movesLeft: 1, gameOver: true });
+    expect(bruteCanScore(followUp.stacks, followUp.capacity, 1)).toBe(true);
+    expect(followUp).toMatchObject({ score: 64784, movesLeft: 1, gameOver: false });
   });
 
   it('protects top pairs and completes the match refill before a capacity upgrade', () => {
@@ -751,7 +803,7 @@ describe('Master of Donuts 2 rules', () => {
   });
 
   it('keeps the miss countdown through a match and rolls a new interval after each pressure refill', () => {
-    let game = board([['red'], ['red', 'red'], ['gold', 'yellow']]);
+    let game = board([['red'], ['red', 'red'], ['gold', 'yellow'], ['blue', 'blue'], ['blue', 'green', 'blue']]);
     const rng = vi.fn(lowest)
       .mockReturnValueOnce(0) // Match refill color.
       .mockReturnValueOnce(0).mockReturnValueOnce(0.9) // Pressure color, then eight misses.
@@ -795,24 +847,6 @@ describe('Master of Donuts 2 rules', () => {
     expect(rng).toHaveBeenCalledTimes(5);
   });
 
-  it('ends play when a refill leaves one slot without a reachable match, and supports a clean restart', () => {
-    const game = board([
-      ['gold', 'red', 'yellow', 'gold', 'yellow'],
-      ['red', 'yellow', 'gold', 'red'],
-      ['yellow', 'gold', 'red', 'yellow'],
-    ], { movesLeft: 1 });
-    const next = move(game, 0, 1, lowest);
-
-    expect(next.stacks.map((stack) => stack.length)).toEqual([5, 5, 4]);
-    expect(next.gameOver).toBe(true);
-    expect(canMove(next, 0, 2)).toBe(false);
-    expect(move(next, 0, 2)).toBe(next);
-    const restart = createGame(lowest);
-    expect(restart).toMatchObject({ level: 1, score: 0, movesLeft: 6, gameOver: false });
-    expect(restart.stacks).not.toBe(next.stacks);
-    expect(canMove(restart, 0, 1)).toBe(true);
-  });
-
   it('reports both actual bottom inserts when pressure refills the same stack twice', () => {
     const game = board([['gold'], ['red'], ['yellow', 'red', 'gold']], { level: 5, capacity: 7, movesLeft: 1 });
     const rng = vi.fn(lowest);
@@ -827,113 +861,57 @@ describe('Master of Donuts 2 rules', () => {
     expect(rng).toHaveBeenCalledTimes(3);
   });
 
-  it('allows a last-slot rescue by exposing a pair, but ends play when the final slot is filled', () => {
+  it('keeps the last vacancy open even when a pressure batch would fill it', () => {
     const game = board([
       ['gold', 'red', 'yellow', 'gold', 'yellow'],
       ['red', 'yellow', 'gold', 'gold'],
       ['yellow', 'gold', 'red', 'yellow'],
     ], { movesLeft: 1 });
-    const oneSlot = move(game, 0, 1, lowest);
-    expect(oneSlot.stacks.map((stack) => stack.length)).toEqual([5, 5, 4]);
-    expect(oneSlot.gameOver).toBe(false);
-
-    const exposePair = move(oneSlot, 1, 2, lowest);
-    expect(exposePair.score).toBe(0);
-    expect(move(exposePair, 0, 1, lowest).score).toBe(100);
-
-    const filled = move({ ...oneSlot, movesLeft: 1 }, 1, 2, lowest);
-    expect(filled.stacks.map((stack) => stack.length)).toEqual([5, 5, 5]);
-    expect(filled.gameOver).toBe(true);
-
-    const onDough = vi.fn();
-    const batch = move({ ...game, level: 5 }, 0, 1, lowest, onDough);
-    expect(batch.stacks.map((stack) => stack.length)).toEqual([5, 5, 5]);
-    expect(batch.gameOver).toBe(true);
-    expect(onDough.mock.lastCall?.[0]).toHaveLength(2);
-  });
-
-  it('stops a multi-donut pressure refill as soon as the remaining slot cannot rescue the board', () => {
-    const game = board([
-      ['gold', 'red', 'yellow', 'gold', 'red', 'gold', 'yellow'],
-      ['red', 'yellow', 'gold', 'red', 'yellow', 'red'],
-      ['yellow', 'gold', 'red', 'yellow', 'red', 'yellow'],
-      ['red', 'yellow', 'gold', 'red', 'yellow', 'red', 'gold'],
-    ], { level: 5, capacity: 7, movesLeft: 1 });
     const rng = vi.fn(lowest);
     const onDough = vi.fn();
-    const next = move(game, 0, 1, rng, onDough);
-
-    expect(next.stacks.map((stack) => stack.length)).toEqual([7, 7, 6, 7]);
-    expect(next.gameOver).toBe(true);
-    expect(rng).toHaveBeenCalledTimes(2);
+    const oneSlot = move({ ...game, level: 5 }, 0, 1, rng, onDough);
+    expect(oneSlot.stacks.map(stack => stack.length)).toEqual([5, 5, 4]);
+    expect(oneSlot).toMatchObject({ gameOver: false, movesLeft: 6, doughMeter: 1 });
     expect(onDough.mock.lastCall?.[0]).toHaveLength(1);
+    expect(rng).toHaveBeenCalledTimes(2);
+
+    const due = move({ ...oneSlot, movesLeft: 1 }, 1, 2, rng, onDough);
+    expect(due.stacks.map(stack => stack.length)).toEqual([5, 4, 5]);
+    expect(due).toMatchObject({ gameOver: false, movesLeft: 6, doughMeter: 2 });
+    expect(onDough.mock.lastCall?.[0]).toEqual([]);
+    expect(rng).toHaveBeenCalledTimes(3);
+    expect(move(due, 0, 1, lowest).score).toBe(140);
   });
 
-  it('ends the level 16 repro early without drawing RNG or emitting dough', () => {
-    const full = ['gold', 'red', 'gold', 'red', 'gold', 'red', 'gold', 'red', 'gold', 'red'];
-    const stacks = Array.from({ length: 8 }, () => full.slice());
-    stacks[1] = [...full.slice(0, 7), 'blue'];
-    const game = board(stacks, { capacity: 10, level: 16, score: 33000, nextLevelScore: 38300, movesLeft: 2 });
-    const rng = vi.fn(lowest);
-    const onDough = vi.fn();
-    const next = move(game, 0, 1, rng, onDough);
-
-    expect(next).toMatchObject({ score: 33000, movesLeft: 1, gameOver: true });
-    expect(next.stacks[0]).toEqual(full.slice(0, 9));
-    expect(next.stacks[1]).toEqual([...stacks[1], 'red']);
-    expect(rng).not.toHaveBeenCalled();
-    expect(onDough).not.toHaveBeenCalled();
-    expect(stacks[0]).toEqual(full);
-  });
-
-  it('keeps a position alive if the next pressure refill still leaves at least two vacancies', () => {
-    const game = board([
-      ['gold', 'red', 'gold', 'red', 'gold'], ['gold', 'red', 'blue'], ['gold', 'red', 'gold', 'red'],
-    ], { movesLeft: 2 });
-    const next = move(game, 0, 1, lowest);
-    expect(bruteCanScore(next.stacks, next.capacity, 1)).toBe(false);
-    expect(next).toMatchObject({ movesLeft: 1, score: 0, gameOver: false });
-  });
-
-  it.each([1, 2, 4, 6, 7])('proves the screenshot terminal with %i moves left before the next refill', (movesLeft) => {
+  it('restores a route to the former screenshot terminal by moving existing flavors', () => {
     const game = board([
       ['gray', 'blue', 'purple'], ['green', 'blue', 'gray', 'gray', 'purple'], ['purple', 'green', 'purple', 'blue', 'blue'],
-    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: movesLeft + 1 });
+    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 2, doughMeter: 26 });
     const rng = vi.fn(lowest);
     const onDough = vi.fn();
     const next = move(game, 1, 0, rng, onDough);
-    expect(next.stacks).toEqual([
-      ['gray', 'blue', 'purple', 'purple'], ['green', 'blue', 'gray', 'gray'], ['purple', 'green', 'purple', 'blue', 'blue'],
-    ]);
-    expect(bruteCanScore(next.stacks, 5, movesLeft, (stacks) => {
-      const shortest = Math.min(...stacks.map((stack) => stack.length));
-      return stacks.some((stack, i) => stack.length === shortest &&
-        ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green', JOKER].some((color) => {
-          const filled = stacks.map((other, j) => i === j ? [color, ...other] : other);
-          return bruteCanScore(filled, 5, 8);
-        }));
-    })).toBe(false);
-    expect(next).toMatchObject({ score: 500, movesLeft, gameOver: true });
+    expect(next).toMatchObject({ score: 500, movesLeft: 1, gameOver: false, doughMeter: 27 });
+    expect(next.stacks[0].at(-1)).toBe('purple');
+    expect(next.stacks.flat().sort()).toEqual(game.stacks.flat().sort());
+    expect(getBoardRepair(next)?.swaps).toHaveLength(1);
+    expect(bruteCanScore(next.stacks, 5, 1)).toBe(true);
     expect(rng).not.toHaveBeenCalled();
     expect(onDough).not.toHaveBeenCalled();
   });
 
-  it('proves the screenshot terminal after an actual refill rolls the eight-miss interval', () => {
+  it('rolls and reports a pressure insert, then restores a route with existing flavors intact', () => {
     const game = board([
       ['blue', 'purple', 'purple', 'gray'], ['green', 'blue', 'gray'], ['purple', 'green', 'purple', 'blue', 'blue'],
-    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 1 });
+    ], { level: 2, score: 500, nextLevelScore: 1500, movesLeft: 1, doughMeter: 26 });
     const rng = vi.fn(highest);
     const onDough = vi.fn();
     const next = move(game, 0, 1, rng, onDough);
-
-    expect(next.stacks).toEqual([
-      ['gray', 'blue', 'purple', 'purple'], ['green', 'blue', 'gray', 'gray'], ['purple', 'green', 'purple', 'blue', 'blue'],
-    ]);
-    expect(next).toMatchObject({ score: 500, movesLeft: 8, gameOver: true });
+    expect(next).toMatchObject({ score: 500, movesLeft: 8, gameOver: false, doughMeter: 27 });
+    expect(next.stacks.flat().sort()).toEqual([...game.stacks.flat(), 'gray'].sort());
+    expect(bruteCanScore(next.stacks, 5, 1)).toBe(true);
     expect(rng).toHaveBeenCalledTimes(2);
     expect(onDough).toHaveBeenCalledExactlyOnceWith([{ stack: 0, depth: 0, color: 'gray' }]);
   });
-
   it('allows a post-refill setup that scores with an existing Joker', () => {
     const game = board([
       ['green', 'gray', 'gray', 'gray', 'gray', 'blue', 'blue'], ['gold', 'gray', 'green', 'gray'],
@@ -949,26 +927,6 @@ describe('Master of Donuts 2 rules', () => {
     const scored = move(setup, 4, 2, lowest);
     expect(scored.score).toBe(7320);
     expect(scored.stacks.flat()).not.toContain(JOKER);
-  });
-
-  it('rules out a hypothetical pressure donor, then uses that color on an actually refilled board', () => {
-    const full = ['gold', 'red', 'blue', 'red', 'blue', 'red', 'blue', 'red', 'blue', 'red'];
-    const game = board([
-      [], full.slice(0, -1), full, ['gold', 'blue', 'red', 'blue', 'red', 'blue', 'red', 'gold', 'gold', 'blue'],
-      ...Array.from({ length: 4 }, () => full.slice()),
-    ], { capacity: 10, level: 45, score: 129000, nextLevelScore: 131100, movesLeft: 2 });
-    const ready = move(game, 2, 1, lowest);
-    expect(ready).toMatchObject({ score: 129000, movesLeft: 1, gameOver: true });
-    expect(bruteCanScore(ready.stacks, 10, 1)).toBe(false);
-    const rng = vi.fn(lowest);
-    const onDough = vi.fn();
-    // Independently start with an actual pressure move due. Its real draws become known.
-    const filled = move({ ...ready, gameOver: false }, 3, 2, rng, onDough);
-    expect(filled).toMatchObject({ score: 129000, movesLeft: 6, gameOver: false });
-    expect(filled.stacks[0].at(-1)).toBe('gold');
-    expect(onDough.mock.lastCall?.[0]).toHaveLength(10);
-    expect(rng).toHaveBeenCalledTimes(11);
-    expect(move(filled, 0, 3, lowest).score).toBe(129540);
   });
 
   it('keeps an actual two-setup rescue alive before a guaranteed full refill', () => {
@@ -987,7 +945,7 @@ describe('Master of Donuts 2 rules', () => {
     expect(move(setup2, 0, 3, lowest).score).toBe(3940);
   });
 
-  it('agrees with independent brute force on dense seeded boards and short budgets', () => {
+  it('keeps dense structural routes and repairs independently of the meter and preserves the flavor inventory', () => {
     let seed = 29;
     const draw = () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -1000,26 +958,42 @@ describe('Master of Donuts 2 rules', () => {
         stacks[0][6] = 'gold';
         stacks[1][stacks[1].length - 1] = 'red';
         for (let budget = 1; budget <= 4; budget++) {
-          const game = board(stacks, { capacity: 7, level: 5, movesLeft: budget + 1 });
+          const game = board(stacks, { capacity: 7, level: 5, movesLeft: budget + 1, doughMeter: 27 - budget });
           const next = move(game, 0, 1, lowest);
-          const dead = !bruteCanScore(next.stacks, next.capacity, budget);
+          const natural = stacks.map(stack => stack.slice());
+          natural[1].push(natural[0].pop()!);
+          const dead = !bruteCanScore(natural, next.capacity, budget);
           outcomes.add(dead);
-          expect(next.gameOver).toBe(dead);
+          expect(next).toMatchObject({ gameOver: false, doughMeter: 28 - budget });
+          expect(next.stacks).toEqual(move({ ...game, doughMeter: 0 }, 0, 1, lowest).stacks);
+          if (!dead) expect(next.stacks).toEqual(natural);
+          expect(next.stacks.flat().sort()).toEqual(natural.flat().sort());
+          expect(bruteCanScore(next.stacks, next.capacity, budget, beforeRefill => {
+            const afterRefill = beforeRefill.map(stack => stack.slice());
+            if (spaces === 2) {
+              const shortest = afterRefill.reduce((a, b) => b.length < a.length ? b : a);
+              shortest.unshift('gold');
+            }
+            return bruteCanScore(afterRefill, next.capacity, 6);
+          })).toBe(true);
         }
       }
     }
     expect(outcomes).toEqual(new Set([true, false]));
   });
 
-  it('keeps a position alive when the proof exhausts its bounded search', () => {
+  it('repairs a crowded level 16 position when the bounded search cannot find a score', () => {
     const core = ['blue', 'green', 'blue', 'green', 'blue', 'green', 'blue', 'green'];
     // The two vacancies cannot expose anything below these cores. Each movable
     // color occurs twice and none match the core tops, but many layouts can recur.
     const stacks = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue'].map((color) => [...core, color, color]);
     stacks.push(core.slice());
     const game = board(stacks, { capacity: 10, level: 16, movesLeft: 8 });
-    expect(move(game, 0, 7, lowest).gameOver).toBe(false);
-    expect(move({ ...game, movesLeft: 2 }, 0, 7, lowest).gameOver).toBe(true);
+    const next = move(game, 0, 7, lowest);
+    expect(next).toMatchObject({ gameOver: false, doughMeter: 1 });
+    expect(bruteCanScore(next.stacks, next.capacity, 1)).toBe(true);
+    expect(getBoardRepair(next)?.swaps.length).toBeLessThanOrEqual(2);
+    expect(next.stacks.flat().sort()).toEqual(game.stacks.flat().sort());
   });
 
   it('unlocks a half-filled fourth stack at level 3 with only the standard match refill', () => {
@@ -1049,7 +1023,7 @@ describe('Master of Donuts 2 rules', () => {
     expect(move({ ...game, score: 2368 }, 0, 1, lowest)).toMatchObject({ score: 2500, level: 3 });
     expect(level4).toMatchObject({ score: 2600, level: 4, rank: 'Batter Boss', capacity: 6, nextLevelScore: 3700 });
     expect(level4.stacks).toHaveLength(4);
-    const pressure = move({ ...level4, stacks: [['gold'], ['yellow'], ['red'], []], movesLeft: 1 }, 0, 1, highest);
+    const pressure = move({ ...level4, stacks: [['gold'], ['yellow'], ['red', 'red'], ['red']], movesLeft: 1 }, 0, 1, highest);
     expect(pressure.stacks[0]).toEqual(['choco']);
   });
 
@@ -1059,15 +1033,17 @@ describe('Master of Donuts 2 rules', () => {
       ['yellow', 'red', 'gold', 'yellow', 'gold', 'gold'],
       ['red', 'yellow', 'gold', 'red', 'yellow', 'gold', 'red'],
       ['yellow', 'gold', 'red', 'yellow', 'gold', 'red', 'yellow'],
-    ], { level: 5, score: 4646, combo: 1, capacity: 7, nextLevelScore: 4800, movesLeft: 1 });
+    ], { level: 5, score: 4646, combo: 1, capacity: 7, nextLevelScore: 4800, movesLeft: 1, doughMeter: 27 });
 
     expect(move(game, 2, 1, lowest)).toMatchObject({ gameOver: true, score: 4646, level: 5 });
-    expect(move({ ...game, score: 4645 }, 0, 1, lowest)).toMatchObject({ gameOver: true, score: 4799, level: 5 });
+    const belowGoal = move({ ...game, score: 4645 }, 0, 1, lowest);
+    expect(belowGoal).toMatchObject({ gameOver: false, score: 4799, level: 5, doughMeter: 27 });
+    expect(bruteCanScore(belowGoal.stacks, belowGoal.capacity, 1)).toBe(true);
 
     const rng = vi.fn(lowest);
     const onDough = vi.fn();
     const level6 = move(game, 0, 1, rng, onDough);
-    expect(level6).toMatchObject({ score: 4800, combo: 2, level: 6, capacity: 7, nextLevelScore: 7000, gameOver: false });
+    expect(level6).toMatchObject({ score: 4800, combo: 2, level: 6, capacity: 7, nextLevelScore: 7000, gameOver: false, doughMeter: 20 });
     expect(level6.stacks.map((stack) => stack.length)).toEqual([7, 5, 7, 7, 3]);
     expect(level6.stacks[4]).toEqual(['red', 'red', 'yellow']);
     expect(rng).toHaveBeenCalledTimes(3);
@@ -1143,7 +1119,7 @@ describe('Master of Donuts 2 rules', () => {
     for (const [index, upgrade] of [...progression].entries()) {
       const level = index + 2;
       const { capacity, nextLevelScore, stacks: { length: stackCount } } = game;
-      const stacks = [['gold'], ['gold', 'gold'], ...Array.from({ length: stackCount - 2 }, () => ['red'])];
+      const stacks = [['gold'], ['gold', 'gold'], ['red', 'red', 'gold'], ...Array.from({ length: stackCount - 3 }, () => ['red'])];
       const score = nextLevelScore - (100 + 10 * (game.level - 1));
       const onDough = vi.fn();
       const rng = vi.fn(highest);

@@ -36,6 +36,13 @@ function list(panel: ResultsPanel, tab: 'personal' | 'friends') {
 }
 
 describe('Pixi results panel', () => {
+  it('shows a full dough meter as the terminal reason', () => {
+    const panel = new ResultsPanel(Texture.WHITE);
+    panel.show({ personal, tab: 'personal', friends: null }, 650, 'dough-meter');
+    expect(getText(panel, 'result-heading').text).toBe('Dough meter full');
+    panel.root.destroy({ children: true });
+  });
+
   it('prepares common labels without a hittable panel and reuses them with changing results and height', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     const prepared = [...panel.warmup()];
