@@ -2,7 +2,7 @@ import type { CompletedResults, PersonalScores, RunStats } from '../platform/per
 
 export const GAME_OVER_LEAD_IN_MS = 250;
 export const GAME_OVER_CUE_MS = 500;
-export const GAME_OVER_REVEAL_MS = 4500;
+export const GAME_OVER_REVEAL_MS = 3000;
 export const GAME_OVER_RECORD_LIMIT_MS = 3500;
 
 export class GameOverPresentation {

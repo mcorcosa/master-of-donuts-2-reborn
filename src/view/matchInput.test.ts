@@ -813,9 +813,9 @@ describe('game view monetization', () => {
     game.tick(2750);
     expect(game.dialog.open).toBe(false);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
-    game.tick(6499);
+    game.tick(4999);
     expect(game.dialog.open).toBe(false);
-    game.tick(6500);
+    game.tick(5000);
     expect(game.dialog.open).toBe(true);
     expect(game.dialog.children[0].textContent).toBe('Extra Chance');
     expect(game.localStorage.setItem).not.toHaveBeenCalled();
@@ -2151,7 +2151,7 @@ describe('game view match playback', () => {
     expect(scene.drawScore.mock.lastCall?.[0].score).toBe(1555);
     const cueAt = 230 + 250;
     const cueEnds = cueAt + 500;
-    const popupAt = 230 + 4500;
+    const popupAt = 230 + 3000;
     const priorRenders = render.mock.calls.length;
     tick(cueAt - 1);
     tap(50);
@@ -2263,7 +2263,7 @@ describe('game view match playback', () => {
     expect(scene.showResults).not.toHaveBeenCalled();
     document.hidden = false;
     document.dispatchEvent(new Event('visibilitychange'));
-    const popupAt = resumeInspectionAt + 2750;
+    const popupAt = resumeInspectionAt + 1250;
     tick(popupAt - 1);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).not.toHaveBeenCalled();
@@ -2286,25 +2286,33 @@ describe('game view match playback', () => {
     });
   });
 
-  it('finishes the inspection after a stalled recording expires and ignores its late completion after replay', async () => {
+  it.each([16, 1000])('waits for both the reveal and a stalled recording deadline with a %i ms settle delay', async settleDelay => {
     let complete!: (results: CompletedResults) => void;
     const record = vi.fn(() => new Promise<CompletedResults>(resolve => { complete = resolve; }));
     const { match, tap, tick, render } = await setup(true, '', 1, { record });
     vi.mocked(move).mockReturnValueOnce({ ...initial, gameOver: true });
+    const finalizedAt = 100;
+    tick(finalizedAt);
     match();
-    tick(16);
+    const settledAt = finalizedAt + settleDelay;
+    tick(settledAt);
     await settleResults();
     expect(record).toHaveBeenCalledOnce();
     expect(GAME_OVER_RECORD_LIMIT_MS).toBe(3500);
-    const cueAt = 16 + 250;
-    const popupAt = 16 + 4500;
+    const cueAt = settledAt + 250;
+    const revealEndsAt = settledAt + 3000;
+    const recordExpiresAt = finalizedAt + GAME_OVER_RECORD_LIMIT_MS;
+    const firstDeadline = Math.min(revealEndsAt, recordExpiresAt);
+    const popupAt = Math.max(revealEndsAt, recordExpiresAt);
     tick(cueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, true);
     tick(cueAt + 500);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     const priorRenders = render.mock.calls.length;
-    tick(GAME_OVER_RECORD_LIMIT_MS);
+    tick(firstDeadline - 1);
     expect(render).toHaveBeenCalledTimes(priorRenders);
+    tick(firstDeadline);
+    expect(render).toHaveBeenCalledTimes(priorRenders + Number(firstDeadline === revealEndsAt));
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, true);
     expect(scene.showResults).not.toHaveBeenCalled();
     tick(popupAt - 1);
