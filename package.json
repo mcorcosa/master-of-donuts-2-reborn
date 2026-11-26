@@ -14,6 +14,7 @@
   "dependencies": {
     "@playbridge/core": "file:vendor/playbridge/packages/core",
     "@playbridge/facebook": "file:vendor/playbridge/packages/facebook",
+    "@playbridge/pixi": "file:vendor/playbridge/packages/pixi",
     "@playbridge/web": "file:vendor/playbridge/packages/web",
     "pixi.js": "8.20.0"
   },

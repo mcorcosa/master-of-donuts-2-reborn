@@ -1,4 +1,5 @@
 import type { AdOutcome } from '@playbridge/core';
+import { PixiGameMenu } from '@playbridge/pixi';
 import type { Application } from 'pixi.js';
 import { GameSound } from '../audio/GameSound';
 import {
@@ -15,7 +16,8 @@ import { AdDialog, type AdDialogContent } from './adDialog';
 import { installBoardDebug } from './boardDebug';
 import type { BoosterButtonView, BoosterFooterView } from './boosters';
 import { arrangeFirstMatch, findFirstMatch, type FirstMatchProgress } from './firstMatch';
-import { preloadGameFont } from './gameFont';
+import { GAME_FONT_FAMILY, preloadGameFont } from './gameFont';
+import { COMPACT_COMMERCE_MAX_WIDTH, GAME_MENU_LABELS, layoutGameMenu, type SafeArea } from './gameMenu';
 import { GameOverPresentation } from './gameOverPresentation';
 import { type BoosterButton, type Point, StackGestures } from './gestures';
 import { VIEW_WIDTH } from './layout';
@@ -93,20 +95,22 @@ interface GameResultsOptions {
   monetization?: GameMonetization;
   quality: BrowserQuality;
   onPause?(callback: () => void): () => void;
-  onResultsVisibilityChange?(visible: boolean): void;
+  onResultsVisibilityChange?: (visible: boolean) => void;
+  onGameMenuOpenChange?(open: boolean): void;
 }
 
 export async function mountGame(app: Application, {
   jokerPlaytest, firstMatch, personalScores, getFriendsScores, monetization, quality, onPause, onResultsVisibilityChange,
-}: GameResultsOptions): Promise<void> {
+  onGameMenuOpenChange,
+}: GameResultsOptions): Promise<{ reserveCommerceSpace(): void }> {
   const { canvas, renderer, stage } = app;
   const document = canvas.ownerDocument;
   const [art] = await Promise.all([loadArt(), preloadGameFont(document.fonts).catch(error => {
     console.warn('The bundled game font could not be loaded.', error);
   })]);
   const scene = new GameScene(art);
-  const sound = new GameSound();
   const window = document.defaultView!;
+  const sound = new GameSound(() => window.localStorage);
   const adDialog = monetization ? new AdDialog(document) : null;
   const createRun = jokerPlaytest ? (): GameState => ({
     stacks: [[JOKER], ['red', 'blue'], ['red', 'blue']],
@@ -116,7 +120,10 @@ export async function mountGame(app: Application, {
   const events = new AbortController();
   const options = { signal: events.signal };
   const touchAction = canvas.style.touchAction;
+  const tabIndex = canvas.getAttribute('tabindex');
+  const canvasDescription = canvas.getAttribute('aria-description');
   canvas.style.touchAction = 'none';
+  canvas.tabIndex = 0;
 
   let firstMatchProgress = jokerPlaytest ? null : firstMatch;
   let firstMatchGuideAt = 0;
@@ -128,6 +135,8 @@ export async function mountGame(app: Application, {
   let bestCombo = 0;
   let results: ResultsSession | null = null;
   let resultsDrag: { id: number; y: number } | null = null;
+  let boardPointer: number | undefined;
+  const menuPointers = new Set<number>();
   let gameOver: GameOverPresentation | null = null;
   let abandonment: GameOverPresentation | null = null;
   let extraChance: GameState | null = null;
@@ -170,13 +179,41 @@ export async function mountGame(app: Application, {
   let viewportDirty = true;
   let viewportWidth = app.screen.width;
   let viewportHeight = app.screen.height;
-  let safeAreaBottom = readSafeAreaBottom();
+  let safeArea = readSafeArea();
+  let commerceMounted = false;
+  let boardTop = 0;
+  let menuVisible: boolean | undefined;
   let displayQuery: MediaQueryList | undefined;
   let painted = false;
   let wakeAt = 0;
   let wakeTimer = 0;
   let cancelWarmup: (() => void) | undefined;
   let warmup: Generator<void> | null = scene.warmup(renderer, motion.matches);
+  const gameMenu = new PixiGameMenu({
+    labels: GAME_MENU_LABELS,
+    theme: {
+      fontFamily: GAME_FONT_FAMILY.join(', '),
+      textColor: 0x672e20,
+      buttonColor: 0xf3c08b,
+      buttonHoverColor: 0xffd59c,
+      focusColor: 0x3c664e,
+      panelColor: 0xfff2dc,
+      scrimColor: 0x30130f,
+      scrimAlpha: 0.62,
+    },
+    isSoundEnabled: () => sound.enabled,
+    onToggleSound(event) {
+      if (!menuVisible || menuBlockedByHost()) return;
+      sound.toggle(event.isTrusted);
+      if (!sound.enabled) discardPresentationCues();
+      syncMenuDescription();
+    },
+    onVisualChange() {
+      if (painted) frames.invalidate();
+    },
+    canOpen: () => !state.gameOver && !menuBlockedByHost(),
+    onOpenChange: menuChanged,
+  });
 
   function hasJoker(): boolean {
     return state.stacks.some(stack => stack.includes(JOKER)) || pending?.playback.jokerIndex !== undefined;
@@ -288,8 +325,10 @@ export async function mountGame(app: Application, {
     displayQuery.addEventListener('change', wakeViewport, options);
   }
 
-  function readSafeAreaBottom(): number {
-    return parseFloat(window.getComputedStyle(canvas).getPropertyValue('--game-safe-area-bottom')) || 0;
+  function readSafeArea(): SafeArea {
+    const style = window.getComputedStyle(canvas);
+    const inset = (side: keyof SafeArea) => parseFloat(style.getPropertyValue(`--game-safe-area-${side}`)) || 0;
+    return { top: inset('top'), right: inset('right'), bottom: inset('bottom'), left: inset('left') };
   }
 
   function syncViewport(): void {
@@ -299,9 +338,10 @@ export async function mountGame(app: Application, {
     quality.syncDisplay();
     if (dpr !== quality.nativeDpr) watchDisplay();
     const { innerWidth, innerHeight } = window;
-    const inset = readSafeAreaBottom();
-    const insetChanged = safeAreaBottom !== inset;
-    safeAreaBottom = inset;
+    const insets = readSafeArea();
+    const insetChanged = insets.top !== safeArea.top || insets.right !== safeArea.right ||
+      insets.bottom !== safeArea.bottom || insets.left !== safeArea.left;
+    safeArea = insets;
     if (innerWidth === viewportWidth && innerHeight === viewportHeight) {
       if (renderer.resolution !== quality.frames.resolution) {
         renderer.resolution = quality.frames.resolution;
@@ -319,7 +359,7 @@ export async function mountGame(app: Application, {
   }
 
   function syncHintAvailability(): boolean {
-    const settled = !state.gameOver && !adPlayback && !adDialog?.element.open &&
+    const settled = !state.gameOver && !adPlayback && !adDialog?.element.open && !gameMenu.isOpen &&
       !boosters.claiming && !pending && !scene.moveAnimating && !scene.stackUnlockAnimating;
     if (settled && hintCache?.state !== state) hintCache = { state, eligible: canRequestSetupHint(state) };
     const available = settled && hintCache?.eligible === true;
@@ -338,8 +378,33 @@ export async function mountGame(app: Application, {
     return visibleAndFocused() && !hostPaused;
   }
 
+  function nativeModalOpen(): boolean {
+    return Array.from(document.querySelectorAll('dialog[open]')).some(dialog => dialog !== adDialog?.element);
+  }
+
   function otherDialogOpen(): boolean {
-    return adDialog !== null && Array.from(document.querySelectorAll('dialog[open]')).some(dialog => dialog !== adDialog.element);
+    return gameMenu.isOpen || nativeModalOpen();
+  }
+
+  function menuBlockedByHost(): boolean {
+    return !foreground() || !!adPlayback || !!adDialog?.element.open || nativeModalOpen();
+  }
+
+  function syncMenuDescription(): void {
+    if (!menuVisible) {
+      restoreCanvasAttribute('aria-description', canvasDescription);
+      return;
+    }
+    const soundState = sound.enabled ? 'on' : 'off';
+    const controls = gameMenu.isOpen
+      ? 'Game menu open. Tab to choose Resume or Sound effects. Enter or Space to activate, or Escape to resume.'
+      : 'Use Tab to choose Game menu or Sound effects, then Enter or Space to activate.';
+    canvas.setAttribute('aria-description', `${controls} Sound effects are ${soundState}.`);
+  }
+
+  function restoreCanvasAttribute(name: string, value: string | null): void {
+    if (value === null) canvas.removeAttribute(name);
+    else canvas.setAttribute(name, value);
   }
 
   function syncBoosterClock(now: number): void {
@@ -388,6 +453,12 @@ export async function mountGame(app: Application, {
   }
 
   function syncControls(now = performance.now()): void {
+    const visible = !state.gameOver;
+    if (menuVisible !== visible) {
+      menuVisible = visible;
+      gameMenu.setVisible(visible);
+      syncMenuDescription();
+    }
     syncHintAvailability();
     syncBoosterAvailability(now);
   }
@@ -716,6 +787,10 @@ export async function mountGame(app: Application, {
   function silencePresentation(): void {
     sound.stop();
     scene.clearMoveCosts(state);
+    discardPresentationCues();
+  }
+
+  function discardPresentationCues(): void {
     landing = null;
     if (pending) pending.popAt = null;
     for (const level of levels) level.silent = true;
@@ -761,17 +836,26 @@ export async function mountGame(app: Application, {
     renderedSize = { width: viewportWidth, height: viewportHeight };
     resultsDrag = null;
     cancelPresentation();
-    scene.resize(width, height, safeAreaBottom * height / viewportHeight);
+    const { boardTop: reserved, menuLayout } = layoutGameMenu(viewportWidth, viewportHeight, safeArea, commerceMounted);
+    const scaleX = width / viewportWidth;
+    const scaleY = height / viewportHeight;
+    boardTop = reserved * scaleY;
+    scene.root.y = boardTop;
+    scene.resize(width, Math.max(1, height - boardTop), safeArea.bottom * scaleY);
+    gameMenu.root.scale.set(scaleX, scaleY);
+    gameMenu.setLayout(menuLayout);
     draw();
     syncControls();
   }
 
-  function toScene(client: Point): Point {
+  function canvasFraction(client: Point): Point {
     const rect = canvas.getBoundingClientRect();
-    return scene.toLocal({
-      x: (client.x - rect.left) * app.screen.width / (rect.width || 1),
-      y: (client.y - rect.top) * app.screen.height / (rect.height || 1),
-    });
+    return { x: (client.x - rect.left) / (rect.width || 1), y: (client.y - rect.top) / (rect.height || 1) };
+  }
+
+  function toScene(client: Point): Point {
+    const point = canvasFraction(client);
+    return scene.toLocal({ x: point.x * app.screen.width, y: point.y * app.screen.height - boardTop });
   }
 
   function hit(event: PointerEvent, mode: 'tap' | 'swipe') {
@@ -794,6 +878,14 @@ export async function mountGame(app: Application, {
       if (event.isTrusted && document.hasFocus?.()) focused = true;
       wake();
     }
+    const point = canvasFraction({ x: event.clientX, y: event.clientY });
+    if (gameMenu.blocksPointer(point.x * viewportWidth, point.y * viewportHeight)) {
+      menuPointers.add(event.pointerId);
+      frames.invalidate();
+      return;
+    }
+    // A fresh press can reuse an ID after the browser lost a previous release.
+    menuPointers.delete(event.pointerId);
     const locked = pending !== null || scene.stackUnlockAnimating || queuedStackTaps.length > 0;
     if (leaving || hostPaused || hadAdPlayback || adPlayback || adDialog?.element.open || otherDialogOpen() ||
         boosters.claiming || resultsDrag || event.button !== 0 ||
@@ -827,6 +919,7 @@ export async function mountGame(app: Application, {
   }
 
   function capture(pointerId: number): void {
+    boardPointer = pointerId;
     try {
       canvas.setPointerCapture(pointerId);
     } catch {
@@ -843,7 +936,7 @@ export async function mountGame(app: Application, {
   }
 
   function wheelResults(event: WheelEvent): void {
-    if (!results || adPlayback || resultsDrag || event.ctrlKey || event.metaKey) return;
+    if (!results || adPlayback || resultsDrag || gameMenu.isOpen || event.ctrlKey || event.metaKey) return;
     const client = { x: event.clientX, y: event.clientY };
     const local = toScene(client);
     if (!scene.canScrollResults(local)) return;
@@ -854,7 +947,7 @@ export async function mountGame(app: Application, {
   }
 
   function track(event: PointerEvent): void {
-    if (trackResultsDrag(event)) return;
+    if (gameMenu.isOpen || menuPointers.has(event.pointerId) || trackResultsDrag(event)) return;
     const locked = pending !== null || scene.stackUnlockAnimating || queuedStackTaps.length > 0;
     const held = gestures.owns(event.pointerId);
     const idleMouse = !locked && !gestures.active && event.pointerType === 'mouse' && gestures.source !== null;
@@ -881,6 +974,12 @@ export async function mountGame(app: Application, {
   }
 
   function up(event: PointerEvent): void {
+    if (boardPointer === event.pointerId) boardPointer = undefined;
+    // Pixi can close on pointertap before this native release reaches the board.
+    if (menuPointers.delete(event.pointerId) || gameMenu.isOpen) {
+      frames.invalidate();
+      return;
+    }
     if (trackResultsDrag(event)) {
       resultsDrag = null;
       return;
@@ -1047,9 +1146,13 @@ export async function mountGame(app: Application, {
     }
     const playback = beginMatch(before, state, from, to, started, motion.matches);
     const level = levelReveal(before, state, motion.matches);
-    if (level) levelStartScore = level.levelStartScore;
+    if (level) {
+      levelStartScore = level.levelStartScore;
+      level.silent = !sound.enabled;
+    }
     if (playback) {
-      const popAt = playback.reduced ? null : clearStart(playback) + matchPopTime(playback.runLength, playback.runLength - 1);
+      const popAt = playback.reduced || !sound.enabled ? null
+        : clearStart(playback) + matchPopTime(playback.runLength, playback.runLength - 1);
       pending = { playback, level, inserts, popAt };
       syncControls();
       if (level) levels.push(level);
@@ -1081,11 +1184,13 @@ export async function mountGame(app: Application, {
       scene.startMoveCost(to, started, motion.matches, remaining);
     }
     if (motion.matches) sound.landing(color);
-    else landing = { color, at: started + FLIGHT_MS };
+    else if (sound.enabled) landing = { color, at: started + FLIGHT_MS };
     syncControls();
   }
 
   function cancel(event: PointerEvent): void {
+    if (event.type === 'pointercancel' && menuPointers.delete(event.pointerId)) frames.invalidate();
+    if (boardPointer === event.pointerId) boardPointer = undefined;
     if (resultsDrag?.id === event.pointerId) resultsDrag = null;
     if (gestures.cancel(event.pointerId)) {
       tapOnlyPress = false;
@@ -1197,6 +1302,37 @@ export async function mountGame(app: Application, {
     wakeViewport();
   }
 
+  function menuChanged(open: boolean): void {
+    if (open) {
+      // Keep accepted moves, but discard unfinished presses and deferred taps.
+      if (boardPointer !== undefined) {
+        menuPointers.add(boardPointer);
+        boardPointer = undefined;
+      }
+      resultsDrag = null;
+      gestures.reset();
+      tapOnlyPress = false;
+      queuedStackTaps.length = 0;
+      arrowPointer = null;
+      sound.stop();
+      discardPresentationCues();
+      quality.frames.interrupt();
+      updateInteraction();
+    }
+    syncMenuDescription();
+    if (foreground() && !adDialog?.element.open && !nativeModalOpen()) canvas.focus({ preventScroll: true });
+    onGameMenuOpenChange?.(open);
+    modalChanged();
+  }
+
+  function menuKeydown(event: KeyboardEvent): void {
+    if (hostPaused && event.isTrusted && document.hasFocus?.()) {
+      focused = true;
+      wake();
+    }
+    if (!menuBlockedByHost()) gameMenu.handleKey(event);
+  }
+
   function modalChanged(): void {
     refreshAdPlayback();
     syncGameOverVisibility();
@@ -1242,11 +1378,12 @@ export async function mountGame(app: Application, {
     frames.invalidate();
   }
 
-  stage.addChild(scene.root);
+  stage.addChild(scene.root, gameMenu.root);
   sizeCanvas();
   resize();
   renderer.on('resize', rendererResized);
   watchDisplay();
+  canvas.addEventListener('keydown', menuKeydown, options);
   canvas.addEventListener('pointerdown', down, options);
   canvas.addEventListener('pointerleave', leave, options);
   canvas.addEventListener('lostpointercapture', cancel, options);
@@ -1298,8 +1435,9 @@ export async function mountGame(app: Application, {
   });
   // The purchase dialog is mounted separately. Observe native modal transitions
   // so opening it between frames still stops both gameplay clocks.
-  const modalObserver = adDialog && typeof MutationObserver === 'function' ? new MutationObserver(records => {
-    if (records.some(record => record.target !== adDialog.element && record.target.nodeName === 'DIALOG')) modalChanged();
+  const modalObserver = typeof MutationObserver === 'function' ? new MutationObserver(records => {
+    if (records.some(({ target }) => target.nodeName === 'DIALOG' &&
+        target !== adDialog?.element)) modalChanged();
   }) : null;
   modalObserver?.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open'] });
 
@@ -1313,13 +1451,26 @@ export async function mountGame(app: Application, {
     events.abort();
     modalObserver?.disconnect();
     adDialog?.destroy();
+    gameMenu.destroy();
     sound.destroy();
     unsubscribePause?.();
     stopWarmup();
     if (wakeAt) window.clearTimeout(wakeTimer);
     frames.dispose();
     canvas.style.touchAction = touchAction;
+    restoreCanvasAttribute('tabindex', tabIndex);
+    restoreCanvasAttribute('aria-description', canvasDescription);
     renderer.off('resize', rendererResized);
     stage.off('destroyed', close);
   });
+
+  return {
+    reserveCommerceSpace() {
+      if (commerceMounted) return;
+      commerceMounted = true;
+      if (viewportWidth > COMPACT_COMMERCE_MAX_WIDTH) return;
+      resize();
+      frames.invalidate();
+    },
+  };
 }

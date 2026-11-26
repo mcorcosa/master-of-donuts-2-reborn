@@ -43,8 +43,11 @@ async function main(): Promise<void> {
     ? createBrowserPersistence(scopedBrowserStorage('', () => window.sessionStorage))
     : platform.persistence);
 
+  let gameView: Awaited<ReturnType<typeof mountGame>> | undefined;
   let resultsVisible = false;
+  let menuOpen = false;
   let setRemoveAdsVisible: ((visible: boolean) => void) | undefined;
+  const syncRemoveAdsVisibility = () => setRemoveAdsVisible?.(!resultsVisible && !menuOpen);
   const app = new Application();
   await startGame(platform, async () => {
     const canvas = document.querySelector<HTMLCanvasElement>('#game');
@@ -56,13 +59,13 @@ async function main(): Promise<void> {
       canvas,
       width: window.innerWidth,
       height: window.innerHeight,
-      background: '#15100d',
+      background: '#fdefd6',
       antialias: true,
       autoDensity: true,
       autoStart: false,
       resolution: quality.frames.resolution,
     });
-    await mountGame(app, {
+    gameView = await mountGame(app, {
       jokerPlaytest,
       firstMatch: jokerPlaytest || removeAdsDemo ? null : await loadFirstMatch(platform.persistence),
       personalScores,
@@ -72,7 +75,11 @@ async function main(): Promise<void> {
       onPause: callback => platform.lifecycle.onPause(callback),
       onResultsVisibilityChange(visible) {
         resultsVisible = visible;
-        setRemoveAdsVisible?.(!visible);
+        syncRemoveAdsVisibility();
+      },
+      onGameMenuOpenChange(open) {
+        menuOpen = open;
+        syncRemoveAdsVisibility();
       },
     });
   });
@@ -86,7 +93,8 @@ async function main(): Promise<void> {
     const view = mountRemoveAds(document, purchase, callback => platform.lifecycle.onPause(callback), demoCopy,
       open => facebook?.monetization.setModalOpen(open));
     setRemoveAdsVisible = view.setVisible;
-    setRemoveAdsVisible(!resultsVisible);
+    syncRemoveAdsVisibility();
+    gameView?.reserveCommerceSpace();
     app.stage.once('destroyed', view.destroy);
   }
 }

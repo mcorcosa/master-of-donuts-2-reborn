@@ -1,5 +1,8 @@
 :root {
   --game-font: 'DynaPuff', 'Trebuchet MS', Arial, sans-serif;
+  --game-safe-area-top: env(safe-area-inset-top, 0px);
+  --game-safe-area-right: env(safe-area-inset-right, 0px);
+  --game-safe-area-left: env(safe-area-inset-left, 0px);
   --game-safe-area-bottom: env(safe-area-inset-bottom, 0px);
   font-family: var(--game-font);
 }
@@ -18,4 +21,15 @@ body {
   display: block;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+#game:focus-visible {
+  outline: 2px solid #3c664e;
+  outline-offset: -2px;
+}
+
+@media (min-width: 841px) {
+  body .remove-ads-button {
+    right: max(8px, env(safe-area-inset-right, 0px), calc(50% - 465px));
+  }
 }

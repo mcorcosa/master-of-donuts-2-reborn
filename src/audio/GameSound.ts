@@ -13,6 +13,7 @@ const MATCH_GAIN = 0.78;
 const LEVEL_GAIN = 3.2;
 const MAX_VOICES = 8;
 const READY_GRACE_MS = 100;
+const SOUND_KEY = 'master-of-donuts-2-reborn.sound.v1';
 
 interface Cue {
   asset: Asset;
@@ -27,9 +28,34 @@ export class GameSound {
   private readonly abort = new AbortController();
   private readonly voices = new Map<AudioBufferSourceNode, { gain: GainNode; asset: Asset }>();
   private pending: Cue[] = [];
+  private audible = true;
+
+  constructor(private readonly getStorage: () => Pick<Storage, 'getItem' | 'setItem'> = () => globalThis.localStorage) {
+    try {
+      this.audible = this.getStorage().getItem(SOUND_KEY) !== 'off';
+    } catch {
+      // Sound defaults to on when storage is unavailable.
+    }
+  }
+
+  get enabled(): boolean {
+    return this.audible;
+  }
+
+  toggle(activate: boolean): void {
+    if (this.abort.signal.aborted) return;
+    this.audible = !this.audible;
+    if (!this.audible) this.stop();
+    else if (activate) this.activate();
+    try {
+      this.getStorage().setItem(SOUND_KEY, this.audible ? 'on' : 'off');
+    } catch {
+      // The preference still applies for this session.
+    }
+  }
 
   activate(): void {
-    if (this.abort.signal.aborted || typeof AudioContext === 'undefined') return;
+    if (!this.audible || this.abort.signal.aborted || typeof AudioContext === 'undefined') return;
     try {
       const context = this.context ??= new AudioContext();
       if (context.state !== 'running') {
@@ -89,7 +115,7 @@ export class GameSound {
   }
 
   private play(asset: Asset | undefined, gain: number): void {
-    if (!asset || !this.context) return;
+    if (!this.audible || !asset || !this.context) return;
     const now = performance.now();
     this.pending.push({ asset, gain, expires: now + READY_GRACE_MS });
     this.flush();
@@ -97,6 +123,7 @@ export class GameSound {
   }
 
   private flush(): void {
+    if (!this.audible || this.abort.signal.aborted) return;
     const now = performance.now();
     const context = this.context;
     // Give an initial decode/resume a short chance to catch up to the visible event.

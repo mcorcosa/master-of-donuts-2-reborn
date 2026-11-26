@@ -4,6 +4,7 @@ export default defineConfig(({ mode }) => {
   const facebook = mode === 'facebook';
   return {
     base: './',
+    resolve: { dedupe: ['pixi.js'] },
     build: { outDir: facebook ? 'dist-facebook' : 'dist' },
     define: { __FACEBOOK__: JSON.stringify(facebook) },
     plugins: [{

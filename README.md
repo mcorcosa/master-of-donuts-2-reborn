@@ -6,12 +6,13 @@ Use [mcorcosa/master-of-donuts-2-reborn](https://github.com/mcorcosa/master-of-d
 
 ## Local development
 
-Use Node.js 24 to match CI. PlayBridge is a Git submodule at `vendor/playbridge` pinned to `c31f8a0cdb762dbb5b1a0e7c3fd7e0041b4e9f33`.
+Use Node.js 24 to match CI. Reborn pins PlayBridge through the committed Git submodule at `vendor/playbridge`. From the game root, `git ls-tree HEAD -- vendor/playbridge` prints the recorded commit.
 
 On a clean checkout, run these commands in order from the Reborn game root. Build PlayBridge before installing the game dependencies.
 
 ```sh
 git submodule update --init --recursive
+git -C vendor/playbridge rev-parse HEAD
 npm --prefix vendor/playbridge ci --include=dev
 npm --prefix vendor/playbridge run build
 npm ci
@@ -25,6 +26,8 @@ npm run build:facebook
 - `npm run test` runs the Vitest suite once.
 - `npm run build` checks types and writes the browser build to `dist/`.
 - `npm run build:facebook` checks types and writes the Facebook Instant Games build to `dist-facebook/`.
+
+See the [project brief](docs/project-brief.md#pixi-gameplay-menu) for the Pixi menu integration.
 
 ## Legacy personal scores
 

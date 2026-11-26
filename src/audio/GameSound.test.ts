@@ -9,7 +9,7 @@ function deferred() {
 
 const idle = () => new Promise<void>(resolve => setImmediate(resolve));
 
-function setup() {
+function setup(getStorage?: () => Pick<Storage, 'getItem' | 'setItem'>) {
   const bytesByAsset = new WeakMap<ArrayBuffer, string>();
   const fetchAsset = vi.fn(async (url: string) => {
     const bytes = new ArrayBuffer(1);
@@ -32,7 +32,7 @@ function setup() {
   const createContext = vi.fn(function () { return context; });
   vi.stubGlobal('fetch', fetchAsset);
   vi.stubGlobal('AudioContext', createContext);
-  const sound = new GameSound();
+  const sound = new GameSound(getStorage);
   const voices = () => context.createBufferSource.mock.results.map(result => result.value as ReturnType<typeof voice>);
   return { sound, context, createContext, fetchAsset, voices };
 }
@@ -135,6 +135,83 @@ describe('GameSound', () => {
     sound.activate();
     sound.levelUp();
     expect(voices()).toHaveLength(1);
+  });
+
+  it('restores mute across instances and keeps sound usable if browser storage fails', async () => {
+    let saved: string | null = null;
+    const storage = { getItem: vi.fn(() => saved), setItem: vi.fn((_key: string, value: string) => { saved = value; }) };
+    const first = new GameSound(() => storage);
+    first.toggle(false);
+    expect(first.enabled).toBe(false);
+
+    const { sound, createContext, voices } = setup(() => storage);
+    expect(sound.enabled).toBe(false);
+    sound.activate();
+    sound.match('red');
+    expect(createContext).not.toHaveBeenCalled();
+    sound.toggle(true);
+    expect(createContext).toHaveBeenCalledOnce();
+    await idle();
+    sound.match('red');
+    expect(voices()).toHaveLength(1);
+    expect(new GameSound(() => storage).enabled).toBe(true);
+
+    const { sound: unavailable } = setup(() => { throw new Error('Storage denied'); });
+    expect(unavailable.enabled).toBe(true);
+    unavailable.toggle(false);
+    expect(unavailable.enabled).toBe(false);
+    unavailable.toggle(true);
+    expect(unavailable.enabled).toBe(true);
+  });
+
+  it('stops active cues and discards queued and muted cues while an old resume is pending', async () => {
+    const { sound, context, voices } = setup();
+    sound.activate();
+    await idle();
+    sound.landing('blue');
+    const [active] = voices();
+
+    context.state = 'suspended';
+    const resume = deferred();
+    context.resume.mockImplementationOnce(async () => {
+      await resume.promise;
+      context.state = 'running';
+    });
+    sound.activate();
+    sound.levelUp();
+    sound.toggle(false);
+    expect(active.stop).toHaveBeenCalledOnce();
+    expect(active.disconnect).toHaveBeenCalledOnce();
+    sound.match('purple');
+
+    sound.toggle(true);
+    expect(context.resume).toHaveBeenCalledTimes(2);
+    resume.resolve();
+    await idle();
+    expect(voices()).toHaveLength(1);
+    sound.match('green');
+    expect(voices().map(source => source.buffer.name)).toEqual(['pop-blue.m4a', 'pop-green.m4a']);
+  });
+
+  it('reuses decoding across a mute cycle and plays only a fresh audible cue', async () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0);
+    const { sound, context, fetchAsset, voices } = setup();
+    const decode = context.decodeAudioData.getMockImplementation()!;
+    const ready = deferred();
+    context.decodeAudioData.mockImplementation(async bytes => {
+      await ready.promise;
+      return decode(bytes);
+    });
+    sound.activate();
+    sound.match('red');
+    sound.toggle(false);
+    sound.match('blue');
+    sound.toggle(true);
+    sound.match('green');
+    ready.resolve();
+    await idle();
+    expect(fetchAsset).toHaveBeenCalledTimes(8);
+    expect(voices().map(source => source.buffer.name)).toEqual(['pop-green.m4a']);
   });
 
   it('bounds overlapping voices and preserves a celebration during a burst', async () => {

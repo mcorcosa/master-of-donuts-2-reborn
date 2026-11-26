@@ -29,6 +29,30 @@ const adRequest: AdRequestOptions = {
   isCurrent: () => true, canShow: () => true, onAttempt() {}, onRecovery() {},
 };
 
+test('forwards consented analytics only when the Facebook host provides logEvent', async () => {
+  const logEvent = vi.fn(function (this: FacebookHostSDK, _name: string) { expect(this).toBe(host); });
+  const host = { ...mockSDK(), logEvent };
+  const { services } = createRebornFacebookPlatform(async () => host, '', persistence);
+  await startGame(services, async () => {});
+  const details = { value: 7, properties: { mode: 'classic', combo: 2 } };
+  expect(services.capabilities().analytics).toBe('available');
+  expect(services.analytics.track('test_event', details).status).toBe('unavailable');
+  expect(logEvent).not.toHaveBeenCalled();
+  services.analytics.setConsent(true);
+  expect(services.analytics.track('test_event').status).toBe('completed');
+  expect(services.analytics.track('test_event', details).status).toBe('completed');
+  expect(logEvent.mock.calls).toEqual([
+    ['test_event'],
+    ['test_event', 7, { mode: 'classic', combo: '2' }],
+  ]);
+
+  const unsupported = createRebornFacebookPlatform(async () => ({ ...mockSDK(), logEvent: undefined }), '', persistence).services;
+  await startGame(unsupported, async () => {});
+  unsupported.analytics.setConsent(true);
+  expect(unsupported.capabilities().analytics).toBe('unsupported');
+  expect(unsupported.analytics.track('test_event').status).toBe('unsupported');
+});
+
 test('only prepares a configured rewarded ad after opt-in and preserves SDK bindings', async () => {
   const loadAsync = vi.fn(async () => {});
   const showAsync = vi.fn(async () => {});

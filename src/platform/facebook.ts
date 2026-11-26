@@ -163,7 +163,12 @@ export function createRebornFacebookPlatform(
           if (progress !== 100 || !initializing) host.setLoadingProgress(progress);
         },
         onPause: callback => host.onPause?.(callback),
-        logEvent: name => host.logEvent(name),
+        get logEvent() {
+          try {
+            const send = host.logEvent;
+            return typeof send === 'function' ? send.bind(host) : undefined;
+          } catch { return undefined; }
+        },
         get player() { return host.player; },
         get payments() {
           try {

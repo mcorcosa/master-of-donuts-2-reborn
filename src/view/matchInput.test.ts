@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { AdOutcome } from '@playbridge/core';
 import { createBrowserPersistence } from '@playbridge/web';
-import type { Application } from 'pixi.js';
+import type { Application, Container, FederatedPointerEvent } from 'pixi.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GameSound } from '../audio/GameSound';
 import { createGame, type DoughInsert, findSetupHint, type GameState, JOKER, move } from '../game';
@@ -104,6 +104,9 @@ class TestElement extends EventTarget {
   readonly children: TestElement[] = [];
   parent: TestElement | null = null;
   textContent = '';
+  className = '';
+  readonly attributes = new Map<string, string>();
+  readonly focus = vi.fn();
   hidden = false;
   open = false;
 
@@ -112,8 +115,9 @@ class TestElement extends EventTarget {
     this.nodeName = tag.toUpperCase();
   }
 
-  setAttribute() {}
-  focus() {}
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+  setAttribute(name: string, value: string) { this.attributes.set(name, value); }
+  removeAttribute(name: string) { this.attributes.delete(name); }
   showModal() { this.open = true; }
   close() { this.open = false; }
 
@@ -205,7 +209,7 @@ async function setup(
   let safeAreaBottom = 0;
   const window = Object.assign(new EventTarget(), {
     matchMedia: (query: string) => query.includes('prefers-reduced-motion') ? motion : new EventTarget(),
-    getComputedStyle: () => ({ getPropertyValue: () => `${safeAreaBottom}px` }),
+    getComputedStyle: () => ({ getPropertyValue: (name: string) => name === '--game-safe-area-bottom' ? `${safeAreaBottom}px` : '0px' }),
     innerWidth: 400, innerHeight: 700, devicePixelRatio, location: { search }, localStorage, sessionStorage,
     requestAnimationFrame(callback: FrameRequestCallback) {
       callbacks.set(++requestId, callback);
@@ -232,7 +236,7 @@ async function setup(
     observe() {}
     disconnect() { modalChanged = () => {}; }
   });
-  const canvas = Object.assign(new EventTarget(), {
+  const canvas = Object.assign(new TestElement('canvas'), {
     ownerDocument: document, style: {}, setPointerCapture: vi.fn(),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 700 }),
   });
@@ -261,19 +265,36 @@ async function setup(
       return watchBoosterAd(ad.canShow);
     },
   } : undefined);
-  await mountGame(app as unknown as Application, {
+  const view = await mountGame(app as unknown as Application, {
     jokerPlaytest, firstMatch, personalScores, getFriendsScores, monetization, quality, onResultsVisibilityChange,
     onPause(callback) { pause = callback; return () => { pause = () => {}; }; },
   });
-  const dialog = body.children[0];
+  const dialog = body.children.find(element => element.className === 'game-ad-dialog')!;
+  const menuRoot = app.stage.addChild.mock.lastCall![1] as Container;
+  const menuOpen = () => canvas.getAttribute('aria-description')?.includes('Game menu open.') ?? false;
+  const menuLaunch = menuRoot.getChildByLabel('Game menu', true)!;
+  const menuSound = menuRoot.getChildrenByLabel('Sound effects', true);
+  const clickMenu = (label: string, pointerId = 21) => {
+    const button = label === 'Sound effects'
+      ? menuSound[menuOpen() ? 1 : 0]
+      : menuRoot.getChildByLabel(label, true)!;
+    const event = { button: 0, pointerId, nativeEvent: new Event('pointerup') } as FederatedPointerEvent;
+    button.emit('pointerdown', event);
+    button.emit('pointertap', event);
+  };
+  const keyMenu = (key: string, shiftKey = false) => {
+    const event = Object.assign(new Event('keydown', { cancelable: true }), { key, shiftKey });
+    canvas.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
   const destroy = scene.root.once.mock.lastCall![1] as () => void;
   const clickDialog = (label: string) => {
     const button = dialog?.open && dialog.children[2].children.find(child => !child.hidden && child.textContent === label);
     if (button) button.dispatchEvent(new Event('click'));
     return !!button;
   };
+  const other = new TestElement('dialog');
   const setOtherModalOpen = (open: boolean) => {
-    const other = body.children[1] ?? new TestElement('dialog');
     if (!other.parent) body.append(other);
     other.open = open;
     modalChanged(other);
@@ -309,7 +330,8 @@ async function setup(
   return { window: window as typeof window & Pick<Window, 'rebornBoardSnapshot'>,
     document, renderer, render: app.render, resizeViewport, pointer, tap, wheel, match, tick,
     motion, localStorage, sessionStorage, onResultsVisibilityChange, suspendFromHost: () => pause(),
-    clickDialog, dialog, destroy, setOtherModalOpen,
+    clickDialog, dialog, destroy, setOtherModalOpen, canvas, menuRoot, menuOpen, menuLaunch, menuSound, clickMenu, keyMenu,
+    reserveCommerceSpace: view.reserveCommerceSpace,
     get refillEnds() { return refillEnds; }, get unlockEnds() { return unlockEnds; } };
 }
 
@@ -507,6 +529,106 @@ describe('first-match input', () => {
   });
 });
 
+describe('in-game menu', () => {
+  it('shields toolbar presses and held board gestures through Resume and Escape', async () => {
+    vi.stubEnv('MODE', 'board-debug');
+    const game = await setup(true);
+    const snapshot = game.window.rebornBoardSnapshot!;
+    const before = snapshot();
+    game.pointer('pointerdown', game.menuLaunch.x + 22, 11, 'touch', 1, game.menuLaunch.y + 22);
+    game.pointer('pointermove', 150, 11, 'touch');
+    game.pointer('pointerup', 150, 11, 'touch');
+    expect(game.canvas.setPointerCapture).not.toHaveBeenCalled();
+
+    game.pointer('pointerdown', 50, 12, 'touch');
+    game.pointer('pointermove', 150, 12, 'touch');
+    expect(game.keyMenu('Tab')).toBe(true);
+    expect(game.keyMenu('Enter')).toBe(true);
+    expect(game.menuOpen()).toBe(true);
+    expect(game.canvas.focus).toHaveBeenCalledOnce();
+
+    game.match();
+    game.pointer('pointerdown', 50, 13, 'touch');
+    game.clickMenu('Resume', 13);
+    game.pointer('pointermove', 150, 13, 'touch');
+    game.pointer('pointerup', 150, 13, 'touch');
+    game.pointer('pointerup', 150, 12, 'touch');
+    expect(game.menuOpen()).toBe(false);
+    expect(game.canvas.focus).toHaveBeenCalledTimes(2);
+    expect(snapshot()).toEqual(before);
+    expect(move).not.toHaveBeenCalled();
+
+    game.clickMenu('Game menu');
+    expect(game.keyMenu('Tab')).toBe(true);
+    expect(game.keyMenu('Tab')).toBe(true);
+    expect(game.keyMenu('Escape')).toBe(true);
+    expect(game.menuOpen()).toBe(false);
+    game.match();
+    expect(move).toHaveBeenCalledOnce();
+    expect(snapshot().current.runId).toBe(before.current.runId);
+    expect(snapshot().current.lastAction).toMatchObject({ kind: 'transfer' });
+    game.destroy();
+    expect(game.menuRoot.destroyed).toBe(true);
+    expect(game.canvas.getAttribute('aria-description')).toBeNull();
+  });
+
+  it('reserves a full Pixi toolbar row for compact commerce and offsets the board hit coordinates', async () => {
+    const game = await setup();
+    game.resizeViewport(1366, 768);
+    scene.resize.mockClear();
+    game.reserveCommerceSpace();
+    expect(scene.resize).not.toHaveBeenCalled();
+    game.resizeViewport(400, 700);
+    expect(game.menuLaunch.position).toMatchObject({ x: 8, y: 6 });
+    expect(game.menuSound[0].position).toMatchObject({ x: 60, y: 6 });
+    expect(scene.resize).toHaveBeenLastCalledWith(400, 643, 0);
+    game.pointer('pointerdown', 50, 1, 'mouse', 1, 200);
+    expect(scene.hit.mock.lastCall?.[0]).toEqual({ x: 50, y: 143 });
+  });
+
+  it('drops queued input and presentation audio while letting an accepted move settle', async () => {
+    const cue = vi.spyOn(GameSound.prototype, 'match');
+    const game = await setup();
+    game.match();
+    game.pointer('pointerdown', 250, 3, 'touch');
+    game.pointer('pointerup', 250, 3, 'touch');
+    game.pointer('pointerdown', 150, 4, 'touch');
+    game.pointer('pointerup', 150, 4, 'touch');
+    expect(move).toHaveBeenCalledOnce();
+
+    game.clickMenu('Game menu');
+    game.tick(2000);
+    game.tick(3000);
+    game.tick(4000);
+    expect(cue).not.toHaveBeenCalled();
+    expect(scene.startStackUnlock.mock.lastCall?.[0]).toMatchObject({ score: 1555, level: 3 });
+    expect(move).toHaveBeenCalledOnce();
+    game.clickMenu('Resume');
+    game.tick(5000);
+    expect(move).toHaveBeenCalledOnce();
+  });
+
+  it('syncs sound controls and clears delayed game cues even after a quick unmute', async () => {
+    const cue = vi.spyOn(GameSound.prototype, 'match');
+    const level = vi.spyOn(GameSound.prototype, 'levelUp');
+    const game = await setup();
+    expect(game.menuSound.map(button => button.accessibleHint)).toEqual(['On', 'On']);
+    game.match();
+    game.clickMenu('Sound effects');
+    expect(game.menuSound.map(button => button.accessibleHint)).toEqual(['Off', 'Off']);
+    expect(game.canvas.getAttribute('aria-description')).toContain('Sound effects are off.');
+    game.clickMenu('Sound effects');
+    expect(game.menuSound.map(button => button.accessibleHint)).toEqual(['On', 'On']);
+    game.tick(2000);
+    game.tick(3000);
+    game.tick(4000);
+    expect(cue).not.toHaveBeenCalled();
+    expect(level).not.toHaveBeenCalled();
+    expect(game.localStorage.setItem).toHaveBeenCalledWith('master-of-donuts-2-reborn.sound.v1', 'off');
+    expect(game.localStorage.setItem).toHaveBeenCalledWith('master-of-donuts-2-reborn.sound.v1', 'on');
+  });
+});
+
 describe('game view monetization', () => {
   const full: GameState = {
     ...initial, score: 1390, combo: 2, movesLeft: 1, gameOver: true,
@@ -549,6 +671,33 @@ describe('game view monetization', () => {
     await openTerminal(game);
     expect(monetization.setPlaying.mock.calls).toEqual([[true], [false], [true], [false], [true], [false]]);
     expect(monetization.runCompleted).toHaveBeenCalledOnce();
+  });
+
+  it('pauses the gameplay clock and preserves terminal ad and results flow', async () => {
+    const monetization = makeMonetization('extra-chance');
+    const game = await setup(true, '', 1, undefined, undefined, monetization);
+    game.clickMenu('Game menu');
+    expect(game.menuOpen()).toBe(true);
+    expect(monetization.setPlaying.mock.calls).toEqual([[true], [false]]);
+    game.tick(5000);
+    expect(monetization.request).not.toHaveBeenCalled();
+    game.clickMenu('Resume');
+    expect(monetization.setPlaying.mock.calls).toEqual([[true], [false], [true]]);
+    game.setOtherModalOpen(true);
+    game.clickMenu('Game menu');
+    expect(game.menuOpen()).toBe(false);
+    game.setOtherModalOpen(false);
+    await openTerminal(game, full, 5000);
+    expect(game.menuRoot.visible).toBe(false);
+    expect(game.dialog.open).toBe(true);
+    game.clickMenu('Game menu');
+    expect(game.menuOpen()).toBe(false);
+    expect(game.dialog.open).toBe(true);
+    expect(game.clickDialog('Skip · See results')).toBe(true);
+    await settleResults();
+    game.tick(12000);
+    expect(scene.showResults.mock.lastCall?.[0]).not.toBeNull();
+    expect(game.onResultsVisibilityChange).toHaveBeenLastCalledWith(true);
   });
 
   it('leases one Play Again for the current results and waits through host pause, hide and blur', async () => {
