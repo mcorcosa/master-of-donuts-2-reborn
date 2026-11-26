@@ -1,4 +1,4 @@
-import { Bounds, type Container, Text, Texture } from 'pixi.js';
+import { Bounds, type Container, type Graphics, Text, Texture } from 'pixi.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { viewport } from './layout';
 import { ResultsPanel } from './resultsPanel';
@@ -89,6 +89,31 @@ describe('Pixi results panel', () => {
     panel.root.destroy({ children: true });
   });
 
+  it('moves the burgundy THIS RUN styling between pooled rows with unchanged score text', () => {
+    const panel = new ResultsPanel(Texture.WHITE);
+    const view: ResultsView = { personal, tab: 'personal', friends: null };
+    panel.show(view, 710);
+    const listBody = list(panel, 'personal');
+    const previous = listBody.getChildByLabel('leaderboard-current-score')!;
+    const next = listBody.children[0];
+    const [backing, rank, score, caption] = previous.children as [Graphics, Text, Text, Text];
+    const nextScore = next.children[2] as Text;
+    const scoreText = [score.text, nextScore.text];
+    expect(backing.context.instructions[0]).toMatchObject({ action: 'fill', data: { style: { color: 0x731328 } } });
+    expect(caption.text).toBe('THIS RUN');
+    expect([rank, score, caption].map(text => text.style.fill)).toEqual(['#fff5e9', '#fff5e9', '#fff5e9']);
+
+    const rows = personal.rows.map(entry => ({ ...entry, current: entry.rank === 1 }));
+    panel.show({ ...view, personal: { ...personal, rows } }, 710);
+    expect(listBody.getChildByLabel('leaderboard-current-score')).toBe(next);
+    expect(backing.context).toBe((listBody.children[1].children[0] as Graphics).context);
+    expect([rank, score, caption].map(text => text.style.fill)).toEqual(['#74443a', '#542e24', '#542e24']);
+    expect(previous.children).not.toContain(caption);
+    expect([score.text, nextScore.text]).toEqual(scoreText);
+    expect(nextScore.style.fill).toBe('#fff5e9');
+    panel.root.destroy({ children: true });
+  });
+
   it('shows Friends consent and makes Submit hittable only on the Friends tab while available', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     const friends: ResultsView['friends'] = { list: { status: 'ready', scores: [] }, submission: 'idle' };
@@ -126,6 +151,12 @@ describe('Pixi results panel', () => {
       ['2.', '3.', '8.', '10.', '14.', '19.', '25.', '30.', '70.', '93.'],
     );
     expect(rows.at(-1)?.label).toBe('friends-current-score');
+    const [friendBacking, friendRank, friendName, friendScore] = rows.at(-1)!.children as [Graphics, Text, Text, Text];
+    expect(friendBacking.context.instructions).toMatchObject([
+      { action: 'fill', data: { style: { color: 0xffc5a5 } } },
+      { action: 'stroke', data: { style: { color: 0xb26444, width: 1 } } },
+    ]);
+    expect([friendRank, friendName, friendScore].map(text => text.style.fill)).toEqual(['#74443a', '#542e24', '#542e24']);
     expect(panel.scrollBy(500)).toBe(false);
     for (const row of rows) {
       const name = row.children[2] as Text;

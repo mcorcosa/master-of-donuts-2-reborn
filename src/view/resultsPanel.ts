@@ -66,7 +66,8 @@ export class ResultsPanel {
   private readonly restart: Rect = { x: INSET, y: 0, width: INNER_WIDTH, height: RESTART_HEIGHT };
   private readonly backgrounds = new Map<number, GraphicsContext>();
   private readonly normalRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8).fill(0xfae2d1);
-  private readonly currentRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8)
+  private readonly currentRunRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8).fill(0x731328);
+  private readonly currentFriendRow = new GraphicsContext().roundRect(INSET, 0, INNER_WIDTH, ROW_HEIGHT, 8)
     .fill(0xffc5a5).stroke({ color: 0xb26444, width: 1 });
   private readonly personalRows: ReturnType<ResultsPanel['makeRow']>[] = [];
   private shell?: ReturnType<ResultsPanel['buildShell']>;
@@ -85,7 +86,8 @@ export class ResultsPanel {
       for (const context of this.backgrounds.values()) context.destroy();
       this.adaptiveBackground?.destroy();
       this.normalRow.destroy();
-      this.currentRow.destroy();
+      this.currentRunRow.destroy();
+      this.currentFriendRow.destroy();
     });
   }
 
@@ -110,7 +112,8 @@ export class ResultsPanel {
       yield context;
     }
     yield this.normalRow;
-    yield this.currentRow;
+    yield this.currentRunRow;
+    yield this.currentFriendRow;
     for (let rank = 1; rank <= SCORE_LIMIT; rank++) {
       const row = this.row(rank);
       yield row.rank;
@@ -153,7 +156,9 @@ export class ResultsPanel {
         row.group.label = entry.current ? 'leaderboard-current-score' : 'leaderboard-score';
         if (row.isCurrent !== entry.current) {
           row.isCurrent = entry.current;
-          row.backing.context = entry.current ? this.currentRow : this.normalRow;
+          row.backing.context = entry.current ? this.currentRunRow : this.normalRow;
+          row.rank.style.fill = entry.current ? CREAM : SOFT_INK;
+          row.current.style.fill = row.score.style.fill = entry.current ? CREAM : INK;
           if (entry.current) {
             row.group.addChild(row.current);
           } else this.hidden.addChild(row.current);
@@ -280,7 +285,7 @@ export class ResultsPanel {
       scores.forEach(({ rank, name, score, current }, index) => {
         const group = parent.addChild(new Container({ y: 1 + index * ROW_PITCH,
           label: current ? 'friends-current-score' : 'friends-score' }));
-        group.addChild(new Graphics(current ? this.currentRow : this.normalRow));
+        group.addChild(new Graphics(current ? this.currentFriendRow : this.normalRow));
         this.label(group, `${number.format(rank)}.`, 26, 12, 15, { maxWidth: 40, fill: SOFT_INK });
         fitName(this.label(group, '', 70, 12, 17), name, 115);
         this.label(group, number.format(score), WIDTH - 26, 12, 17, { align: 1, maxWidth: 139 });

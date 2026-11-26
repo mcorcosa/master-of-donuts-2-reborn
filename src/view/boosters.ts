@@ -3,7 +3,7 @@ import { createBoosterMedallion, MEDALLION_ART_SIZE } from './boosterMedallion';
 import { GAME_FONT_FAMILY } from './gameFont';
 import type { BoosterDropLanding, BoosterDropTarget } from './freeBoosterCelebration';
 import type { BoosterButton, Point } from './gestures';
-import { contains, footerCenterY } from './layout';
+import { contains, footerCenterY, FOOTER_TARGET_SIZE } from './layout';
 import { unit } from './movePlayback';
 import type { SceneTextResolution } from './textResolution';
 
@@ -11,13 +11,14 @@ const BUTTONS = [
   { kind: 'joker', x: 156.25 },
   { kind: 'sweep', x: 233.75 },
 ] as const;
-const MEDALLION_DIAMETER = 70;
+const MEDALLION_DIAMETER = 60;
 // The gold bezel spans 32.4 units inside the 40-unit texture.
 const MEDALLION_SCALE = MEDALLION_DIAMETER / 32.4;
 const MEDALLION_SIZE = MEDALLION_ART_SIZE * MEDALLION_SCALE;
 const MEDALLION_RADIUS = MEDALLION_DIAMETER / 2;
 const RING_RADIUS = MEDALLION_RADIUS + 0.9;
 const HIT_RADIUS = MEDALLION_RADIUS + 2.5;
+const MAX_HIT_RADIUS = (BUTTONS[1].x - BUTTONS[0].x) / 2 - 1;
 const ARMED_RADIUS = MEDALLION_RADIUS + 2.6;
 const LANDING_RADIUS = MEDALLION_RADIUS + 1.55;
 const BADGE_INK = 0x572947;
@@ -71,6 +72,7 @@ function medallionButton(parent: Container, kind: BoosterButton, x: number, joke
 export class BoosterControls {
   readonly root = new Container({ eventMode: 'none' });
   private readonly buttons: ReturnType<typeof medallionButton>[];
+  private hitRadius = HIT_RADIUS;
 
   constructor(jokerArt: Texture, textResolution?: SceneTextResolution) {
     this.buttons = BUTTONS.map(({ kind, x }) => medallionButton(this.root, kind, x, jokerArt));
@@ -81,8 +83,9 @@ export class BoosterControls {
     });
   }
 
-  resize(height: number): void {
+  resize(height: number, scale: number): void {
     this.root.y = footerCenterY(height);
+    this.hitRadius = Math.min(MAX_HIT_RADIUS, Math.max(HIT_RADIUS, FOOTER_TARGET_SIZE / (2 * scale)));
   }
 
   dropTarget(kind: BoosterButton): BoosterDropTarget {
@@ -133,7 +136,7 @@ export class BoosterControls {
     const y = point.y - this.root.y;
     return this.buttons.find(({ root, badge, tag }) => {
       const x = point.x - this.root.x - root.x;
-      if (Math.hypot(x, y) <= HIT_RADIUS) return true;
+      if (Math.hypot(x, y) <= this.hitRadius) return true;
       if (!badge.visible) return false;
       const local = { x: (x - badge.x) / MEDALLION_SCALE, y: (y - badge.y) / MEDALLION_SCALE };
       return tag.visible ? contains(TAG_BOUNDS, local) : Math.hypot(local.x, local.y) <= 5.3;

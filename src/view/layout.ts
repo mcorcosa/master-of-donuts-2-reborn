@@ -14,9 +14,10 @@ export interface StackSlot {
 export type StackLayout = ReturnType<typeof layoutStacks>;
 
 export const VIEW_WIDTH = 400;
-export const BOARD_TOP = 174;
-const FOOTER_CENTER_FROM_BOTTOM = 62;
-export const BOARD_FOOTER_SPACE = FOOTER_CENTER_FROM_BOTTOM + 42;
+export const BOARD_TOP = 141;
+const FOOTER_CENTER_FROM_BOTTOM = 56;
+export const BOARD_FOOTER_SPACE = FOOTER_CENTER_FROM_BOTTOM + 30;
+export const FOOTER_TARGET_SIZE = 44;
 export const STACK_LIFT = 6;
 
 const BOARD_LEFT = 62;

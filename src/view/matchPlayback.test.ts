@@ -556,7 +556,8 @@ describe('score and level effects', () => {
     expect(digits.anchor.x).toBe(0.5);
     expect(digits.x).toBe((bar.root.children[0] as Sprite).width / 2);
     expect(digits.x + punchedWidth / 2).toBeLessThan(bar['levelLabel'].x);
-    expect(bar.creditTarget.x).toBe(bar.root.x + digits.x);
+    expect(bar.creditTarget.x).toBeCloseTo(bar.root.x + digits.x * bar.root.scale.x);
+    expect(bar.creditTarget.y).toBeCloseTo(bar.root.y + digits.y * bar.root.scale.y);
     expect(bar['glow'].visible).toBe(true);
 
     bar.credit(100, true);
@@ -818,12 +819,15 @@ describe('move presentation', () => {
         expect(screenHeight - inset - artBottom).toBeGreaterThanOrEqual(gap);
         expect([joker.x, sweep.x, x + width / 2]).toEqual([156.25, 233.75, 336.25]);
         expect([joker.y, sweep.y, y + height / 2]).toEqual([footerY, footerY, footerY]);
-        expect(joker.size * 32.4 / 40).toBeCloseTo(70);
-        expect([width, height]).toEqual([108, 60]);
+        expect(joker.size * 32.4 / 40).toBeCloseTo(60);
+        expect(width).toBe(92);
+        expect(height * fit.scale).toBeGreaterThanOrEqual(44);
+        expect(scene['hintFace'].height).toBeLessThan(height * 1.01);
         expect(scene.hit({ x: joker.x - 32, y: footerY }, 'tap')).toBe('joker');
         expect(scene.hit({ x: sweep.x + 28.5, y: footerY }, 'tap')).toBe('sweep');
         expect(scene.hit({ x: sweep.x, y: footerY - 29 }, 'tap')).toBe('sweep');
-        const badge = { x: joker.x + 42, y: footerY - 20 };
+        expect(scene.hit({ x: sweep.x, y: fit.height - BOARD_FOOTER_SPACE - 1 }, 'tap')).not.toBe('sweep');
+        const badge = { x: joker.x + 38, y: footerY - 18 };
         expect(scene.hit(badge, 'tap')).toBe('joker');
         expect(scene.hit({ x: (joker.x + sweep.x) / 2, y: footerY }, 'tap')).toBe('outside');
         expect(scene.hit({ x: 278, y: footerY }, 'tap')).toBe('outside');

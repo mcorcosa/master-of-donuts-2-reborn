@@ -94,7 +94,7 @@ function art(texture: Texture, x: number, y: number, width: number, height: numb
 }
 
 export class ScoreBar {
-  readonly root = new Container({ x: 64, y: 88, label: 'score-and-level' });
+  readonly root = new Container({ x: 97, y: 72, label: 'score-and-level' });
   private readonly progress = new Graphics();
   private readonly marker = new Graphics().circle(0, 0.7, 5.4).fill({ color: 0x995617, alpha: 0.4 })
     .circle(0, 0, 5.1).fill(0xfec40b).circle(-1.3, -1.6, 1.65).fill({ color: 0xffed93, alpha: 0.65 });
@@ -110,6 +110,7 @@ export class ScoreBar {
   private gleam: { started: number; reduced: boolean } | null = null;
 
   constructor(companion: Texture, biscuit = Texture.EMPTY, jamCookie = Texture.EMPTY) {
+    this.root.scale.set(0.76);
     this.level.position.set(LEVEL_X, LEVEL_Y);
     this.level.style.dropShadow = { color: '#4f0919', alpha: 0.78, blur: 1, angle: Math.PI / 2, distance: 1.5 };
     const track = new Graphics()
@@ -123,7 +124,10 @@ export class ScoreBar {
   }
 
   get creditTarget(): Point {
-    return { x: this.root.x + this.score.x, y: this.root.y + this.score.y };
+    return {
+      x: this.root.x + this.score.x * this.root.scale.x,
+      y: this.root.y + this.score.y * this.root.scale.y,
+    };
   }
 
   get animating(): boolean {

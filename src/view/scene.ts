@@ -8,7 +8,7 @@ import type { BoosterButton, Point, StackGestures, Target } from './gestures';
 import { IcingVial } from './icingVial';
 import { JokerArt } from './jokerArt';
 import {
-  BOARD_FOOTER_SPACE, BOARD_TOP, contains, footerCenterY, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
+  BOARD_FOOTER_SPACE, BOARD_TOP, contains, footerCenterY, FOOTER_TARGET_SIZE, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
   stackTarget, VIEW_WIDTH, viewport,
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
@@ -32,8 +32,8 @@ const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
 const FOOTER_STATUS_X = 63;
 const FOOTER_STATUS_WIDTH = 94;
-const HINT_WIDTH = 108;
-const HINT_HEIGHT = 60;
+const HINT_WIDTH = 92;
+const HINT_HEIGHT = 51;
 const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
 const DOUGH_REPAIR_MS = 320;
 const REDUCED_DOUGH_REPAIR_MS = 240;
@@ -290,7 +290,7 @@ export class GameScene {
       this.firstMatchHand.root,
       this.boosterCue.root, this.celebration.root, this.hud, this.moveCost.root, this.matchEffects, this.freeBooster.root);
 
-    const logo = sprite(this.hud, this.texture('vanilla-bean-wordmark'), CENTER, 49, 282, 96);
+    const logo = sprite(this.hud, this.texture('vanilla-bean-wordmark'), CENTER, 37.5, 214, 73);
     logo.anchor.set(0.5);
     this.hud.addChild(this.scoreBar.root);
     this.status = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
@@ -303,7 +303,7 @@ export class GameScene {
     this.hud.addChild(this.boosterControls.root);
     const { width, height } = this.hintBounds;
     this.hintFace = sprite(this.hintButton, this.texture('vanilla-bean-hint'), 0, 0, width, height);
-    this.hintLabel = label(this.hintButton, 'Hint', 25, width / 2, height * 0.45);
+    this.hintLabel = label(this.hintButton, 'Hint', 22, width / 2, height * 0.45);
     this.hintLabel.style.fontWeight = '700';
     this.setHintAvailable(false);
     this.hud.addChild(this.hintButton);
@@ -394,9 +394,10 @@ export class GameScene {
     this.status.y = footerY - 14;
     this.hintStatus.y = this.status.y;
     this.boosterPrompt.y = footerY + 14;
-    this.boosterControls.resize(this.fit.height);
-    this.hintBounds.y = footerY - HINT_HEIGHT / 2;
-    this.hintButton.position.set(this.hintBounds.x, this.hintBounds.y);
+    this.boosterControls.resize(this.fit.height, this.fit.scale);
+    this.hintBounds.height = Math.max(HINT_HEIGHT, FOOTER_TARGET_SIZE / this.fit.scale);
+    this.hintBounds.y = footerY - this.hintBounds.height / 2;
+    this.hintButton.position.set(this.hintBounds.x, footerY - HINT_HEIGHT / 2);
     this.results.resize(this.fit.height);
   }
 
@@ -782,8 +783,11 @@ export class GameScene {
     if (this.stackUnlock) return duringUnlock ? this.hitMovingStack(point) : null;
     if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
-    if (this.hintAvailable && contains(this.hintBounds, point)) return 'hint';
-    return this.boosterControls.hit(point) ?? stackTarget(this.stacks, point, this.fit.height, mode);
+    if (point.y >= this.fit.height - BOARD_FOOTER_SPACE) {
+      if (this.hintAvailable && contains(this.hintBounds, point)) return 'hint';
+      return this.boosterControls.hit(point) ?? 'outside';
+    }
+    return stackTarget(this.stacks, point, this.fit.height, mode);
   }
 
   private hitMovingStack(point: Point): Target {
