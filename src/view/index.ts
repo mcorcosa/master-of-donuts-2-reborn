@@ -1,5 +1,5 @@
 import type { AdOutcome } from '@playbridge/core';
-import { PixiGameMenu } from '@playbridge/pixi';
+import { PixiGameMenu, pixiTextResolution } from '@playbridge/pixi';
 import type { Application } from 'pixi.js';
 import { GameSound } from '../audio/GameSound';
 import {
@@ -297,9 +297,13 @@ export async function mountGame(app: Application, {
     canvas.style.height = `${viewportHeight}px`;
   }
 
+  function syncTextResolution(): void {
+    if (scene.syncTextResolution(renderer.resolution)) warmup = scene.warmup(renderer, motion.matches);
+    gameMenu.setTextResolution(pixiTextResolution(renderer.resolution));
+  }
+
   function resolutionChanged(): void {
-    scene.releasePreparedText();
-    warmup = scene.warmup(renderer, motion.matches);
+    syncTextResolution();
     sizeCanvas();
   }
 
@@ -307,8 +311,7 @@ export async function mountGame(app: Application, {
     quality.applyPending();
     const resolution = quality.frames.resolution;
     if (renderer.resolution === resolution) return;
-    // Pixi's resolution setter resizes the backing surface and invalidates
-    // auto-resolution text without firing the layout resize handler.
+    // Pixi's resolution setter resizes the backing surface without firing the layout resize handler.
     renderer.resolution = resolution;
     resolutionChanged();
   }
@@ -844,6 +847,7 @@ export async function mountGame(app: Application, {
     scene.resize(width, Math.max(1, height - boardTop), safeArea.bottom * scaleY);
     gameMenu.root.scale.set(scaleX, scaleY);
     gameMenu.setLayout(menuLayout);
+    syncTextResolution();
     draw();
     syncControls();
   }

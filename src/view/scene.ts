@@ -21,6 +21,7 @@ import type { ResultsView } from './resultsSession';
 import { ScoreBar, type ScoreDisplay } from './scoreBar';
 import { type MovePreview, SelectionArrow } from './selectionArrow';
 import { STACK_UNLOCK_MS, stackUnlockFrame } from './stackUnlock';
+import { SceneTextResolution } from './textResolution';
 import { VacancyArt } from './vacancyArt';
 
 const DONUT_ART = ['gold', 'red', 'yellow', 'choco', 'gray', 'purple', 'blue', 'green'];
@@ -142,7 +143,7 @@ function capacityRail(width: number, capacity: number) {
   return { half, first: 1.5 - half, pitch: (half * 2 - 3) / capacity };
 }
 
-function drawCapacity(rail: Container, count: number, capacity: number, width: number): number {
+function drawCapacity(rail: Container, count: number, capacity: number, width: number, textResolution: SceneTextResolution): number {
   for (const child of rail.removeChildren()) child.destroy();
   const { half, first, pitch } = capacityRail(width, capacity);
   const cue = rail.addChild(new Graphics());
@@ -151,7 +152,7 @@ function drawCapacity(rail: Container, count: number, capacity: number, width: n
     cue.roundRect(-half + 0.5, 7, half * 2, 14, 7).fill({ color: 0x8d4a28, alpha: 0.22 })
       .roundRect(-half, 5, half * 2, 14, 7).fill(0x731328)
       .roundRect(1 - half, 5.75, half * 2 - 2, 6.6, 3.3).fill(0x901637);
-    label(rail, 'FULL', 10.5, 0, 11.5, CREAM);
+    textResolution.track(label(rail, 'FULL', 10.5, 0, 11.5, CREAM));
     return half;
   }
 
@@ -199,7 +200,8 @@ export class GameScene {
   private readonly vacancyArt: VacancyArt;
   private readonly celebration: LevelCelebration;
   private readonly matchEffects = new Container();
-  private readonly moveCost = new MoveCost();
+  private readonly textResolution = new SceneTextResolution();
+  private readonly moveCost = new MoveCost(this.textResolution);
   private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar: ScoreBar;
   private readonly icingVial = new IcingVial();
@@ -262,12 +264,12 @@ export class GameScene {
 
   constructor(private readonly art: Map<string, Texture>) {
     const companion = this.texture('strawberry-glaze');
-    this.boosterControls = new BoosterControls(this.art.get(JOKER)!);
+    this.boosterControls = new BoosterControls(this.art.get(JOKER)!, this.textResolution);
     const scoreBiscuit = this.texture('vanilla-bean-score');
     const jamCookie = this.texture('vanilla-bean-level');
     this.scoreBar = new ScoreBar(this.texture('vanilla-bean-mascot'), scoreBiscuit, jamCookie);
     this.celebration = new LevelCelebration(jamCookie, scoreBiscuit);
-    this.results = new ResultsPanel(companion);
+    this.results = new ResultsPanel(companion, this.textResolution);
     this.vacancyArt = new VacancyArt(this.texture('clear'));
     this.root.once('destroyed', () => {
       this.contactTexture.destroy(true);
@@ -307,6 +309,13 @@ export class GameScene {
     this.hud.addChild(this.hintButton);
 
     this.overlay.addChild(this.results.root);
+    this.textResolution.trackTree(this.root);
+  }
+
+  syncTextResolution(rendererResolution: number): boolean {
+    if (!this.textResolution.set(rendererResolution, this.fit.scale)) return false;
+    this.releasePreparedText();
+    return true;
   }
 
   *warmup(renderer: Renderer, reduced: boolean): Generator<void> {
@@ -317,11 +326,12 @@ export class GameScene {
         // Prepare's Text handler only makes a batchable. Acquire the same
         // managed texture the canvas text pipe uses on actual reveal.
         const system = renderer.canvasText;
-        const texture = system.getManagedTexture(item);
         const key = item.styleKey;
-        if (this.preparedText.has(key)) system.decreaseReferenceCount(key);
-        else this.preparedText.set(key, () => system.decreaseReferenceCount(key));
-        renderer.texture.initSource(texture.source);
+        if (!this.preparedText.has(key)) {
+          const texture = system.getManagedTexture(item);
+          this.preparedText.set(key, () => system.decreaseReferenceCount(key));
+          renderer.texture.initSource(texture.source);
+        }
       } else if (item) {
         // Populate the batches used by the graphics pipe while the scene is idle.
         renderer.graphicsContext.updateGpuContext(item);
@@ -330,7 +340,7 @@ export class GameScene {
     }
   }
 
-  releasePreparedText(): void {
+  private releasePreparedText(): void {
     for (const release of this.preparedText.values()) release();
     this.preparedText.clear();
   }
@@ -343,12 +353,18 @@ export class GameScene {
     }
     let effect = this.matchPool[0];
     if (!effect) {
-      effect = new MatchEffect();
-      this.matchPool.push(effect);
+      effect = this.addMatchEffect();
       yield;
     }
     yield* effect.warmup(reduced);
     yield* this.results.warmup();
+  }
+
+  private addMatchEffect(): MatchEffect {
+    const effect = new MatchEffect();
+    this.textResolution.trackTree(effect.root);
+    this.matchPool.push(effect);
+    return effect;
   }
 
   private texture(name: string): Texture {
@@ -530,7 +546,7 @@ export class GameScene {
     const { donutWidth, donutHeight } = layout;
     const group = this.board.addChild(new Container());
     const rail = group.addChild(new Container());
-    const railHalf = drawCapacity(rail, colors.length, this.capacity, donutWidth);
+    const railHalf = drawCapacity(rail, colors.length, this.capacity, donutWidth, this.textResolution);
     const vacancies = sprite(group, Texture.EMPTY);
     vacancies.eventMode = 'none';
     vacancies.anchor.set(0.5, 1);
@@ -597,7 +613,7 @@ export class GameScene {
       if (reduced) {
         view.vacancyCount = -1;
         view.railCount = view.pieces.length;
-        view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth);
+        view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth, this.textResolution);
         view.rail.scale.x = 1;
       }
     });
@@ -657,7 +673,7 @@ export class GameScene {
       const slot = after.slots[index];
       this.placeStack(view, slot, after);
       view.railCount = view.pieces.length;
-      view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth);
+      view.railHalf = drawCapacity(view.rail, view.railCount, this.capacity, after.donutWidth, this.textResolution);
       view.rail.scale.x = 1;
     });
     this.updateVacancies();
@@ -725,7 +741,7 @@ export class GameScene {
       const count = this.capacity - occupied;
       if (unlock && occupied !== stack.railCount) {
         stack.railCount = occupied;
-        stack.railHalf = drawCapacity(stack.rail, occupied, this.capacity, donutWidth);
+        stack.railHalf = drawCapacity(stack.rail, occupied, this.capacity, donutWidth, this.textResolution);
         stack.rail.scale.x = 1;
       }
       if (!moving && count === stack.vacancyCount) continue;
@@ -974,8 +990,7 @@ export class GameScene {
     const { donutWidth, donutHeight, step } = this.layout;
     let effect = this.matchPool.find(effect => !effect.active);
     if (!effect) {
-      effect = new MatchEffect();
-      this.matchPool.push(effect);
+      effect = this.addMatchEffect();
     }
     this.matchEffects.addChild(effect.root);
     this.currentMatch = effect;

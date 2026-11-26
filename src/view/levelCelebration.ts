@@ -3,7 +3,7 @@ import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import { BOARD_CENTER, BOARD_FOOTER_SPACE, BOARD_TOP, type Rect } from './layout';
 import { unit } from './movePlayback';
 
-export const LEVEL_CELEBRATION_MS = 2000;
+export const LEVEL_CELEBRATION_MS = 1500;
 
 export type BoardUpgrade = { kind: 'slots'; previousCapacity: number; capacity: number }
   | { kind: 'stack'; firstNewStack: number; stackCount: number };
@@ -22,7 +22,7 @@ const MEDALLION_WIDTH = 142;
 const MEDALLION_HEIGHT = 148;
 const SUPPORT_WIDTH = 216;
 const SETTLE_MS = 320;
-const FADE_OUT_AT = 1760;
+const FADE_MS = 240;
 const SUGAR_MS = 740;
 const number = new Intl.NumberFormat();
 
@@ -155,7 +155,7 @@ export class LevelCelebration {
       return;
     }
     this.root.visible = true;
-    const fade = unit((age - FADE_OUT_AT) / (LEVEL_CELEBRATION_MS - FADE_OUT_AT));
+    const fade = unit((age - (LEVEL_CELEBRATION_MS - FADE_MS)) / FADE_MS);
     this.root.alpha = 1 - fade * fade * (3 - 2 * fade);
 
     const travel = 1 - unit(age / SETTLE_MS);

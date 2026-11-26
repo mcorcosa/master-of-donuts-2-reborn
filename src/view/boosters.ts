@@ -5,6 +5,7 @@ import type { BoosterDropLanding, BoosterDropTarget } from './freeBoosterCelebra
 import type { BoosterButton, Point } from './gestures';
 import { contains, footerCenterY } from './layout';
 import { unit } from './movePlayback';
+import type { SceneTextResolution } from './textResolution';
 
 const BUTTONS = [
   { kind: 'joker', x: 156.25 },
@@ -71,8 +72,10 @@ export class BoosterControls {
   readonly root = new Container({ eventMode: 'none' });
   private readonly buttons: ReturnType<typeof medallionButton>[];
 
-  constructor(jokerArt: Texture) {
+  constructor(jokerArt: Texture, textResolution?: SceneTextResolution) {
     this.buttons = BUTTONS.map(({ kind, x }) => medallionButton(this.root, kind, x, jokerArt));
+    // The badge lives in medallion art units and keeps its own fixed scale.
+    for (const { badgeText } of this.buttons) textResolution?.track(badgeText, MEDALLION_SCALE);
     this.root.once('destroyed', () => {
       for (const button of this.buttons) button.texture.destroy(true);
     });

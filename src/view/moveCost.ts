@@ -3,6 +3,7 @@ import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
 import { unit } from './movePlayback';
+import type { SceneTextResolution } from './textResolution';
 
 const TEXT = '−1 move';
 const STILL_HOLD_MS = 450;
@@ -40,6 +41,8 @@ export class MoveCost {
   private readonly visible: VisibleCue[] = [];
   private nextStart = 0;
   private nextImpact = 0;
+
+  constructor(private readonly textResolution?: SceneTextResolution) {}
 
   get animating(): boolean {
     return this.visible.some(cue => !cue.reduced);
@@ -151,6 +154,7 @@ export class MoveCost {
       stroke: { color: '#fff1db', width: 6, join: 'round' },
       dropShadow: { color: '#6b2330', alpha: 0.72, angle: Math.PI / 2, blur: 1.5, distance: 2 },
     } }));
+    this.textResolution?.track(label);
     this.labels.push(label);
     return label;
   }

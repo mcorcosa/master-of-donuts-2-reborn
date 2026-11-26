@@ -44,7 +44,7 @@ const scene = vi.hoisted(() => ({
   startStackUnlock: vi.fn<(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
   finishStackUnlock: vi.fn(), stackUnlockAnimating: false,
   selectionAnimating: false, effectsAnimating: false,
-  warmup: function* () {}, releasePreparedText: vi.fn(),
+  warmup: function* () {}, syncTextResolution: vi.fn(),
   showInteraction: vi.fn(), showJoker: vi.fn(), topPosition: vi.fn(),
   setHintAvailable: vi.fn(), showHint: vi.fn(), clearHint: vi.fn(),
   showFirstMatchGuide: vi.fn((move: { from: number; to: number } | null, _now: number, motion: FirstMatchHandMotion) =>
@@ -1047,6 +1047,7 @@ describe('game view match playback', () => {
     tick(8075);
     expect(renderer.resolution).toBe(1.5);
     expect(scene.resize).toHaveBeenCalledOnce();
+    expect(scene.syncTextResolution.mock.calls).toEqual([[2], [1.5]]);
     expect(localStorage.setItem).toHaveBeenCalledExactlyOnceWith(
       'master-of-donuts-2-reborn.render-quality.v1', expect.stringContaining('"tier":1.5'));
 

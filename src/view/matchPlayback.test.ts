@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type DoughInsert, type GameState, getBoardRepair, JOKER, move } from '../game';
 import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, footerCenterY, layoutStacks, VIEW_WIDTH } from './layout';
-import { LEVEL_CELEBRATION_MS, LevelCelebration } from './levelCelebration';
+import { LevelCelebration } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import {
   awardFrame, beginMatch, matchFrame, matchLaunches, type MatchPlayback, matchPopTime,
@@ -571,6 +571,29 @@ describe('score and level effects', () => {
     bar.root.destroy({ children: true });
   });
 
+  it('settles in 320 ms and fades the normal level celebration between 1260 and 1500 ms', () => {
+    vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
+    const level = new LevelCelebration(Texture.WHITE, Texture.WHITE);
+    const { root } = level;
+    const [, particles, hero] = root.children;
+    level.start({ level: 3, rank: 'Fryer Fighter' }, [], 100, false, 540);
+    expect(hero.scale.x).toBeCloseTo(0.89);
+    expect(particles.visible).toBe(true);
+    level.show(419);
+    expect(hero.scale.x).toBeGreaterThan(1);
+    level.show(420);
+    expect(hero.scale.x).toBe(1);
+    level.show(1360);
+    expect(root.alpha).toBe(1);
+    level.show(1480);
+    expect(root.alpha).toBe(0.5);
+    level.show(1599);
+    expect(root.visible).toBe(true);
+    level.show(1600);
+    expect(root.visible).toBe(false);
+    root.destroy({ children: true });
+  });
+
   it('shows the level and upgrade with static board focus in reduced motion', () => {
     vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
     const level = new LevelCelebration(Texture.WHITE, Texture.WHITE);
@@ -586,11 +609,15 @@ describe('score and level effects', () => {
     level.show(500);
     expect(hero.position).toMatchObject(position);
     expect(hero.scale.x).toBe(1);
-    level.show(LEVEL_CELEBRATION_MS - 1);
+    level.show(1260);
+    expect(root.alpha).toBe(1);
+    level.show(1380);
+    expect(root.alpha).toBe(0.5);
+    level.show(1499);
     expect(root.visible).toBe(true);
-    level.show(LEVEL_CELEBRATION_MS);
+    level.show(1500);
     expect(root.visible).toBe(false);
-    level.start({ level: 4, rank: '', movesRestored: 0 }, [], LEVEL_CELEBRATION_MS, false, 540);
+    level.start({ level: 4, rank: '', movesRestored: 0 }, [], 1500, false, 540);
     expect(level.animating).toBe(true);
     root.destroy({ children: true });
     expect(level.animating).toBe(false);

@@ -4,6 +4,7 @@ import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point, ResultsAction } from './gestures';
 import { contains, type Rect, VIEW_WIDTH } from './layout';
 import type { ResultsView, ScoreSubmission } from './resultsSession';
+import type { SceneTextResolution } from './textResolution';
 
 const WIDTH = 352;
 const CENTER = WIDTH / 2;
@@ -50,21 +51,6 @@ function fitName(display: Text, name: string, maxWidth: number): void {
   }
 }
 
-function label(parent: Container, text: string, x: number, y: number, size: number, options: {
-  align?: number;
-  fill?: string;
-  maxWidth?: number;
-} = {}): Text {
-  const display = new Text({ text: gameText(text), x, y, anchor: { x: options.align ?? 0, y: 0.5 }, style: {
-    fontFamily: GAME_FONT_FAMILY, fontSize: size, fontWeight: '600',
-    fill: options.fill ?? INK,
-  } });
-  if (options.maxWidth !== undefined) {
-    display.scale.set(Math.min(1, options.maxWidth / display.getLocalBounds().width));
-  }
-  return parent.addChild(display);
-}
-
 function fitText(display: Text, value: string, maxWidth: number): void {
   const text = gameText(value);
   if (display.text === text) return;
@@ -93,7 +79,7 @@ export class ResultsPanel {
   private scrollLimit = 0;
   private thumbTravel = 0;
 
-  constructor(private readonly companionTexture: Texture) {
+  constructor(private readonly companionTexture: Texture, private readonly textResolution?: SceneTextResolution) {
     this.root.once('destroyed', () => {
       this.hidden.destroy({ children: true });
       for (const context of this.backgrounds.values()) context.destroy();
@@ -190,6 +176,22 @@ export class ResultsPanel {
     this.resize(viewHeight);
   }
 
+  private label(parent: Container, text: string, x: number, y: number, size: number, options: {
+    align?: number;
+    fill?: string;
+    maxWidth?: number;
+  } = {}): Text {
+    const display = new Text({ text: gameText(text), x, y, anchor: { x: options.align ?? 0, y: 0.5 }, style: {
+      fontFamily: GAME_FONT_FAMILY, fontSize: size, fontWeight: '600',
+      fill: options.fill ?? INK,
+    } });
+    this.textResolution?.track(display);
+    if (options.maxWidth !== undefined) {
+      display.scale.set(Math.min(1, options.maxWidth / display.getLocalBounds().width));
+    }
+    return parent.addChild(display);
+  }
+
   private attach(part: Container, visible: boolean, destination = this.root): void {
     const parent = visible ? destination : this.hidden;
     if (part.parent !== parent) parent.addChild(part);
@@ -200,18 +202,18 @@ export class ResultsPanel {
     const companion = new Sprite({ texture: this.companionTexture, x: 290, y: 150, anchor: { x: 0.5, y: 1 } });
     companion.scale.set(Math.min(78 / companion.texture.width, 98 / companion.texture.height));
     this.root.addChild(companion);
-    const heading = label(this.root, 'Game Over', 29, 41, 29, { maxWidth: 218 });
+    const heading = this.label(this.root, 'Game Over', 29, 41, 29, { maxWidth: 218 });
     heading.label = 'result-heading';
-    label(this.root, 'Final score', 30, 73, 17, { fill: SOFT_INK });
-    const score = label(this.root, '', 29, 105, 38);
+    this.label(this.root, 'Final score', 30, 73, 17, { fill: SOFT_INK });
+    const score = this.label(this.root, '', 29, 105, 38);
     score.label = 'result-score-value';
     const best = this.hidden.addChild(new Container());
     best.addChild(new Graphics().roundRect(27, 129, 154, 22, 11).fill(0xffebcb));
-    label(best, 'New personal best!', 104, 140, 15, { align: 0.5, maxWidth: 142 }).label = 'result-personal-best';
+    this.label(best, 'New personal best!', 104, 140, 15, { align: 0.5, maxWidth: 142 }).label = 'result-personal-best';
 
     const level = this.stat('Level', INSET, 'result-level-value');
     const combo = this.stat('Best combo', FRIENDS_TAB.x, 'result-combo-value');
-    const restart = label(this.root, 'Play Again', CENTER, 0, 24, { align: 0.5, fill: CREAM });
+    const restart = this.label(this.root, 'Play Again', CENTER, 0, 24, { align: 0.5, fill: CREAM });
     restart.label = 'result-restart';
     const personalTab = this.hidden.addChild(new Container());
     const friendsTab = this.hidden.addChild(new Container());
@@ -221,10 +223,10 @@ export class ResultsPanel {
     this.drawButton(friendsButton, FRIENDS_TAB, false);
 
     const deviceWithTabs = this.hidden.addChild(new Container());
-    label(deviceWithTabs, 'On this device', 22, 291, 14, { fill: SOFT_INK });
+    this.label(deviceWithTabs, 'On this device', 22, 291, 14, { fill: SOFT_INK });
     const deviceWithoutTabs = this.hidden.addChild(new Container());
-    label(deviceWithoutTabs, 'Personal scores', 22, 255, 21, { maxWidth: 182 });
-    label(deviceWithoutTabs, 'On this device', WIDTH - 22, 256, 14, { align: 1, fill: SOFT_INK, maxWidth: 115 });
+    this.label(deviceWithoutTabs, 'Personal scores', 22, 255, 21, { maxWidth: 182 });
+    this.label(deviceWithoutTabs, 'On this device', WIDTH - 22, 256, 14, { align: 1, fill: SOFT_INK, maxWidth: 115 });
 
     const list = this.root.addChild(new Container({ label: 'results-list' }));
     const listContent = list.addChild(new Container({ label: 'results-list-content' }));
@@ -235,7 +237,7 @@ export class ResultsPanel {
     const personalBody = this.hidden.addChild(new Container({ label: 'personal-list' }));
     const friendsBody = this.hidden.addChild(new Container({ label: 'friends-list' }));
     const friendsFooter = this.hidden.addChild(new Container());
-    const disclosure = label(friendsFooter, 'Share your final score on the\nFacebook friends leaderboard.', CENTER, 13, 14,
+    const disclosure = this.label(friendsFooter, 'Share your final score on the\nFacebook friends leaderboard.', CENTER, 13, 14,
       { align: 0.5, fill: SOFT_INK, maxWidth: INNER_WIDTH - 16 });
     disclosure.style.align = 'center';
     disclosure.style.lineHeight = 13;
@@ -266,9 +268,9 @@ export class ResultsPanel {
   private makeRow(index: number) {
     const group = this.hidden.addChild(new Container({ y: 1 + (index - 1) * ROW_PITCH }));
     const backing = group.addChild(new Graphics(this.normalRow));
-    const rank = label(group, `${index}.`, 29, 12, 16, { fill: SOFT_INK });
-    const current = label(this.hidden, 'This run', 59, 12, 14);
-    const score = label(group, '', WIDTH - 29, 12, 18, { align: 1 });
+    const rank = this.label(group, `${index}.`, 29, 12, 16, { fill: SOFT_INK });
+    const current = this.label(this.hidden, 'This run', 59, 12, 14);
+    const score = this.label(group, '', WIDTH - 29, 12, 18, { align: 1 });
     return { group, index, backing, rank, current, score, isCurrent: false };
   }
 
@@ -279,14 +281,14 @@ export class ResultsPanel {
         const group = parent.addChild(new Container({ y: 1 + index * ROW_PITCH,
           label: current ? 'friends-current-score' : 'friends-score' }));
         group.addChild(new Graphics(current ? this.currentRow : this.normalRow));
-        label(group, `${number.format(rank)}.`, 26, 12, 15, { maxWidth: 40, fill: SOFT_INK });
-        fitName(label(group, '', 70, 12, 17), name, 115);
-        label(group, number.format(score), WIDTH - 26, 12, 17, { align: 1, maxWidth: 139 });
+        this.label(group, `${number.format(rank)}.`, 26, 12, 15, { maxWidth: 40, fill: SOFT_INK });
+        fitName(this.label(group, '', 70, 12, 17), name, 115);
+        this.label(group, number.format(score), WIDTH - 26, 12, 17, { align: 1, maxWidth: 139 });
       });
     } else {
       const message = list.status === 'error' ? 'Couldn’t load scores.\nTap Friends to retry.'
         : list.status === 'ready' ? 'No friends scores yet.' : 'Loading friends scores…';
-      const status = label(parent, message, CENTER, 47, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 });
+      const status = this.label(parent, message, CENTER, 47, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 });
       status.style.align = 'center';
       status.label = 'friends-list-status';
     }
@@ -294,7 +296,7 @@ export class ResultsPanel {
 
   private button(parent: Container, { x, y, width, height }: Rect, caption: string, id: string) {
     const backing = parent.addChild(new Graphics());
-    const text = label(parent, caption, x + width / 2, y + height / 2, 17, { align: 0.5, fill: SOFT_INK });
+    const text = this.label(parent, caption, x + width / 2, y + height / 2, 17, { align: 0.5, fill: SOFT_INK });
     text.label = id;
     return { backing, text };
   }
@@ -308,8 +310,8 @@ export class ResultsPanel {
   private stat(caption: string, x: number, id: string): Text {
     const center = x + TAB_WIDTH / 2;
     this.root.addChild(new Graphics().roundRect(x, 171, TAB_WIDTH, 61, 13).fill(0xffdec7));
-    label(this.root, caption, center, 188, 15, { align: 0.5, fill: SOFT_INK });
-    const value = label(this.root, '', center, 213, 25, { align: 0.5 });
+    this.label(this.root, caption, center, 188, 15, { align: 0.5, fill: SOFT_INK });
+    const value = this.label(this.root, '', center, 213, 25, { align: 0.5 });
     value.label = id;
     return value;
   }
