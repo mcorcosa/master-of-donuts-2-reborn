@@ -13,7 +13,7 @@ import {
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
-import type { MatchFrame, MatchPlayback } from './matchPlayback';
+import { comboStartTime, type MatchFrame, type MatchPlayback } from './matchPlayback';
 import { MoveCost, type MoveRecovery } from './moveCost';
 import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan, unit } from './movePlayback';
 import { ResultsPanel } from './resultsPanel';
@@ -247,7 +247,18 @@ export class GameScene {
   }
 
   get effectsAnimating(): boolean {
-    return this.matchPool.some(effect => effect.active) || this.scoreBar.animating || this.celebration.animating;
+    return this.matchPool.some(effect => effect.boardAnimating) || this.scoreBar.animating || this.celebration.animating;
+  }
+
+  get comboAnimating(): boolean {
+    return this.matchPool.some(effect => effect.comboAnimating);
+  }
+
+  get comboDeadline(): number {
+    return this.matchPool.reduce((earliest, effect) => {
+      const next = effect.comboDeadline;
+      return next && (!earliest || next < earliest) ? next : earliest;
+    }, 0);
   }
 
   get boosterCueDeadline(): number {
@@ -714,7 +725,11 @@ export class GameScene {
         });
       }
     }
-    this.celebration.start(details, markers, now, reduced, this.fit.height);
+    // A delayed frame can reach the next card without painting the old exit.
+    this.celebration.show(now);
+    this.textResolution.trackTree(this.celebration.root);
+    this.celebration.start(details, markers, now, reduced, this.fit.height,
+      (caption, exitAt) => this.moveCost.releaseLevel(details.level, caption, exitAt));
   }
 
   showScoreEffects(now: number): void {
@@ -846,16 +861,28 @@ export class GameScene {
     this.moveCost.enqueue({ x, y: y - this.layout.donutHeight * 0.62 }, started + (reduced ? 0 : FLIGHT_MS), reduced, remaining);
   }
 
-  startMoveRecovery(recovery: MoveRecovery, now: number, reduced: boolean): void {
-    this.moveCost.recover(recovery, now, reduced);
+  startMoveRecovery(recovery: MoveRecovery, now: number, reduced: boolean, to?: number): void {
+    if (to === undefined) {
+      this.moveCost.recover(recovery, now, reduced);
+      return;
+    }
+    const { x, y } = this.topPosition(to);
+    const landing = { x, y: y - this.layout.step - this.layout.donutHeight * 0.62 };
+    this.moveCost.recover(recovery, now, reduced, landing);
   }
 
-  showMoveCosts(now: number): void {
+  reserveLevelMoves(level: number, recovery: MoveRecovery, reduced: boolean): void {
+    this.moveCost.reserveLevel(level, recovery, reduced);
+  }
+
+  showMoveCosts(now: number, pauseUrgency = false, committedMoves?: number): void {
+    this.icingVial.showUrgency(now, pauseUrgency, committedMoves);
     const boardLeft = Math.min(...this.layout.slots.map(slot => slot.hit.x));
-    const cue = this.moveCost.show(now, this.fit.height, remaining => this.icingVial.spendTarget(remaining), boardLeft);
+    const cue = this.moveCost.show(now, this.fit.height, (remaining, recovery) => recovery
+      ? this.icingVial.gainTarget(recovery)
+      : this.icingVial.spendTarget(remaining), boardLeft);
     if (!cue) return;
-    if ('recovery' in cue) this.icingVial.apply(cue.recovery.remaining, now, cue.reduced, cue.recovery);
-    else this.icingVial.apply(cue.remaining, now, cue.reduced);
+    this.icingVial.apply(cue.remaining, now, cue.reduced, cue.recovery);
   }
 
   clearMoveCosts(state: Pick<GameState, 'doughMeter'>): void {
@@ -992,6 +1019,10 @@ export class GameScene {
   startMatch(match: MatchPlayback): void {
     const target = this.stacks[match.to];
     const { donutWidth, donutHeight, step } = this.layout;
+    if (match.combo >= 2) {
+      const nextBadge = comboStartTime(match);
+      for (const effect of this.matchPool) effect.finishComboBy(nextBadge);
+    }
     let effect = this.matchPool.find(effect => !effect.active);
     if (!effect) {
       effect = this.addMatchEffect();
@@ -1028,7 +1059,14 @@ export class GameScene {
 
   showMatchTail(now: number): void {
     const target = this.scoreBar.creditTarget;
-    for (const effect of this.matchPool) effect.showTail(now, target);
+    const obstacles = [
+      ...(this.celebration.root.visible ? [this.celebration.root.getChildByLabel('level-up pastry')] : []),
+      ...(this.freeBooster.root.visible ? [
+        this.freeBooster.root.getChildByLabel('free booster banner'),
+        this.freeBooster.root.getChildByLabel('awarded medallion'),
+      ] : []),
+    ].flatMap(child => child?.visible ? [child.getBounds().rectangle] : []);
+    for (const effect of this.matchPool) effect.showTail(now, target, obstacles);
   }
 
   cancelMatch(): void {

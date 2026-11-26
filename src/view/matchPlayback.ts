@@ -76,6 +76,9 @@ interface MatchLaunch {
 const SNAP_MS = 30;
 const AWARD_HOLD_MS = 40;
 const SCORE_FLIGHT_MS = 270;
+const COMBO_START_DELAY_MS = 56;
+const COMBO_EXTRA_MS = 300;
+const COMBO_FADE_MS = 190;
 
 export function matchPopTime(runLength: number, index: number): number {
   return 194 + 74 * (runLength - 1 - index) / (runLength - 1);
@@ -208,23 +211,47 @@ export function scoreFlightPosition(start: Point, target: Point, progress: numbe
   };
 }
 
+function awardStart(match: MatchPlayback): number {
+  return clearStart(match) + (match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1));
+}
+
+function awardEnd(match: MatchPlayback): number {
+  return match.reduced ? clearStart(match) + 420 + 130 * scoreEmphasis(match.points) : flightStart(match);
+}
+
 export function awardFrame(match: MatchPlayback, now: number) {
-  const pop = match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1);
-  const age = now - clearStart(match) - pop;
-  const end = match.reduced ? clearStart(match) + 420 + 130 * scoreEmphasis(match.points) : flightStart(match);
+  const age = now - awardStart(match);
+  const end = awardEnd(match);
   if (age < 0 || now >= end) return null;
   if (match.reduced) {
-    return { alpha: unit(age / 50) * unit((end - now) / 135), scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 };
+    return { alpha: unit(age / 50) * unit((end - now) / 135), scaleX: 1, scaleY: 1 };
   }
 
   const peak = scorePopPeak(match.points);
-  const comboAge = age - 56;
   return {
     alpha: 1,
     scaleX: popScale(age, 0.83, peak.x, 34, 82),
     scaleY: popScale(age, 0.74, peak.y, 34, 82),
-    comboAlpha: unit(comboAge / 22),
-    comboScale: popScale(comboAge, 0.9, comboPopPeak(match.combo), 34, 50),
+  };
+}
+
+export function comboStartTime(match: MatchPlayback): number {
+  return awardStart(match) + (match.reduced ? 0 : COMBO_START_DELAY_MS);
+}
+
+export function comboEndTime(match: MatchPlayback): number {
+  if (match.combo < 2) return 0;
+  return awardEnd(match) + (match.reduced ? 0 : SCORE_FLIGHT_MS * 0.7) + COMBO_EXTRA_MS;
+}
+
+export function comboFrame(match: MatchPlayback, now: number, end = comboEndTime(match)) {
+  const age = now - comboStartTime(match);
+  if (age < 0 || now >= end) return null;
+  if (match.reduced) return { alpha: 1, scale: 1 };
+  const fade = unit((end - now) / COMBO_FADE_MS);
+  return {
+    alpha: unit(age / 22) * fade * fade * (3 - 2 * fade),
+    scale: popScale(age, 0.9, comboPopPeak(match.combo), 34, 50),
   };
 }
 

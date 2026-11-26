@@ -39,11 +39,12 @@ const scene = vi.hoisted(() => ({
   startMove: vi.fn(), showMove: vi.fn(), finishMove: vi.fn(), moveAnimating: false,
   startMoveCost: vi.fn<(to: number, started: number, reduced: boolean, remaining: number) => void>(),
   startMoveRecovery: vi.fn(),
+  reserveLevelMoves: vi.fn(),
   showMoveCosts: vi.fn(), clearMoveCosts: vi.fn(), moveCostAnimating: false, moveCostDeadline: 0,
   showIcingVial: vi.fn(), icingVialAnimating: false, icingVialDeadline: 0,
   startStackUnlock: vi.fn<(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
   finishStackUnlock: vi.fn(), stackUnlockAnimating: false,
-  selectionAnimating: false, effectsAnimating: false,
+  selectionAnimating: false, effectsAnimating: false, comboAnimating: false, comboDeadline: 0,
   warmup: function* () {}, syncTextResolution: vi.fn(),
   showInteraction: vi.fn(), showJoker: vi.fn(), topPosition: vi.fn(),
   setHintAvailable: vi.fn(), showHint: vi.fn(), clearHint: vi.fn(),
@@ -150,6 +151,8 @@ async function setup(
   scene.stackUnlockAnimating = false;
   scene.selectionAnimating = false;
   scene.effectsAnimating = false;
+  scene.comboAnimating = false;
+  scene.comboDeadline = 0;
   scene.boosterCueDeadline = 0;
   scene.startBoosterCue.mockImplementation((_kind, _targets, started) => { scene.boosterCueDeadline = started + 230; });
   scene.showBoosterCue.mockImplementation(now => {
@@ -435,9 +438,11 @@ describe('committed move cost feedback', () => {
     const { match, tick } = await setup(true);
     match();
     const levelRemaining = 28 - spent + levelGain;
+    expect(scene.reserveLevelMoves.mock.calls).toEqual([
+      ...(levelGain ? [[3, { source: 'level', restored: levelGain, remaining: levelRemaining }, true]] : []),
+    ]);
     expect(scene.startMoveRecovery.mock.calls).toEqual([
-      ...(levelGain ? [[{ source: 'level', restored: levelGain, remaining: levelRemaining }, 230, true]] : []),
-      ...(comboGain ? [[{ source: 'combo', restored: comboGain, remaining: levelRemaining + comboGain }, 230, true]] : []),
+      ...(comboGain ? [[{ source: 'combo', restored: comboGain, remaining: levelRemaining + comboGain }, 0, true, 1]] : []),
     ]);
     expect(scene.startMoveCost).not.toHaveBeenCalled();
     tick(230);
@@ -1273,15 +1278,21 @@ describe('game view match playback', () => {
     expect(scene.startFreeBoosterCelebration).not.toHaveBeenCalled();
     tick(230);
     expect(scene.creditScore).toHaveBeenCalledExactlyOnceWith(230, true);
+    scene.comboDeadline = 720;
     tick(419);
     expect(scene.startFreeBoosterCelebration).not.toHaveBeenCalled();
     tick(420);
     expect(scene.startFreeBoosterCelebration).toHaveBeenCalledExactlyOnceWith('sweep', 420, true);
     const revealPainted = render.mock.calls.length;
-    tick(1069);
+    tick(719);
     expect(render).toHaveBeenCalledTimes(revealPainted);
-    tick(1070);
+    scene.comboDeadline = 0;
+    tick(720);
     expect(render).toHaveBeenCalledTimes(revealPainted + 1);
+    tick(1069);
+    expect(render).toHaveBeenCalledTimes(revealPainted + 1);
+    tick(1070);
+    expect(render).toHaveBeenCalledTimes(revealPainted + 2);
     tick(2000);
     const before = scene.draw.mock.lastCall![0];
     expect(before).toMatchObject({ combo: 5, doughMeter: 11 });
@@ -1325,6 +1336,7 @@ describe('game view match playback', () => {
       tap(550);
       tap(650);
       tick(540);
+      scene.comboAnimating = true;
       tick(850);
 
       expect(expected).toMatchObject({ score: 34_350, combo: 5 });
@@ -2192,6 +2204,7 @@ describe('game view match playback', () => {
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, false);
     expect(scene.showResults).not.toHaveBeenCalled();
     scene.effectsAnimating = false;
+    scene.comboAnimating = true;
     tick(3100);
     await settleResults();
 
@@ -2217,6 +2230,7 @@ describe('game view match playback', () => {
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(null, false);
     tick(cueAt);
     expect(scene.showGameOverCue).toHaveBeenLastCalledWith(0, false);
+    scene.comboAnimating = false;
 
     const pauseCueAt = cueAt + 200;
     tick(pauseCueAt);

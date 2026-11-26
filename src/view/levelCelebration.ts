@@ -15,6 +15,8 @@ export interface LevelCelebrationDetails {
   upgrade?: BoardUpgrade;
 }
 
+type ReleaseCaption = (caption: Text, now: number) => boolean;
+
 const CREAM = 0xfff3d7;
 const BURGUNDY = 0x731328;
 const BUTTER = 0xfec40b;
@@ -23,6 +25,7 @@ const MEDALLION_HEIGHT = 148;
 const SUPPORT_WIDTH = 216;
 const SETTLE_MS = 320;
 const FADE_MS = 240;
+export const LEVEL_CELEBRATION_EXIT_MS = LEVEL_CELEBRATION_MS - FADE_MS;
 const SUGAR_MS = 740;
 const number = new Intl.NumberFormat();
 
@@ -91,14 +94,14 @@ export class LevelCelebration {
   private readonly supportBiscuit: Sprite;
   private readonly heading = caption('level label', 22, CREAM, -32);
   private readonly level = caption('level numeral', 51, CREAM, 17);
-  private readonly recovery = caption('moves restored', 21, BURGUNDY);
+  private recovery = caption('moves restored', 21, BURGUNDY);
   private readonly upgrade = caption('board upgrade', 17, BURGUNDY);
   private readonly particles = SUGAR.map(({ glint, tilt }) => {
     const piece = this.sugar.addChild(sugarPiece(glint));
     piece.rotation = tilt;
     return piece;
   });
-  private active: { started: number; reduced: boolean; y: number } | null = null;
+  private active: { started: number; reduced: boolean; y: number; release?: ReleaseCaption } | null = null;
 
   get animating(): boolean {
     return this.active !== null;
@@ -115,7 +118,8 @@ export class LevelCelebration {
     this.root.once('destroyed', () => { this.active = null; });
   }
 
-  start(details: LevelCelebrationDetails, markers: readonly Rect[], now: number, reduced: boolean, height: number): void {
+  start(details: LevelCelebrationDetails, markers: readonly Rect[], now: number, reduced: boolean,
+    height: number, release?: ReleaseCaption): void {
     const { level, upgrade, movesRestored } = details;
     const recovery = moveCaption(movesRestored);
     const change = upgradeCaption(upgrade);
@@ -141,7 +145,7 @@ export class LevelCelebration {
 
     const boardHeight = height - BOARD_FOOTER_SPACE - BOARD_TOP;
     const y = BOARD_TOP + Math.min(138, Math.max(92, boardHeight * 0.25));
-    this.active = { started: now, reduced, y };
+    this.active = { started: now, reduced, y, release: movesRestored ? release : undefined };
     this.sugar.position.set(BOARD_CENTER, y);
     this.show(now);
   }
@@ -150,12 +154,21 @@ export class LevelCelebration {
     if (!this.active) return;
     const { started, reduced, y } = this.active;
     const age = Math.max(0, now - started);
+    if (age >= LEVEL_CELEBRATION_EXIT_MS && this.active.release) {
+      const { release } = this.active;
+      this.active.release = undefined;
+      // Hand over the still-opaque caption before applying the card's fade.
+      if (release(this.recovery, now)) {
+        this.recovery = this.hero.addChild(caption('moves restored', 21, BURGUNDY));
+        this.recovery.visible = false;
+      }
+    }
     if (age >= LEVEL_CELEBRATION_MS) {
       this.cancel();
       return;
     }
     this.root.visible = true;
-    const fade = unit((age - (LEVEL_CELEBRATION_MS - FADE_MS)) / FADE_MS);
+    const fade = unit((age - LEVEL_CELEBRATION_EXIT_MS) / FADE_MS);
     this.root.alpha = 1 - fade * fade * (3 - 2 * fade);
 
     const travel = 1 - unit(age / SETTLE_MS);

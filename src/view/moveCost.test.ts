@@ -1,6 +1,6 @@
 import { Text } from 'pixi.js';
 import { describe, expect, it } from 'vitest';
-import { MOVE_COST_INK, MOVE_SPEND_MS, MoveCost } from './moveCost';
+import { GAIN_DOCK_MS, GAIN_ORIGIN_HOLD_MS, MOVE_COST_INK, MOVE_GAIN_INK, MOVE_GAIN_MS, MOVE_SPEND_MS, MoveCost } from './moveCost';
 
 const dock = (remaining: number) => ({ x: 33, y: 550 - (remaining + 1) * 10 });
 const visible = (cost: MoveCost) => cost.root.children.filter(label => label.visible) as Text[];
@@ -103,11 +103,47 @@ describe('move cost presentation', () => {
       expect(cost.show(at, 600, dock)).toEqual({ remaining, reduced: false });
       expect(cost.show(at + 16, 600, dock)).toBeUndefined();
     }
-    expect(cost.show(1084, 600, dock)).toMatchObject({ recovery: level });
-    expect(cost.show(1423, 600, dock)).toBeUndefined();
-    expect(cost.show(1424, 600, dock)).toMatchObject({ recovery: combo });
-    expect(cost.show(1764, 600, dock)).toBeUndefined();
-    expect(cost.show(2134, 600, dock)).toEqual({ remaining: 8, reduced: false });
+    const firstRecovery = 1084;
+    expect(cost.show(firstRecovery, 600, dock)).toMatchObject({ recovery: level });
+    expect(cost.show(firstRecovery + MOVE_GAIN_MS - 1, 600, dock)).toBeUndefined();
+    expect(cost.show(firstRecovery + MOVE_GAIN_MS, 600, dock)).toMatchObject({ recovery: combo });
+    expect(cost.show(firstRecovery + 2 * MOVE_GAIN_MS, 600, dock)).toBeUndefined();
+    expect(cost.show(firstRecovery + 2 * MOVE_GAIN_MS + 370, 600, dock)).toEqual({ remaining: 8, reduced: false });
+    cost.root.destroy({ children: true });
+  });
+
+  it('flies capped level and combo gains from the receiving stack before the next spend', () => {
+    const cost = new MoveCost();
+    const anchor = { x: 188, y: 258 };
+    const level = { source: 'level', restored: 7, remaining: 27 } as const;
+    const combo = { source: 'combo', restored: 1, remaining: 28 } as const;
+    const surface = (remaining: number, recovery?: { restored: number }) =>
+      dock(recovery ? remaining - recovery.restored - 1 : remaining);
+    cost.recover(level, 100, false, anchor);
+    cost.recover(combo, 100, false, anchor);
+    cost.enqueue(anchor, 102, false, 27);
+    const show = (at: number) => cost.show(at, 600, surface);
+
+    show(100);
+    const [label] = visible(cost);
+    expect(label).toMatchObject({ text: '+7 MOVES', ...anchor });
+    expect(label.style.fill).toBe(MOVE_GAIN_INK);
+    expect(show(100 + GAIN_ORIGIN_HOLD_MS - 1)).toBeUndefined();
+    expect(label.position).toMatchObject(anchor);
+    expect(show(100 + MOVE_GAIN_MS)).toBeUndefined();
+    expect(label.x).toBeLessThan(anchor.x);
+    const impact = 100 + GAIN_DOCK_MS;
+    expect(show(impact - 1)).toBeUndefined();
+    expect(show(impact)).toEqual({ remaining: 27, recovery: level, reduced: false });
+    expect(visible(cost).find(text => text.text === '+7 MOVES')?.position).toMatchObject(surface(27, level));
+    expect(show(100 + 2 * MOVE_GAIN_MS)).toBeUndefined();
+    expect(show(impact + MOVE_GAIN_MS - 1)).toBeUndefined();
+    expect(show(impact + MOVE_GAIN_MS)).toEqual({ remaining: 28, recovery: combo, reduced: false });
+    expect(visible(cost).find(text => text.text === '+1 MOVE')?.position).toMatchObject(surface(28, combo));
+    expect(show(100 + 2 * MOVE_GAIN_MS + 370)).toBeUndefined();
+    const miss = visible(cost).find(text => text.text === '−1 MOVE')!;
+    expect(miss.scale.x).toBeGreaterThan(0.4);
+    expect(show(impact + 2 * MOVE_GAIN_MS)).toEqual({ remaining: 27, reduced: false });
     cost.root.destroy({ children: true });
   });
 });

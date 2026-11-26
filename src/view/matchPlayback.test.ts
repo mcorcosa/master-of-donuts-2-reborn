@@ -3,13 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type DoughInsert, type GameState, getBoardRepair, JOKER, move } from '../game';
 import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, footerCenterY, layoutStacks, VIEW_WIDTH } from './layout';
-import { LevelCelebration } from './levelCelebration';
+import { LEVEL_CELEBRATION_EXIT_MS, LEVEL_CELEBRATION_MS, LevelCelebration } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import {
-  awardFrame, beginMatch, matchFrame, matchLaunches, type MatchPlayback, matchPopTime,
+  awardFrame, beginMatch, comboEndTime, comboFrame, comboStartTime, matchFrame, matchLaunches, type MatchPlayback, matchPopTime,
   scoreFlightFrame, scoreFlightPosition, scoreImpactTime, scoreSize,
 } from './matchPlayback';
-import { MOVE_SPEND_MS } from './moveCost';
+import { GAIN_DOCK_MS, LEVEL_GAIN_DOCK_MS, MOVE_GAIN_INK, MOVE_GAIN_MS, MOVE_RECOVERY_MS, MOVE_SPEND_MS } from './moveCost';
 import { FLIGHT_MS, LAND_MS } from './movePlayback';
 import { GameScene } from './scene';
 import { ScoreBar } from './scoreBar';
@@ -68,7 +68,8 @@ describe('dough meter presentation', () => {
     const dockingLabel = scene['moveCost']['visible'][0].label;
     expect(dockingLabel.position).toMatchObject(dock);
     expect(vial['count'].text).toBe(String(next));
-    expect(vial['count'].scale.x).toBeCloseTo(1.25);
+    expect(vial['count'].scale.x).toBeCloseTo(next ? 1.25 : 1);
+    if (next === 0) expect(vial['accent'].visible).toBe(false);
     const slice = vial['spendSlice'];
     expect(slice.visible).toBe(true);
     expect(slice.y).toBeCloseTo(oldTop);
@@ -85,6 +86,7 @@ describe('dough meter presentation', () => {
     expect(vial['displayed']).toBeCloseTo(next / 28);
     expect(vial['count'].scale.x).toBe(1);
     expect(slice.visible).toBe(false);
+    if (next === 3) scene.showMoveCosts(impact + 360);
     expect(scene.icingVialAnimating).toBe(false);
     scene.root.destroy({ children: true });
   });
@@ -110,6 +112,264 @@ describe('dough meter presentation', () => {
     expect(vial['spendSlice'].visible).toBe(false);
     expect(vial['displayed']).toBeCloseTo(3 / 28);
     expect(scene.icingVialDeadline).toBe(0);
+    scene.root.destroy({ children: true });
+  });
+
+  it.each([0, 1, 25])('docks an earned gain at the old icing surface with %i moves left', before => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 28 - before });
+    const vial = scene['icingVial'];
+    const restored = Math.min(7, 28 - before);
+    const recovery = { source: 'level', restored, remaining: before + restored } as const;
+    const dock = vial.gainTarget(recovery);
+    const oldSurface = dock.y - vial.root.y;
+    scene.startMoveRecovery(recovery, 0, false, 1);
+    scene.showMoveCosts(0);
+    scene.showMoveCosts(220);
+    const label = scene['moveCost']['visible'][0].label;
+    expect(label.text).toBe(`+${restored} MOVES`);
+    expect(label.style.fill).toBe(MOVE_GAIN_INK);
+    expect(vial['count'].text).toBe(String(before));
+
+    scene.showMoveCosts(GAIN_DOCK_MS);
+    expect(label.position).toMatchObject(dock);
+    expect(vial['count'].text).toBe(String(recovery.remaining));
+    expect(vial['displayed']).toBeCloseTo(before / 28);
+    scene.showIcingVial(GAIN_DOCK_MS + 100, false);
+    const slice = vial['gainSlice'];
+    expect(slice.visible).toBe(true);
+    expect(slice.alpha).toBe(1);
+    expect(slice.y).toBeLessThan(oldSurface);
+    expect(slice.y + slice.scale.y).toBeCloseTo(oldSurface);
+    expect(vial['accent'].visible).toBe(false);
+    scene.showIcingVial(GAIN_DOCK_MS + 315, false);
+    expect(slice.alpha).toBe(1);
+    scene.showIcingVial(GAIN_DOCK_MS + 385, false);
+    expect(vial['displayed']).toBeCloseTo(recovery.remaining / 28);
+    expect(slice.alpha).toBeLessThan(1);
+    scene.showIcingVial(GAIN_DOCK_MS + MOVE_GAIN_MS, false);
+    expect(slice.visible).toBe(false);
+    expect(scene.icingVialAnimating).toBe(false);
+    scene.root.destroy({ children: true });
+  });
+
+  it('shows a stationary reduced-motion gain and quiets the critical meter after relief', () => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 27 });
+    const vial = scene['icingVial'];
+    scene.startMoveRecovery({ source: 'combo', restored: 1, remaining: 2 }, 0, true, 1);
+    scene.showMoveCosts(0);
+    expect(scene['moveCost']['visible'][0].label.text).toBe('+1 MOVE');
+    expect(vial['count'].text).toBe('2');
+    expect(vial['gainSlice'].visible).toBe(true);
+    expect(vial['displayed']).toBeCloseTo(2 / 28);
+    expect(vial['count'].x).toBe(0);
+    expect(vial['accent'].visible).toBe(false);
+    expect(scene.icingVialAnimating).toBe(false);
+    expect(scene.icingVialDeadline).toBe(MOVE_RECOVERY_MS);
+    scene.showIcingVial(MOVE_RECOVERY_MS, true);
+    expect(vial['gainSlice'].visible).toBe(false);
+    expect(scene.moveCostDeadline).toBe(620);
+    scene.showMoveCosts(619, true);
+    expect(scene['moveCost']['visible'][0].label.visible).toBe(true);
+    scene.showMoveCosts(620, true);
+    expect(scene['moveCost']['visible']).toHaveLength(0);
+    scene.root.destroy({ children: true });
+  });
+
+  it.each([false, true])('hands the rendered level caption to the vial on the exit beat, reduced %s', reduced => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 9 });
+    const vial = scene['icingVial'];
+    const level = scene['celebration'];
+    const cost = scene['moveCost'];
+    scene.reserveLevelMoves(2, { source: 'level', restored: 7, remaining: 26 }, reduced);
+    scene.startMoveRecovery({ source: 'combo', restored: 1, remaining: 27 }, 0, reduced, 1);
+    scene.showMoveCosts(0, reduced);
+    expect(cost['visible']).toHaveLength(0);
+    scene.startLevelCelebration({ level: 2, rank: '', movesRestored: 7 }, 100, reduced);
+    const exit = 100 + LEVEL_CELEBRATION_EXIT_MS;
+    scene.showScoreEffects(exit - 1);
+    scene.showMoveCosts(exit - 1, reduced);
+    const caption = level['recovery'];
+    const before = caption.getBounds();
+    const originalStroke = caption.style.stroke;
+    expect(caption.text).toBe('+7 MOVES');
+    expect(caption.parent).toBe(level['hero']);
+    expect(vial['count'].text).toBe('19');
+
+    scene.showScoreEffects(exit);
+    scene.showMoveCosts(exit, reduced);
+    expect(caption.parent).toBe(cost.root);
+    expect(cost['visible'][0].label).toBe(caption);
+    expect(level['recovery'].visible).toBe(false);
+    expect(level.root.alpha).toBe(1);
+    expect(caption.style.stroke).toBe(originalStroke);
+    const bounds = caption.getBounds();
+    expect(bounds.minX).toBeCloseTo(before.minX);
+    expect(bounds.minY).toBeCloseTo(before.minY);
+    expect(bounds.width).toBeCloseTo(before.width);
+    expect(bounds.height).toBeCloseTo(before.height);
+    expect(vial['count'].text).toBe(reduced ? '26' : '19');
+    const releaseX = caption.x;
+    const releaseY = caption.y;
+    scene.showScoreEffects(exit + 90);
+    scene.showMoveCosts(exit + 90, reduced);
+    expect(level.root.alpha).toBeLessThan(1);
+    expect(caption.alpha).toBe(1);
+    if (reduced) {
+      expect(caption.position).toMatchObject({ x: releaseX, y: releaseY });
+      expect(vial['gainSlice'].visible).toBe(true);
+    } else {
+      expect(caption.x).toBeLessThan(releaseX);
+      scene.showMoveCosts(exit + 190);
+      expect(caption.style.stroke).toMatchObject({ color: MOVE_GAIN_INK });
+      scene.showMoveCosts(exit + LEVEL_GAIN_DOCK_MS - 1);
+      expect(vial['count'].text).toBe('19');
+      const target = vial.gainTarget({ source: 'level', restored: 7, remaining: 26 });
+      scene.showMoveCosts(exit + LEVEL_GAIN_DOCK_MS);
+      expect(caption.position).toMatchObject(target);
+      expect(vial['count'].text).toBe('26');
+    }
+    scene.root.destroy({ children: true });
+  });
+
+  it('processes a skipped old exit before starting the next card and clears outstanding reservations on interruption', () => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 20 });
+    const level = scene['celebration'];
+    const vial = scene['icingVial'];
+    const cost = scene['moveCost'];
+    scene.reserveLevelMoves(2, { source: 'level', restored: 7, remaining: 15 }, false);
+    scene.startLevelCelebration({ level: 2, rank: '', movesRestored: 7 }, 0, false);
+    const first = level['recovery'];
+    scene.startMoveCost(1, 100, false, 14);
+    scene.reserveLevelMoves(3, { source: 'level', restored: 7, remaining: 21 }, false);
+    const second = LEVEL_CELEBRATION_MS + 32;
+    scene.startLevelCelebration({ level: 3, rank: '', movesRestored: 7 }, second, false);
+    expect(cost['visible'].map(cue => cue.label)).toEqual([first]);
+    expect(level['recovery'].parent).toBe(level['hero']);
+    const nextCaption = level['recovery'];
+    scene.showMoveCosts(second + 360);
+    scene.showMoveCosts(second + LEVEL_GAIN_DOCK_MS);
+    expect(vial['count'].text).toBe('15');
+    scene.showMoveCosts(second + LEVEL_GAIN_DOCK_MS + MOVE_GAIN_MS);
+    expect(vial['count'].text).toBe('14');
+    const nextExit = second + LEVEL_CELEBRATION_EXIT_MS;
+    scene.showScoreEffects(nextExit);
+    expect(cost['visible'].at(-1)?.label).toBe(nextCaption);
+    scene.showMoveCosts(nextExit + LEVEL_GAIN_DOCK_MS);
+    expect(vial['count'].text).toBe('21');
+
+    const third = nextExit + LEVEL_GAIN_DOCK_MS + MOVE_GAIN_MS;
+    scene.reserveLevelMoves(4, { source: 'level', restored: 7, remaining: 28 }, false);
+    scene.startLevelCelebration({ level: 4, rank: '', movesRestored: 7 }, third, false);
+    scene.clearMoveCosts({ doughMeter: 0 });
+    scene.showScoreEffects(third + LEVEL_CELEBRATION_EXIT_MS);
+    expect(first.destroyed).toBe(true);
+    expect(nextCaption.destroyed).toBe(true);
+    expect(cost['visible']).toHaveLength(0);
+    expect(level['recovery'].visible).toBe(true);
+    expect(vial['count'].text).toBe('28');
+    scene.startMoveCost(1, third + LEVEL_CELEBRATION_MS, true, 27);
+    scene.showMoveCosts(third + LEVEL_CELEBRATION_MS, true);
+    expect(vial['count'].text).toBe('27');
+    scene.root.destroy({ children: true });
+  });
+
+  it.each([
+    { before: 8, width: 1.13, duration: 330, quiet: 0, shake: 0 },
+    { before: 4, width: 1.12, duration: 360, quiet: 3700, shake: 1.7 },
+    { before: 3, width: 1.14, duration: 390, quiet: 2650, shake: 3 },
+    { before: 2, width: 1.16, duration: 430, quiet: 1550, shake: 4.3 },
+  ])('pulses the whole vial for $duration ms after spending from $before', ({ before, width, duration, quiet, shake }) => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 28 - before });
+    const vial = scene['icingVial'];
+    const body = vial['body'];
+    scene.showMoveCosts(0);
+    vial.apply(before - 1, 10, false);
+    scene.showMoveCosts(10 + duration * 3 / 8);
+    expect(Math.abs(body.x)).toBeCloseTo(shake, 1);
+    expect(vial.root.x + body.x - 24 * body.scale.x).toBeGreaterThanOrEqual(4);
+    expect(vial.root.x + body.x + 24 * body.scale.x).toBeLessThanOrEqual(62);
+    scene.showMoveCosts(10 + duration / 2);
+    expect(body.scale.x).toBeCloseTo(width);
+    expect(body.scale.y).toBeLessThan(1);
+    expect(vial['notice'].parent).toBe(vial.root);
+    expect(vial['accent'].visible).toBe(false);
+    scene.showMoveCosts(10 + duration);
+    scene.showIcingVial(10 + duration, false);
+    expect(body.scale.x).toBe(1);
+    expect(scene.icingVialAnimating).toBe(false);
+    expect(scene.icingVialDeadline).toBe(quiet ? 10 + duration + quiet : 0);
+    if (quiet) {
+      const due = scene.icingVialDeadline;
+      scene.showMoveCosts(due - 1);
+      expect(scene.icingVialAnimating).toBe(false);
+      scene.showMoveCosts(due);
+      expect(scene.icingVialAnimating).toBe(true);
+      scene.showMoveCosts(due + duration / 2);
+      expect(body.scale.x).toBeCloseTo(width);
+    }
+    scene.root.destroy({ children: true });
+  });
+
+  it('cancels the urgency clock while paused and reseeds it on resume without a catch-up burst', () => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 27 });
+    const vial = scene['icingVial'];
+    const body = vial['body'];
+    scene.showMoveCosts(100);
+    expect(scene.icingVialDeadline).toBe(1650);
+    scene.showMoveCosts(1800);
+    scene.showMoveCosts(2015);
+    expect(body.scale.x).toBeGreaterThan(1.15);
+    scene.showMoveCosts(2016, true);
+    expect(body.x).toBe(0);
+    expect(body.scale.x).toBe(1);
+    expect(scene.icingVialDeadline).toBe(0);
+    expect(scene.icingVialAnimating).toBe(false);
+    scene.showMoveCosts(20_000);
+    expect(scene.icingVialDeadline).toBe(21_550);
+    expect(scene.icingVialAnimating).toBe(false);
+    scene.showMoveCosts(21_550);
+    scene.showMoveCosts(21_765);
+    expect(body.scale.x).toBeGreaterThan(1.15);
+    scene.showMoveCosts(21_766, false, 8);
+    expect(body.scale.x).toBe(1);
+    expect(scene.icingVialDeadline).toBe(0);
+    scene.showMoveCosts(24_000);
+    scene.showMoveCosts(25_550);
+    scene.showMoveCosts(25_765);
+    expect(body.scale.x).toBeGreaterThan(1.15);
+    scene.showMoveCosts(25_766, false, 0);
+    expect(body.scale.x).toBe(1);
+    expect(scene.icingVialDeadline).toBe(0);
+    scene.root.destroy({ children: true });
+  });
+
+  it.each([false, true])('targets the moving icing surface on contact, gain %s', gain => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 26 });
+    const vial = scene['icingVial'];
+    const body = vial['body'];
+    const bottom = vial['fillBottom'];
+    const surface = bottom - vial['fillHeight'](2 / 28);
+    scene.showMoveCosts(0);
+    const due = scene.icingVialDeadline;
+    const impact = due + 146;
+    if (gain) scene.startMoveRecovery({ source: 'combo', restored: 1, remaining: 3 }, impact - GAIN_DOCK_MS, false, 1);
+    else scene.startMoveCost(1, impact - 370 - FLIGHT_MS, false, 1);
+    scene.showMoveCosts(impact - (gain ? GAIN_DOCK_MS : 370));
+    scene.showMoveCosts(due);
+    scene.showMoveCosts(impact);
+    const label = scene['moveCost']['visible'][0].label;
+    expect(body.scale.x).toBeGreaterThan(1.02);
+    expect(Math.abs(body.x)).toBeGreaterThan(2);
+    expect(label.x).toBeCloseTo(vial.root.x + body.x);
+    expect(label.y).toBeCloseTo(vial.root.y + body.y + surface * body.scale.y);
+    expect(vial['count'].text).toBe(gain ? '3' : '1');
     scene.root.destroy({ children: true });
   });
 
@@ -489,21 +749,26 @@ describe('match presentation', () => {
 
   it('gives the combo its own later pop with a bounded streak accent', () => {
     const pop = playback.arrivalMs + matchPopTime(playback.runLength, playback.runLength - 1);
-    const at = (combo: number, age: number) => awardFrame({ ...playback, combo }, pop + age)!;
-    expect(at(2, 34).comboAlpha).toBe(0);
-    expect(at(2, 56).comboAlpha).toBe(0);
-    expect(at(2, 67).comboAlpha).toBe(0.5);
-    expect(at(2, 90)).toMatchObject({ comboAlpha: 1, comboScale: 1.19 });
-    expect(at(5, 90).comboScale).toBeGreaterThan(at(2, 90).comboScale);
-    expect(at(120, 90).comboScale).toBe(at(6, 90).comboScale);
-    expect(at(6, 140).comboScale).toBe(1);
+    const at = (combo: number, age: number) => comboFrame({ ...playback, combo }, pop + age)!;
+    expect(at(2, 34)).toBeNull();
+    expect(at(2, 56).alpha).toBe(0);
+    expect(at(2, 67).alpha).toBe(0.5);
+    expect(at(2, 90)).toMatchObject({ alpha: 1, scale: 1.19 });
+    expect(at(5, 90).scale).toBeGreaterThan(at(2, 90).scale);
+    expect(at(120, 90).scale).toBe(at(6, 90).scale);
+    expect(at(6, 140).scale).toBe(1);
+    const match = { ...playback, combo: 3 };
+    expect(comboEndTime(match)).toBe(1069);
+    expect(comboFrame(match, 879)).toEqual({ alpha: 1, scale: 1 });
+    expect(comboFrame(match, 974)).toEqual({ alpha: 0.5, scale: 1 });
+    expect(comboFrame(match, 1069)).toBeNull();
   });
 
   it('suppresses score motion and accents and starts the reduced clear without flight', () => {
     const reduced = { ...playback, points: 2500, reduced: true, arrivalMs: 0, clearMs: 230 };
     expect(matchFrame(reduced, 0)).toEqual({ phase: 'clear', progress: 0 });
-    expect(awardFrame(reduced, 25)).toMatchObject({ alpha: 0.5, scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 });
-    expect(awardFrame(reduced, 180)).toMatchObject({ alpha: 1, scaleX: 1, scaleY: 1, comboAlpha: 1, comboScale: 1 });
+    expect(awardFrame(reduced, 25)).toMatchObject({ alpha: 0.5, scaleX: 1, scaleY: 1 });
+    expect(awardFrame(reduced, 180)).toMatchObject({ alpha: 1, scaleX: 1, scaleY: 1 });
     expect(scoreFlightFrame(reduced, 280)).toBeNull();
     expect(scoreImpactTime(reduced)).toBe(230);
     expect(matchFrame(reduced, 230).phase).toBe('resolved');
@@ -530,6 +795,76 @@ describe('match presentation', () => {
     expect(first.active).toBe(false);
     expect(second.active).toBe(true);
     scene.root.destroy({ children: true });
+  });
+
+  it.each([false, true])('keeps the combo badge outside settled-board gates, reduced %s', reduced => {
+    const scene = makeScene();
+    scene.draw({
+      stacks: [['red'], ['red', 'red'], ['blue']], score: 0, level: 1, rank: 'Dough Enthusiast',
+      capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
+    });
+    const match = { ...playback, combo: 3, reduced, arrivalMs: reduced ? 0 : 220, clearMs: reduced ? 230 : 320 };
+    const settle = reduced ? 420 : scoreImpactTime(match);
+    scene.startMatch(match);
+    scene.showMatch(matchFrame(match, settle));
+    scene.showMatchTail(settle);
+    const effect = scene['matchPool'][0];
+    expect(effect['comboBadge'].visible).toBe(true);
+    expect(effect['award'].visible).toBe(false);
+    expect(scene.effectsAnimating).toBe(false);
+    expect(scene.comboAnimating).toBe(!reduced);
+    expect(scene.comboDeadline).toBe(reduced ? 720 : 0);
+    scene.showMatchTail(comboEndTime(match));
+    expect(effect.active).toBe(false);
+    expect(scene.comboDeadline).toBe(0);
+    expect(scene.comboAnimating).toBe(false);
+    scene.root.destroy({ children: true });
+  });
+
+  it('fades the old badge before the next badge without interrupting the older score flight', () => {
+    const scene = makeScene();
+    const board: GameState = {
+      stacks: [['red'], ['red', 'red'], ['blue']], score: 0, level: 1, rank: 'Dough Enthusiast',
+      capacity: 5, nextLevelScore: 500, movesLeft: 7, gameOver: false,
+    };
+    const firstMatch = { ...playback, combo: 3 };
+    const next = { ...playback, combo: 4, started: 540 };
+    scene.draw(board);
+    scene.startMatch(firstMatch);
+    scene.showMatch(matchFrame(firstMatch, 540));
+    scene.draw(board);
+    scene.startMatch(next);
+    const [first, second] = scene['matchPool'];
+    const replacement = comboStartTime(next);
+    scene.showMatchTail(840);
+    expect(first['glaze'].visible).toBe(true);
+    expect(first['comboBadge'].visible).toBe(true);
+    const alpha = first['comboBadge'].alpha;
+    scene.showMatchTail(replacement - 50);
+    expect(first['comboBadge'].alpha).toBeLessThan(alpha);
+    expect(second['comboBadge'].visible).toBe(false);
+    scene.showMatchTail(replacement + 1);
+    expect(first['comboBadge'].visible).toBe(false);
+    expect(second['comboBadge'].visible).toBe(true);
+    scene.root.destroy({ children: true });
+  });
+
+  it('yields a colliding badge to a featured award while continuing the score flight', () => {
+    makeScene().root.destroy({ children: true });
+    const effect = new MatchEffect();
+    effect.start({ ...playback, combo: 5 }, {
+      start: { x: 130, y: 290 }, landing: { x: 220, y: 266 }, width: 54, height: 34, step: 23, viewHeight: 630,
+    }, Texture.WHITE);
+    effect.showTail(650, counter);
+    const badge = effect['comboBadge'];
+    expect(badge.visible).toBe(true);
+    effect.showTail(660, counter, [badge.getBounds().rectangle.clone()]);
+    expect(badge.visible).toBe(false);
+    expect(effect['glaze'].visible).toBe(true);
+    effect.showTail(700, counter);
+    expect(badge.visible).toBe(false);
+    expect(effect['glaze'].visible).toBe(true);
+    effect.root.destroy({ children: true });
   });
 });
 
@@ -752,7 +1087,7 @@ describe('new stack layout', () => {
       y: base - stackHeight - 4,
       width: newLayout.donutWidth + 8,
       height: stackHeight + 22,
-    }], started + 245, true, scene['fit'].height);
+    }], started + 245, true, scene['fit'].height, expect.any(Function));
     scene.root.destroy({ children: true });
   });
 });

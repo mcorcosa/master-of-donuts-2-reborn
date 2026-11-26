@@ -3,7 +3,7 @@ import { DOUGH_METER_LIMIT, type GameState } from '../game';
 import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP } from './layout';
-import { MOVE_COST_INK, MOVE_RECOVERY_MS, MOVE_SPEND_MS, type MoveRecovery } from './moveCost';
+import { MOVE_COST_INK, MOVE_GAIN_INK, MOVE_GAIN_MS, MOVE_RECOVERY_MS, MOVE_SPEND_MS, type MoveRecovery, moveSliceDuration } from './moveCost';
 import { unit } from './movePlayback';
 
 const CAP_WIDTH = 46;
@@ -18,8 +18,18 @@ const FITTING_OVERLAP = 2.1;
 const ICING_WIDTH = 15;
 const RAIL_X = 33;
 const SLICE_HOLD_MS = 72;
+const GAIN_RISE_MS = 300;
+const GAIN_FADE_START_MS = 330;
 const RECOVERY_HIT_MS = 230;
 const RECOVERY_NOTICE_MS = 1150;
+const RAIL_HALF_WIDTH = 29;
+
+const amberBurst = { duration: 330, quiet: 0, widen: 0.13, compress: 0.012, shake: 0 };
+const criticalBursts = [
+  { duration: 430, quiet: 1550, widen: 0.16, compress: 0.024, shake: 5.0 },
+  { duration: 390, quiet: 2650, widen: 0.14, compress: 0.019, shake: 3.5 },
+  { duration: 360, quiet: 3700, widen: 0.12, compress: 0.015, shake: 2.0 },
+];
 
 type Tone = 'full' | 'warning' | 'critical';
 type MoveBudget = Pick<GameState, 'doughMeter'>;
@@ -58,6 +68,7 @@ function fitWidth(label: Text, width: number): void {
 
 export class IcingVial {
   readonly root = new Container({ x: RAIL_X, y: BOARD_TOP, eventMode: 'none', label: 'icing-vial' });
+  private readonly body = new Container({ label: 'vial body' });
   private readonly glass = new Graphics({ label: 'glass' });
   private readonly wellClip = new Graphics({ label: 'inner glass silhouette' });
   private readonly contents = new Container({ label: 'well contents' });
@@ -69,6 +80,8 @@ export class IcingVial {
   private readonly sliceClip = new Graphics({ label: 'icing silhouette' });
   private readonly spendSlice = new Graphics({ visible: false, label: 'spent icing slice' })
     .rect(-ICING_WIDTH / 2, 0, ICING_WIDTH, 1).fill(MOVE_COST_INK);
+  private readonly gainSlice = new Graphics({ visible: false, label: 'restored icing slice' })
+    .rect(-ICING_WIDTH / 2, 0, ICING_WIDTH, 1).fill(MOVE_GAIN_INK);
   private readonly count = text('', 19, 25, '700');
   private readonly caption = text('moves\nleft', 43, 11.2, '700');
   private readonly noticeBacking = new Graphics();
@@ -112,17 +125,21 @@ export class IcingVial {
   private bottom = NECK_Y;
   private lastHeight = -1;
   private lastSliceHeight = 0;
-  private transition: { started: number; from: number; recovery: boolean; reduced: boolean } | null = null;
+  private transition: { started: number; from: number; recovery?: MoveRecovery; reduced: boolean } | null = null;
   private recoveryNotice: { recovery: MoveRecovery; expires: number } | null = null;
+  private urgencyPaused = true;
+  private burstStarted: number | null = null;
+  private nextBurst = 0;
 
   constructor() {
     fitWidth(this.caption, CAP_WIDTH - 8);
-    this.contents.addChild(this.icing, this.sliceClip, this.spendSlice, this.graduations);
-    this.root.addChild(this.glass, this.wellClip, this.contents, this.fittings, this.accent, this.face,
-      this.count, this.caption,
-      this.noticeBacking, this.notice);
+    this.contents.addChild(this.icing, this.sliceClip, this.spendSlice, this.gainSlice, this.graduations);
+    this.body.addChild(this.glass, this.wellClip, this.contents, this.fittings, this.accent, this.face,
+      this.count, this.caption);
+    this.root.addChild(this.body, this.noticeBacking, this.notice);
     this.contents.mask = this.wellClip;
     this.spendSlice.mask = this.sliceClip;
+    this.gainSlice.mask = this.sliceClip;
     this.drawCap();
     this.drawNotice();
     this.root.once('destroyed', () => {
@@ -132,16 +149,75 @@ export class IcingVial {
   }
 
   get animating(): boolean {
-    return this.transition !== null && !this.transition.reduced;
+    return this.burstStarted !== null || (this.transition !== null && !this.transition.reduced);
   }
 
   get deadline(): number {
-    return this.recoveryNotice?.expires ?? (this.transition?.reduced ? this.transition.started + MOVE_SPEND_MS : 0);
+    const still = this.transition?.reduced
+      ? this.transition.started + moveSliceDuration(this.transition.recovery, true) : Infinity;
+    const next = Math.min(still, this.recoveryNotice?.expires ?? Infinity, this.nextBurst || Infinity);
+    return Number.isFinite(next) ? next : 0;
   }
 
   spendTarget(remaining: number): Point {
-    const before = (remaining + 1) / DOUGH_METER_LIMIT;
-    return { x: this.root.x, y: this.root.y + this.fillBottom - this.fillHeight(before) };
+    return this.surface(remaining + 1);
+  }
+
+  gainTarget(recovery: MoveRecovery): Point {
+    return this.surface(recovery.remaining - recovery.restored);
+  }
+
+  private surface(remaining: number): Point {
+    const localY = this.fillBottom - this.fillHeight(remaining / DOUGH_METER_LIMIT);
+    return { x: this.root.x + this.body.x, y: this.root.y + this.body.y + localY * this.body.scale.y };
+  }
+
+  // Sample once before labeling and painting each frame. Budget changes at
+  // contact schedule a new burst without moving the surface under that label.
+  showUrgency(now: number, paused: boolean, committed = this.reading.remaining): void {
+    const { remaining } = this.reading;
+    const relieved = (remaining <= 3 && committed > 3) || (remaining <= 7 && committed > 7);
+    if (paused || committed === 0 || relieved) {
+      this.stopUrgency();
+      return;
+    }
+
+    const critical = criticalBursts[remaining - 1];
+    if (this.urgencyPaused) {
+      this.urgencyPaused = false;
+      this.nextBurst = critical ? now + critical.quiet : 0;
+    }
+    if (this.nextBurst && now >= this.nextBurst) {
+      this.nextBurst = 0;
+      this.burstStarted = now;
+    }
+    const burst = critical ?? amberBurst;
+    const phase = this.burstStarted === null ? 1 : unit((now - this.burstStarted) / burst.duration);
+    if (phase === 1) {
+      if (this.burstStarted !== null) this.nextBurst = critical ? now + critical.quiet : 0;
+      this.burstStarted = null;
+      this.setVialPose(1, 1, 0);
+      return;
+    }
+    const pulse = Math.sin(Math.PI * phase) ** 2;
+    const sway = critical ? Math.sin(4 * Math.PI * phase) : 0;
+    // Widen on the center beat and leave room for the lateral beats.
+    const widthPulse = pulse * (1 - 0.8 * Math.abs(sway));
+    this.setVialPose(1 + burst.widen * widthPulse, 1 - burst.compress * pulse, burst.shake * pulse * sway);
+  }
+
+  private setVialPose(scaleX: number, scaleY: number, shake: number): void {
+    // The cap is the widest moving piece. Keep it inside the fixed warning rail.
+    const wiggleRoom = RAIL_HALF_WIDTH - (CAP_WIDTH / 2 + 1) * scaleX;
+    this.body.position.set(Math.max(-wiggleRoom, Math.min(wiggleRoom, shake)), this.bottom * (1 - scaleY) / 2);
+    this.body.scale.set(scaleX, scaleY);
+  }
+
+  private stopUrgency(): void {
+    this.urgencyPaused = true;
+    this.burstStarted = null;
+    this.nextBurst = 0;
+    this.setVialPose(1, 1, 0);
   }
 
   resize(height: number): void {
@@ -170,6 +246,7 @@ export class IcingVial {
   }
 
   sync(state: MoveBudget): void {
+    this.stopUrgency();
     this.reading = icingVialReading(state);
     this.recoveryNotice = null;
     this.transition = null;
@@ -179,11 +256,22 @@ export class IcingVial {
   apply(remaining: number, now: number, reduced: boolean, recovery?: MoveRecovery): void {
     this.show(now, reduced);
     const next = icingVialReading({ doughMeter: DOUGH_METER_LIMIT - remaining });
-    if (this.reading.remaining === next.remaining) return;
-    const from = recovery ? this.displayed : this.reading.fraction;
+    const previous = this.reading.remaining;
+    if (previous === next.remaining) return;
+    const extra = recovery?.source === 'extra';
+    const from = extra ? this.displayed : this.reading.fraction;
     this.reading = next;
-    this.recoveryNotice = recovery ? { recovery, expires: now + RECOVERY_NOTICE_MS } : null;
-    this.transition = recovery && reduced ? null : { started: now, from, recovery: !!recovery, reduced };
+    const critical = criticalBursts[next.remaining - 1];
+    if (!reduced && !this.urgencyPaused && next.remaining < previous &&
+      (critical || (next.remaining === 7 && previous > 7))) {
+      this.burstStarted = now;
+      this.nextBurst = 0;
+    } else if (next.remaining > previous || next.remaining === 0 || reduced) {
+      this.burstStarted = null;
+      this.nextBurst = !reduced && !this.urgencyPaused && critical ? now + critical.quiet : 0;
+    }
+    this.recoveryNotice = extra ? { recovery, expires: now + RECOVERY_NOTICE_MS } : null;
+    this.transition = extra && reduced ? null : { started: now, from, recovery, reduced };
     this.show(now, reduced);
   }
 
@@ -191,22 +279,25 @@ export class IcingVial {
     if (still && !this.transition?.reduced) this.transition = null;
     let motion = this.transition;
     const age = motion ? Math.max(0, now - motion.started) : 0;
-    if (motion && age >= (motion.recovery ? MOVE_RECOVERY_MS : MOVE_SPEND_MS)) motion = this.transition = null;
-    const t = motion?.recovery ? unit(age / MOVE_RECOVERY_MS) : motion?.reduced ? 0 :
+    if (motion && age >= moveSliceDuration(motion.recovery, motion.reduced)) motion = this.transition = null;
+    const extra = motion?.recovery?.source === 'extra';
+    const gain = motion?.recovery && !extra;
+    const t = gain ? (motion?.reduced ? 1 : unit(age / GAIN_RISE_MS)) : extra ? unit(age / MOVE_RECOVERY_MS) : motion?.reduced ? 0 :
       unit((age - SLICE_HOLD_MS) / (MOVE_SPEND_MS - SLICE_HOLD_MS));
     const tail = 1 - t * t * (3 - 2 * t);
     this.displayed = motion ? this.reading.fraction + (motion.from - this.reading.fraction) * tail
       : this.reading.fraction;
-    const count = motion?.recovery ? Math.floor(this.displayed * DOUGH_METER_LIMIT + 1e-7) : this.reading.remaining;
+    const count = extra ? Math.floor(this.displayed * DOUGH_METER_LIMIT + 1e-7) : this.reading.remaining;
     if (count !== this.painted.remaining) {
       this.painted = icingVialReading({ doughMeter: DOUGH_METER_LIMIT - count });
       this.drawCap();
     }
-    this.accent.alpha = motion?.recovery ? 0.76 * (1 - unit(age / RECOVERY_HIT_MS)) ** 2 : 0;
+    const spend = motion && !motion.recovery && !motion.reduced && count > 0;
+    const punch = spend ? (1 - unit(age / MOVE_SPEND_MS)) ** 2 : 0;
+    this.accent.alpha = extra ? 0.76 * (1 - unit(age / RECOVERY_HIT_MS)) ** 2 : 0;
     this.accent.visible = this.accent.alpha > 0;
-    const punch = motion && !motion.recovery && !motion.reduced ? (1 - unit(age / MOVE_SPEND_MS)) ** 2 : 0;
-    this.count.scale.set(1 + 0.25 * punch);
-    this.count.x = this.painted.tone === 'critical' ? 2 * Math.sin(age / 14) * punch : 0;
+    this.count.scale.set(1 + (count === 1 ? 0.32 : 0.25) * punch);
+    this.gainSlice.alpha = gain && !motion?.reduced ? 1 - unit((age - GAIN_FADE_START_MS) / (MOVE_GAIN_MS - GAIN_FADE_START_MS)) : 1;
     if (this.recoveryNotice && now >= this.recoveryNotice.expires) this.recoveryNotice = null;
     this.drawNotice();
     this.drawIcing();
@@ -232,10 +323,9 @@ export class IcingVial {
   private drawNotice(): void {
     const { remaining } = this.reading;
     const recovery = this.recoveryNotice?.recovery;
-    const source = recovery?.source === 'combo' ? 'Combo' : recovery?.source === 'extra' ? 'Extra\nChance' : 'Level up';
     const warning = remaining === 0 ? 'Out of\nmoves' : remaining === 1 ? 'Next miss\nends the\nrun' :
       remaining <= 3 ? 'Low\nmoves' : '';
-    const restored = recovery && remaining > 1 ? `+${recovery.restored} ${recovery.restored === 1 ? 'move' : 'moves'}\n${source}` : '';
+    const restored = recovery && remaining > 1 ? `+${recovery.restored} ${recovery.restored === 1 ? 'move' : 'moves'}\nExtra\nChance` : '';
     const copy = gameText([restored, warning].filter(Boolean).join('\n'));
     this.noticeBacking.visible = this.notice.visible = !!copy;
     if (this.notice.text === copy) return;
@@ -257,20 +347,25 @@ export class IcingVial {
 
   private drawIcing(): void {
     const height = this.fillHeight(this.displayed);
-    const sliceHeight = this.transition && !this.transition.recovery ? height - this.fillHeight(this.reading.fraction) : 0;
+    const motion = this.transition;
+    const sliceHeight = !motion || motion.recovery?.source === 'extra' ? 0 : motion.recovery
+      ? height - this.fillHeight(motion.from)
+      : this.fillHeight(this.reading.fraction) - height;
     if (height === this.lastHeight && sliceHeight === this.lastSliceHeight) return;
     this.lastHeight = height;
     this.lastSliceHeight = sliceHeight;
-    this.spendSlice.visible = sliceHeight > 0;
+    this.spendSlice.visible = sliceHeight < 0;
+    this.gainSlice.visible = sliceHeight > 0;
     this.icing.clear();
     if (height === 0) return;
     const radius = Math.min(ICING_WIDTH, height) / 2;
     const y = this.fillBottom - height;
     this.icing.roundRect(-ICING_WIDTH / 2, y, ICING_WIDTH, height, radius).fill(this.icingColor[this.painted.tone]);
-    if (sliceHeight > 0) {
+    if (sliceHeight) {
       this.sliceClip.clear().roundRect(-ICING_WIDTH / 2, y, ICING_WIDTH, height, radius).fill(0xffffff);
-      this.spendSlice.y = y;
-      this.spendSlice.scale.y = sliceHeight;
+      const slice = sliceHeight > 0 ? this.gainSlice : this.spendSlice;
+      slice.y = y;
+      slice.scale.y = Math.abs(sliceHeight);
     }
   }
 }

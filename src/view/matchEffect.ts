@@ -1,10 +1,10 @@
-import { Container, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
+import { Container, Graphics, GraphicsContext, type Rectangle, Sprite, Text, type Texture } from 'pixi.js';
 import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
 import type { JokerArt } from './jokerArt';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
 import {
-  awardFrame, clamp, clearStart, comboPopPeak, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches,
+  awardFrame, clamp, clearStart, comboEndTime, comboFrame, comboPopPeak, launchedDonut, type MatchFrame, type MatchGeometry, matchLaunches,
   type MatchPlayback, scoreFlightFrame, scoreFlightPosition, scorePopPeak, scoreSize,
 } from './matchPlayback';
 import { flightPosition, unit } from './movePlayback';
@@ -58,7 +58,10 @@ export class MatchEffect {
   private origin: Point = { x: 0, y: 0 };
   private scoreY = 0;
   private scoreFit = 1;
+  private comboY = 0;
   private comboFit = 1;
+  private comboUntil = 0;
+  private boardActive = false;
   private current: {
     playback: MatchPlayback;
     geometry: MatchGeometry;
@@ -82,8 +85,8 @@ export class MatchEffect {
     this.combo.anchor.set(0.5);
     this.score.addChild(this.outline, this.face);
     this.comboBadge.addChild(this.comboBacking, this.combo);
-    this.award.addChild(this.score, this.comboBadge);
-    this.root.addChild(this.donuts, this.bursts, this.award, this.glaze);
+    this.award.addChild(this.score);
+    this.root.addChild(this.donuts, this.bursts, this.award, this.glaze, this.comboBadge);
     this.root.once('destroyed', () => {
       this.sprinkleShape.destroy();
       this.streakShape.destroy();
@@ -94,6 +97,22 @@ export class MatchEffect {
 
   get active(): boolean {
     return this.current !== null;
+  }
+
+  get boardAnimating(): boolean {
+    return this.boardActive;
+  }
+
+  get comboAnimating(): boolean {
+    return this.comboBadge.visible && this.current?.playback.reduced === false;
+  }
+
+  get comboDeadline(): number {
+    return this.current?.playback.reduced ? this.comboUntil : 0;
+  }
+
+  finishComboBy(now: number): void {
+    this.comboUntil = Math.min(this.comboUntil, now);
   }
 
   *warmup(reduced: boolean): Generator<GraphicsContext | undefined> {
@@ -114,6 +133,8 @@ export class MatchEffect {
     this.cancel();
     const launches = playback.reduced ? [] : matchLaunches(playback, geometry);
     this.current = { playback, geometry, texture, launches, joker };
+    this.boardActive = true;
+    this.comboUntil = comboEndTime(playback);
     const fill = DONUT_FILLS[playback.color] ?? CREAM;
     const { marginX, marginY } = this.prepareAward(playback, fill);
     this.trail.forEach((piece, index) => { piece.tint = index % 3 === 2 ? CREAM : fill; });
@@ -177,7 +198,7 @@ export class MatchEffect {
       halfWidth = Math.max(halfWidth, (width + 2) * this.comboFit * comboPeak / 2);
       extraHeight = COMBO_GAP + badgeHeight;
       this.scoreY = -extraHeight / 2;
-      this.comboBadge.y = (scoreHeight + COMBO_GAP) / 2;
+      this.comboY = (scoreHeight + COMBO_GAP) / 2;
     }
     return { marginX: halfWidth + 6, marginY: (scoreHeight + extraHeight) / 2 + 3 };
   }
@@ -233,7 +254,7 @@ export class MatchEffect {
     }
   }
 
-  showTail(now: number, target: Point): void {
+  showTail(now: number, target: Point, comboObstacles: readonly Rectangle[] = []): void {
     const current = this.current;
     if (!current) return;
     const { playback, geometry, launches } = current;
@@ -245,31 +266,42 @@ export class MatchEffect {
     const flight = scoreFlightFrame(playback, now);
     this.award.visible = frame !== null || flight !== null;
     this.glaze.visible = flight !== null;
+    this.boardActive = this.donuts.visible || this.bursts.visible || this.award.visible;
     if (flight !== null) {
-      this.flyScore(flight, target, playback.combo >= 2);
-      return;
+      this.flyScore(flight, target);
+    } else if (frame) {
+      this.award.position.copyFrom(this.origin);
+      this.award.alpha = frame.alpha;
+      this.score.position.set(0, this.scoreY);
+      this.score.scale.set(this.scoreFit * frame.scaleX, this.scoreFit * frame.scaleY);
     }
-    if (!frame) {
-      if (!this.donuts.visible && !this.bursts.visible) this.current = null;
-      return;
+
+    const badge = this.comboBadge;
+    const combo = comboFrame(playback, now, this.comboUntil);
+    badge.visible = combo !== null && combo.alpha > 0;
+    if (combo) {
+      badge.position.set(this.origin.x, this.origin.y + this.comboY);
+      badge.alpha = combo.alpha;
+      badge.scale.set(this.comboFit * combo.scale);
+      if (comboObstacles.length && badge.visible) {
+        const bounds = badge.getBounds().rectangle;
+        if (comboObstacles.some(obstacle => obstacle.intersects(bounds))) {
+          // A featured award takes the space. Leave the score flight alone.
+          this.comboUntil = 0;
+          badge.visible = false;
+        }
+      }
+    } else if (now >= this.comboUntil) {
+      this.comboUntil = 0;
     }
-    this.award.position.copyFrom(this.origin);
-    this.award.alpha = frame.alpha;
-    this.score.position.set(0, this.scoreY);
-    this.score.scale.set(this.scoreFit * frame.scaleX, this.scoreFit * frame.scaleY);
-    this.comboBadge.visible = playback.combo >= 2 && frame.comboAlpha > 0;
-    this.comboBadge.alpha = frame.comboAlpha;
-    this.comboBadge.scale.set(this.comboFit * frame.comboScale);
+    if (!this.boardActive && !this.comboUntil) this.current = null;
   }
 
-  private flyScore(progress: number, target: Point, combo: boolean): void {
+  private flyScore(progress: number, target: Point): void {
     const start = { x: this.origin.x, y: this.origin.y + this.scoreY };
     const position = scoreFlightPosition(start, target, progress);
     this.award.position.copyFrom(this.origin);
     this.award.alpha = 1;
-    this.comboBadge.visible = combo && progress < 0.7;
-    this.comboBadge.alpha = 1 - unit((progress - 0.24) / 0.46);
-    this.comboBadge.scale.set(this.comboFit);
     const shrink = 1 - 0.82 * progress ** 1.15;
     this.score.position.set(position.x - this.origin.x, position.y - this.origin.y);
     this.score.scale.set(this.scoreFit * shrink);
@@ -342,6 +374,8 @@ export class MatchEffect {
 
   cancel(): void {
     this.current = null;
+    this.boardActive = false;
+    this.comboUntil = 0;
     this.comboBadge.visible = false;
     this.combo.text = '';
     this.donuts.visible = this.bursts.visible = this.award.visible = this.glaze.visible = false;

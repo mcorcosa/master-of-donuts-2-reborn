@@ -226,7 +226,7 @@ export async function mountGame(app: Application, {
   }
 
   function timedWork(): boolean {
-    return boardAnimating() || scene.moveCostAnimating || boosterDrop !== null || scene.freeBoosterAnimating ||
+    return boardAnimating() || scene.moveCostAnimating || scene.comboAnimating || boosterDrop !== null || scene.freeBoosterAnimating ||
       scene.icingVialAnimating || (!motion.matches && gameOver?.cueAnimating === true);
   }
 
@@ -240,6 +240,8 @@ export async function mountGame(app: Application, {
     if (moveCost && (!next || moveCost < next)) next = moveCost;
     const vial = scene.icingVialDeadline;
     if (vial && (!next || vial < next)) next = vial;
+    const combo = scene.comboDeadline;
+    if (combo && (!next || combo < next)) next = combo;
     if (firstMatchGuideAt && (!next || firstMatchGuideAt < next)) next = firstMatchGuideAt;
     const gameOverDeadline = results || adDialog?.element.open ? 0 : gameOver?.deadline(motion.matches) ?? 0;
     if (gameOverDeadline && (!next || gameOverDeadline < next)) next = gameOverDeadline;
@@ -1166,8 +1168,12 @@ export async function mountGame(app: Application, {
       credits.push({ at, total: state.score, reduced: playback.reduced, level });
       const levelMoves = level?.details.movesRestored ?? 0;
       const comboMoves = previousSpent - spent - levelMoves;
-      if (levelMoves > 0) scene.startMoveRecovery({ source: 'level', restored: levelMoves, remaining: remaining - comboMoves }, at, playback.reduced);
-      if (comboMoves > 0) scene.startMoveRecovery({ source: 'combo', restored: comboMoves, remaining }, at, playback.reduced);
+      // The label uses the receiving stack's original seat. Let the matched
+      // donuts clear that space before showing the reward there.
+      const recoveryAt = playback.reduced ? started : clearStart(playback) + playback.clearMs;
+      if (level && levelMoves > 0) scene.reserveLevelMoves(level.details.level,
+        { source: 'level', restored: levelMoves, remaining: remaining - comboMoves }, playback.reduced);
+      if (comboMoves > 0) scene.startMoveRecovery({ source: 'combo', restored: comboMoves, remaining }, recoveryAt, playback.reduced, to);
       if (awarded && focused && !hostPaused && !document.hidden && !pageHidden) {
         boosterDrop = { kind: awarded, creditAt: at, playback };
       }
@@ -1178,7 +1184,10 @@ export async function mountGame(app: Application, {
       if (playback.reduced) sound.match(playback.color);
       return;
     }
-    if (state.score !== before.score || level) resetScore();
+    if (state.score !== before.score || level) {
+      scene.clearMoveCosts(state);
+      resetScore();
+    }
     const start = scene.topPosition(from);
     const color = before.stacks[from].at(-1)!;
     feedback = null;
@@ -1264,10 +1273,11 @@ export async function mountGame(app: Application, {
     if (scene.freeBoosterDeadline) scene.showFreeBoosterCelebration(now);
     advanceScore(now);
     scene.showMatchTail(now);
-    scene.showMoveCosts(now);
+    const vialStill = motion.matches || !foreground() || !!adDialog?.element.open || otherDialogOpen();
+    scene.showMoveCosts(now, vialStill || state.gameOver, DOUGH_METER_LIMIT - (state.doughMeter ?? 0));
     if (scene.boosterCueDeadline) scene.showBoosterCue(now, motion.matches);
     advanceGameOver(now);
-    scene.showIcingVial(now, motion.matches || !foreground() || !!adDialog?.element.open || otherDialogOpen());
+    scene.showIcingVial(now, vialStill);
     syncControls(now);
     if (!timedWork() && !gestures.active && gestures.source === null) applyQuality();
     const guideAnimating = renderFirstMatchGuide(now);
@@ -1318,8 +1328,7 @@ export async function mountGame(app: Application, {
       tapOnlyPress = false;
       queuedStackTaps.length = 0;
       arrowPointer = null;
-      sound.stop();
-      discardPresentationCues();
+      silencePresentation();
       quality.frames.interrupt();
       updateInteraction();
     }
