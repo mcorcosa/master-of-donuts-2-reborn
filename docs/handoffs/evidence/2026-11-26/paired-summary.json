@@ -1,0 +1,851 @@
+{
+  "records": [
+    {
+      "name": "dpr1-booster-and-full",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 14,
+      "cropPixels": [
+        417,
+        197
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-free-booster",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 14,
+      "cropPixels": [
+        376,
+        117
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-hud",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          null
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 0,
+      "cropPixels": [
+        568,
+        222
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-level-up",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 14,
+      "cropPixels": [
+        261,
+        296
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-match",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 14,
+      "cropPixels": [
+        219,
+        191
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-menu",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 10,
+      "cropPixels": [
+        158,
+        165
+      ],
+      "identicalCrop": true
+    },
+    {
+      "name": "dpr1-move",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 13,
+      "cropPixels": [
+        209,
+        86
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr1-results",
+      "dpr": 1,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 14,
+      "cropPixels": [
+        496,
+        843
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-booster-and-full",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        834,
+        394
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-free-booster",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        752,
+        234
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-hud",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          null
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 0,
+      "cropPixels": [
+        1136,
+        444
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-level-up",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        522,
+        592
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-match",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        438,
+        382
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-menu",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        316,
+        330
+      ],
+      "identicalCrop": true
+    },
+    {
+      "name": "dpr2-move",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        418,
+        172
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-quality-1.5",
+      "dpr": 2,
+      "renderer": 1.5,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1800,
+        1410
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1.5,
+        3
+      ],
+      "sceneLabelResolutions": [
+        [
+          1.5
+        ],
+        [
+          3,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 7,
+      "cropPixels": [
+        652,
+        228
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-quality-1",
+      "dpr": 2,
+      "renderer": 1,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        1200,
+        940
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        1,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          1
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          1
+        ]
+      ],
+      "candidatePreparedText": 6,
+      "cropPixels": [
+        652,
+        228
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-resize-narrow",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        390,
+        760
+      ],
+      "canvas": [
+        780,
+        1520
+      ],
+      "scale": 0.975,
+      "sceneTextureResolution": [
+        2,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 0,
+      "cropPixels": [
+        410,
+        152
+      ],
+      "identicalCrop": true
+    },
+    {
+      "name": "dpr2-resize-same-tier",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        375,
+        760
+      ],
+      "canvas": [
+        750,
+        1520
+      ],
+      "scale": 0.9375,
+      "sceneTextureResolution": [
+        2,
+        2
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2,
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 6,
+      "cropPixels": [
+        394,
+        146
+      ],
+      "identicalCrop": true
+    },
+    {
+      "name": "dpr2-resize-wide",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 0,
+      "cropPixels": [
+        652,
+        228
+      ],
+      "identicalCrop": false
+    },
+    {
+      "name": "dpr2-results",
+      "dpr": 2,
+      "renderer": 2,
+      "css": [
+        1200,
+        940
+      ],
+      "canvas": [
+        2400,
+        1880
+      ],
+      "scale": 1.6,
+      "sceneTextureResolution": [
+        2,
+        4
+      ],
+      "sceneLabelResolutions": [
+        [
+          2
+        ],
+        [
+          4
+        ]
+      ],
+      "menuLabelResolutions": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ],
+      "candidatePreparedText": 24,
+      "cropPixels": [
+        992,
+        1686
+      ],
+      "identicalCrop": false
+    }
+  ],
+  "failures": []
+}

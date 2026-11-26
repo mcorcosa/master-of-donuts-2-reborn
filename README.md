@@ -4,6 +4,8 @@ A PixiJS rewrite of Master of Donuts 2 for Facebook Instant Games.
 
 Use [mcorcosa/master-of-donuts-2-reborn](https://github.com/mcorcosa/master-of-donuts-2-reborn) as the sole push destination.
 
+For the receiving manager, see the [26 November 2026 handoff](docs/handoffs/2026-11-26.md).
+
 ## Local development
 
 Use Node.js 24 to match CI. Reborn pins PlayBridge through the committed Git submodule at `vendor/playbridge`. From the game root, `git ls-tree HEAD -- vendor/playbridge` prints the recorded commit.
