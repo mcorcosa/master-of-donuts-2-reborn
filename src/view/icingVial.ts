@@ -159,6 +159,12 @@ export class IcingVial {
     return Number.isFinite(next) ? next : 0;
   }
 
+  get mascotUrgency() {
+    const { remaining } = this.reading;
+    const burst = criticalBursts[remaining - 1];
+    return { remaining, started: burst ? this.burstStarted : null, duration: burst?.duration ?? 0 };
+  }
+
   spendTarget(remaining: number): Point {
     return this.surface(remaining + 1);
   }

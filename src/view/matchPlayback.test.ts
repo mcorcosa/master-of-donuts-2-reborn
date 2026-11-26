@@ -4,6 +4,7 @@ import { type DoughInsert, type GameState, getBoardRepair, JOKER, move } from '.
 import { type Point, StackGestures } from './gestures';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, footerCenterY, layoutStacks, VIEW_WIDTH } from './layout';
 import { LEVEL_CELEBRATION_EXIT_MS, LEVEL_CELEBRATION_MS, LevelCelebration } from './levelCelebration';
+import { MASCOT_GLOVES, MASCOT_POSES, mascotArt } from './mascot';
 import { MatchEffect } from './matchEffect';
 import {
   awardFrame, beginMatch, comboEndTime, comboFrame, comboStartTime, matchFrame, matchLaunches, type MatchPlayback, matchPopTime,
@@ -34,14 +35,104 @@ function makeScene(): GameScene {
   vi.spyOn(DOMAdapter.get(), 'createCanvas').mockImplementation((width, height) =>
     ({ width, height, getContext: () => context }) as unknown as HTMLCanvasElement);
   vi.spyOn(Texture, 'from').mockImplementation(() => new Texture({ source: new TextureSource({ width: 64, height: 64 }) }));
-  const art = new Map(['kitchen', 'logo', 'clear', 'strawberry-glaze', 'blue', 'red', 'green', 'gold', 'yellow', JOKER]
+  const art = new Map(['kitchen', 'logo', 'clear', 'blue', 'red', 'green', 'gold', 'yellow', JOKER]
     .map(name => [name, Texture.WHITE]));
+  for (const pose of MASCOT_POSES) {
+    const texture = new Texture({ source: new TextureSource({ width: 236, height: 176 }), label: pose });
+    art.set(mascotArt(pose), texture);
+  }
+  for (const glove of MASCOT_GLOVES) {
+    art.set(glove, new Texture({ source: new TextureSource({ width: 236, height: 176 }), label: glove }));
+  }
   const scene = new GameScene(art);
   scene.resize(320, 568);
   return scene;
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+it('keeps reduced-motion reactions still and lets other expressions override them', () => {
+  const scene = makeScene();
+  scene.draw({
+    stacks: [['red'], ['red', 'red'], ['green']], capacity: 5,
+    score: 0, level: 1, rank: 'Dough Enthusiast', nextLevelScore: 500, movesLeft: 5, gameOver: false,
+  });
+  const mascot = scene['scoreBar'].root.getChildByLabel('hud-mascot', true) as Sprite;
+  const puppet = mascot.parent!;
+  const frame = [puppet.x, puppet.y, puppet.scale.x, puppet.scale.y, puppet.rotation];
+  const show = (now: number, pose: string, blocked = false) => {
+    scene.showMascot(now, { blocked, terminal: false, reduced: true, paused: false, committed: 28 });
+    expect(mascot.texture.label).toBe(pose);
+    expect([puppet.x, puppet.y, puppet.scale.x, puppet.scale.y, puppet.rotation]).toEqual(frame);
+    expect(scene.mascotAnimating).toBe(false);
+  };
+
+  expect(scene.mascotDeadline).toBe(0);
+  show(99, 'waving');
+  scene.startMatch({ ...playback, started: 100, arrivalMs: 0, reduced: true });
+  show(100, 'laughing');
+  expect(scene.mascotDeadline).toBe(750);
+  scene.showHint({ from: 0, to: 1 });
+  show(300, 'pensive');
+  show(500, 'confused', true);
+  scene.clearHint();
+  show(600, 'laughing');
+  show(750, 'waving');
+  expect(scene.mascotDeadline).toBe(0);
+
+  scene.startLevelCelebration({ level: 2, rank: 'Pastry Pupil', movesRestored: 0 }, 2000, true);
+  show(2000, 'laughing');
+  expect(scene.mascotDeadline).toBe(3450);
+  scene.cancelScoreEffects();
+  show(2001, 'waving');
+  expect(scene.mascotDeadline).toBe(0);
+  scene.root.destroy({ children: true });
+});
+
+it('uses the actual vial contacts and quiet intervals for fear, with immediate relief on recovery', () => {
+  const scene = makeScene();
+  scene.draw({
+    stacks: [['red'], ['red', 'red'], ['green']], capacity: 5, doughMeter: 24,
+    score: 0, level: 1, rank: 'Dough Enthusiast', nextLevelScore: 500, movesLeft: 5, gameOver: false,
+  });
+  const vial = scene['icingVial'];
+  const puppet = scene['scoreBar'].root.getChildByLabel('hud-mascot-puppet')!;
+  const [body, left, right] = puppet.children as [Sprite, Sprite, Sprite];
+  const show = (now: number, committed: number, options: { paused?: boolean; terminal?: boolean } = {}) => {
+    vial.showUrgency(now, !!options.paused || !!options.terminal, committed);
+    scene.showMascot(now, { blocked: false, terminal: !!options.terminal, paused: !!options.paused, reduced: false, committed });
+    return body.texture.label;
+  };
+
+  expect(show(0, 4)).toBe('waving');
+  const peaks = [];
+  for (const [tier, duration, quiet] of [[3, 360, 3700], [2, 390, 2650], [1, 430, 1550]]) {
+    const at = 10_000 * (4 - tier);
+    vial.apply(tier, at, false);
+    expect(vial.mascotUrgency).toEqual({ remaining: tier, started: at, duration });
+    expect(show(at + duration / 2, tier)).toBe('frightened');
+    expect(scene.mascotAnimating && left.visible && right.visible).toBe(true);
+    expect(left.rotation).toBeGreaterThan(0);
+    expect(right.rotation).toBeLessThan(0);
+    peaks.push(left.rotation);
+    expect(show(at + duration, tier)).toBe('frightened');
+    expect(scene.mascotAnimating).toBe(false);
+    expect(left.rotation).toBe(0);
+    expect(scene.mascotDeadline).toBe(0);
+    expect(show(at + duration + quiet, tier)).toBe('frightened');
+    expect(vial.mascotUrgency.started).toBe(at + duration + quiet);
+    expect(scene.mascotAnimating).toBe(true);
+    expect(show(at + duration + quiet + 100, tier, { paused: true })).toBe('frightened');
+    expect(scene.mascotAnimating).toBe(false);
+    show(at + duration + quiet + 150, tier);
+  }
+  expect(peaks[0]).toBeLessThan(peaks[1]);
+  expect(peaks[1]).toBeLessThan(peaks[2]);
+  expect(show(33_000, 5)).toBe('waving');
+  expect(left.visible || right.visible || scene.mascotAnimating).toBe(false);
+  expect(show(33_001, 0, { terminal: true })).toBe('confused');
+  scene.root.destroy({ children: true });
+});
 
 describe('dough meter presentation', () => {
   const openingVialFixture: GameState = {

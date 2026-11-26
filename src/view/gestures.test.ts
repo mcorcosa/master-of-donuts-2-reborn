@@ -223,6 +223,33 @@ describe('stack gestures', () => {
     expect(gestures.destination).toBeNull();
   });
 
+  it.each([
+    { device: 'touch', distance: 30, retained: true },
+    { device: 'touch', distance: 30.5, retained: false },
+    { device: 'mouse', distance: 16, retained: true },
+    { device: 'mouse', distance: 16.5, retained: false },
+  ])('retains an acquired $device destination at $distance CSS pixels only within the drop tolerance',
+    ({ device, distance, retained }) => {
+      const gestures = fixture();
+      const release = { x: middle.x + distance, y: middle.y };
+      gestures.start(1, left, 0, device);
+      gestures.update(1, middle, 1);
+      gestures.update(1, { x: middle.x + distance / 2, y: middle.y }, null);
+      gestures.update(1, release, null);
+      expect(gestures.destination).toBe(retained ? 1 : null);
+      expect(gestures.finish(1, release, null)).toEqual(retained ? { kind: 'move', from: 0, to: 1 } : null);
+    });
+
+  it('clears the acquired drop when the finger reaches a full stack, even within the drop tolerance', () => {
+    const gestures = fixture();
+    gestures.start(1, left, 0, 'touch');
+    gestures.update(1, middle, 1);
+    const neighbor = { x: middle.x + 6, y: middle.y };
+    gestures.update(1, neighbor, 2);
+    expect(gestures.destination).toBe(2);
+    expect(gestures.finish(1, { x: neighbor.x + 4, y: neighbor.y }, null)).toBeNull();
+  });
+
   it('recognizes a swipe from its release alone and keeps the source when the target is full', () => {
     const gestures = fixture();
     gestures.start(1, left, 0);

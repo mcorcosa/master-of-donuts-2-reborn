@@ -12,8 +12,10 @@ import {
   stackTarget, VIEW_WIDTH, viewport,
 } from './layout';
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
+import { MASCOT_GLOVES, MASCOT_POSES, mascotArt } from './mascot';
+import { MascotMotion } from './mascotMotion';
 import { MatchEffect } from './matchEffect';
-import { comboStartTime, type MatchFrame, type MatchPlayback } from './matchPlayback';
+import { clearStart, comboStartTime, type MatchFrame, type MatchPlayback, matchPopTime } from './matchPlayback';
 import { MoveCost, type MoveRecovery } from './moveCost';
 import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan, unit } from './movePlayback';
 import { ResultsPanel } from './resultsPanel';
@@ -41,9 +43,10 @@ const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
 export async function loadArt(): Promise<Map<string, Texture>> {
-  const pastries = ['wordmark', 'score', 'level', 'mascot', 'hint'].map(part => `vanilla-bean-${part}`);
-  const textures = await Promise.all([...pastries, 'clear', 'strawberry-glaze', ...DONUT_ART, JOKER].map(async name => {
-    const extension = name === JOKER || pastries.includes(name) ? 'webp' : 'png';
+  const pastries = ['wordmark', 'score', 'level', 'hint'].map(part => `vanilla-bean-${part}`);
+  const webpArt = [...pastries, ...MASCOT_POSES.map(mascotArt), ...MASCOT_GLOVES, JOKER];
+  const textures = await Promise.all([...webpArt, 'clear', ...DONUT_ART].map(async name => {
+    const extension = webpArt.includes(name) ? 'webp' : 'png';
     const file = name === 'clear' ? 'sugar-glass.webp' : `${name}.${extension}`;
     const src = `${import.meta.env.BASE_URL}art/${file}`;
     const texture = await Assets.load<Texture>(DONUT_ART.includes(name)
@@ -204,6 +207,7 @@ export class GameScene {
   private readonly moveCost = new MoveCost(this.textResolution);
   private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar: ScoreBar;
+  private readonly mascotMotion = new MascotMotion();
   private readonly icingVial = new IcingVial();
   private readonly doughRepairCue = new Graphics({ visible: false, eventMode: 'none', label: 'dough-repair-cue' });
   private boardSwaps: readonly DoughSwap[] = [];
@@ -241,6 +245,8 @@ export class GameScene {
   get icingVialAnimating(): boolean { return this.icingVial.animating; }
 
   get icingVialDeadline(): number { return this.icingVial.deadline; }
+  get mascotDeadline(): number { return this.mascotMotion.deadline; }
+  get mascotAnimating(): boolean { return this.mascotMotion.animating; }
 
   get stackUnlockAnimating(): boolean {
     return this.stackUnlock !== null;
@@ -274,13 +280,13 @@ export class GameScene {
   }
 
   constructor(private readonly art: Map<string, Texture>) {
-    const companion = this.texture('strawberry-glaze');
     this.boosterControls = new BoosterControls(this.art.get(JOKER)!, this.textResolution);
     const scoreBiscuit = this.texture('vanilla-bean-score');
     const jamCookie = this.texture('vanilla-bean-level');
-    this.scoreBar = new ScoreBar(this.texture('vanilla-bean-mascot'), scoreBiscuit, jamCookie);
+    this.scoreBar = new ScoreBar(this.texture(mascotArt('waving')), scoreBiscuit, jamCookie,
+      [this.texture(MASCOT_GLOVES[0]), this.texture(MASCOT_GLOVES[1])]);
     this.celebration = new LevelCelebration(jamCookie, scoreBiscuit);
-    this.results = new ResultsPanel(companion, this.textResolution);
+    this.results = new ResultsPanel(this.texture(mascotArt('confused')), this.textResolution);
     this.vacancyArt = new VacancyArt(this.texture('clear'));
     this.root.once('destroyed', () => {
       this.contactTexture.destroy(true);
@@ -368,6 +374,10 @@ export class GameScene {
       yield;
     }
     yield* effect.warmup(reduced);
+    for (const pose of MASCOT_POSES) {
+      if (pose !== 'waving') yield this.texture(mascotArt(pose));
+    }
+    for (const glove of MASCOT_GLOVES) yield this.texture(glove);
     yield* this.results.warmup();
   }
 
@@ -696,6 +706,17 @@ export class GameScene {
     this.scoreBar.draw(display);
   }
 
+  showMascot(now: number, situation: { blocked: boolean; terminal: boolean; reduced: boolean; paused: boolean; committed: number }): void {
+    const frame = this.mascotMotion.show(now, { ...situation,
+      hint: this.hintArrow.root.visible || !!this.hintStatus.text, urgency: this.icingVial.mascotUrgency });
+    this.scoreBar.setMascot(this.texture(mascotArt(frame.pose)), frame);
+  }
+
+  cancelMascot(): void {
+    this.mascotMotion.reset();
+    this.scoreBar.settleMascot();
+  }
+
   creditScore(now: number, reduced: boolean): void {
     this.scoreBar.credit(now, reduced);
   }
@@ -705,6 +726,7 @@ export class GameScene {
   }
 
   startLevelCelebration(details: LevelCelebrationDetails, now: number, reduced: boolean): void {
+    this.mascotMotion.start('level', now, reduced);
     const { upgrade } = details;
     const { donutWidth, donutHeight, step } = this.layout;
     const markers: Rect[] = [];
@@ -738,6 +760,7 @@ export class GameScene {
   }
 
   cancelScoreEffects(): void {
+    this.cancelMascot();
     this.scoreBar.resetEffects();
     this.celebration.cancel();
   }
@@ -1017,6 +1040,10 @@ export class GameScene {
   }
 
   startMatch(match: MatchPlayback): void {
+    const combo = match.combo >= 2;
+    const cueAt = combo ? comboStartTime(match)
+      : clearStart(match) + (match.reduced ? 0 : matchPopTime(match.runLength, match.runLength - 1));
+    this.mascotMotion.queueMatch(combo, cueAt, match.reduced);
     const target = this.stacks[match.to];
     const { donutWidth, donutHeight, step } = this.layout;
     if (match.combo >= 2) {

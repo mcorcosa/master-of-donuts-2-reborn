@@ -242,6 +242,8 @@ export async function mountGame(app: Application, {
     if (vial && (!next || vial < next)) next = vial;
     const combo = scene.comboDeadline;
     if (combo && (!next || combo < next)) next = combo;
+    const mascot = scene.mascotDeadline;
+    if (mascot && (!next || mascot < next)) next = mascot;
     if (firstMatchGuideAt && (!next || firstMatchGuideAt < next)) next = firstMatchGuideAt;
     const gameOverDeadline = results || adDialog?.element.open ? 0 : gameOver?.deadline(motion.matches) ?? 0;
     if (gameOverDeadline && (!next || gameOverDeadline < next)) next = gameOverDeadline;
@@ -792,6 +794,7 @@ export async function mountGame(app: Application, {
   function silencePresentation(): void {
     sound.stop();
     scene.clearMoveCosts(state);
+    scene.cancelMascot();
     discardPresentationCues();
   }
 
@@ -1273,10 +1276,13 @@ export async function mountGame(app: Application, {
     if (scene.freeBoosterDeadline) scene.showFreeBoosterCelebration(now);
     advanceScore(now);
     scene.showMatchTail(now);
-    const vialStill = motion.matches || !foreground() || !!adDialog?.element.open || otherDialogOpen();
-    scene.showMoveCosts(now, vialStill || state.gameOver, DOUGH_METER_LIMIT - (state.doughMeter ?? 0));
+    const paused = !foreground() || !!adDialog?.element.open || otherDialogOpen();
+    const vialStill = motion.matches || paused;
+    const committed = DOUGH_METER_LIMIT - (state.doughMeter ?? 0);
+    scene.showMoveCosts(now, vialStill || state.gameOver, committed);
     if (scene.boosterCueDeadline) scene.showBoosterCue(now, motion.matches);
     advanceGameOver(now);
+    scene.showMascot(now, { terminal: state.gameOver, blocked: feedback !== null, reduced: motion.matches, paused, committed });
     scene.showIcingVial(now, vialStill);
     syncControls(now);
     if (!timedWork() && !gestures.active && gestures.source === null) applyQuality();
@@ -1288,7 +1294,7 @@ export async function mountGame(app: Application, {
     if (!continuing) quality.frames.pause();
     queueDeadline(now);
     queueWarmup();
-    return continuing || guideAnimating;
+    return continuing || guideAnimating || scene.mascotAnimating;
   }
 
   function syncPlaybackSuspension(): void {
@@ -1432,6 +1438,7 @@ export async function mountGame(app: Application, {
   motion.addEventListener('change', () => {
     scene.cancelFreeBoosterCelebration();
     scene.clearMoveCosts(state);
+    scene.cancelMascot();
     quality.frames.interrupt();
     updateInteraction();
     frames.invalidate();

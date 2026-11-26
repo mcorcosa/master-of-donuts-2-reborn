@@ -2,6 +2,8 @@ import { Container, Graphics, Sprite, Text, type TextStyleOptions, Texture } fro
 import type { GameState } from '../game';
 import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
+import { MascotPuppet } from './mascot';
+import type { MascotFrame } from './mascotMotion';
 import { unit } from './movePlayback';
 
 const BISCUIT_WIDTH = 226;
@@ -105,11 +107,12 @@ export class ScoreBar {
   private readonly levelLabel = levelCaption();
   private readonly levelCaptionBottom = this.levelLabel.y + this.levelLabel.getLocalBounds().maxY;
   private readonly level = cookieText('', 53, '700');
+  private readonly mascot: MascotPuppet;
   private scoreScale = 1;
   private impact: { started: number; reduced: boolean } | null = null;
   private gleam: { started: number; reduced: boolean } | null = null;
 
-  constructor(companion: Texture, biscuit = Texture.EMPTY, jamCookie = Texture.EMPTY) {
+  constructor(wavingMascot: Texture, biscuit = Texture.EMPTY, jamCookie = Texture.EMPTY, gloves?: readonly [Texture, Texture]) {
     this.root.scale.set(0.76);
     this.level.position.set(LEVEL_X, LEVEL_Y);
     this.level.style.dropShadow = { color: '#4f0919', alpha: 0.78, blur: 1, angle: Math.PI / 2, distance: 1.5 };
@@ -117,10 +120,19 @@ export class ScoreBar {
       .roundRect(TRACK_LEFT, TRACK_Y + 1, TRACK_WIDTH, TRACK_HEIGHT, 3).fill(0xfffae9)
       .roundRect(TRACK_LEFT, TRACK_Y, TRACK_WIDTH, TRACK_HEIGHT, 3).fill(0xdca775)
       .roundRect(TRACK_LEFT + 1, TRACK_Y + 1, TRACK_WIDTH - 2, 2, 1).fill({ color: 0x995b30, alpha: 0.25 });
+    this.mascot = new MascotPuppet(wavingMascot, gloves);
     this.root.addChild(art(biscuit, 0, 7, BISCUIT_WIDTH, 83), art(jamCookie, LEVEL_X - 46, 1, 92, 95),
-      art(companion, -50, 16, 47, 64), track, this.progress, this.goalGleam, this.marker, this.glow,
+      this.mascot.root, track, this.progress, this.goalGleam, this.marker, this.glow,
       this.score, this.levelLabel, this.level);
     this.resetEffects();
+  }
+
+  setMascot(texture: Texture, frame: MascotFrame): void {
+    this.mascot.show(texture, frame);
+  }
+
+  settleMascot(): void {
+    this.mascot.settle();
   }
 
   get creditTarget(): Point {

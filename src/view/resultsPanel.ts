@@ -1,8 +1,9 @@
-import { Container, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
+import { Container, Graphics, GraphicsContext, Text, type Texture } from 'pixi.js';
 import type { GameState } from '../game';
 import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point, ResultsAction } from './gestures';
 import { contains, type Rect, VIEW_WIDTH } from './layout';
+import { mascotSprite } from './mascot';
 import type { ResultsView, ScoreSubmission } from './resultsSession';
 import type { SceneTextResolution } from './textResolution';
 
@@ -80,7 +81,7 @@ export class ResultsPanel {
   private scrollLimit = 0;
   private thumbTravel = 0;
 
-  constructor(private readonly companionTexture: Texture, private readonly textResolution?: SceneTextResolution) {
+  constructor(private readonly mascotTexture: Texture, private readonly textResolution?: SceneTextResolution) {
     this.root.once('destroyed', () => {
       this.hidden.destroy({ children: true });
       for (const context of this.backgrounds.values()) context.destroy();
@@ -204,9 +205,7 @@ export class ResultsPanel {
 
   private buildShell() {
     const backing = this.root.addChild(new Graphics());
-    const companion = new Sprite({ texture: this.companionTexture, x: 290, y: 150, anchor: { x: 0.5, y: 1 } });
-    companion.scale.set(Math.min(78 / companion.texture.width, 98 / companion.texture.height));
-    this.root.addChild(companion);
+    this.root.addChild(mascotSprite(this.mascotTexture, 'results-mascot', 290, 106, 68));
     const heading = this.label(this.root, 'Game Over', 29, 41, 29, { maxWidth: 218 });
     heading.label = 'result-heading';
     this.label(this.root, 'Final score', 30, 73, 17, { fill: SOFT_INK });

@@ -36,8 +36,8 @@ interface Press {
 }
 
 const DESTINATION_TAP_GRACE = 6;
-const TOUCH_DROP_SLOP = 24;
-const POINTER_DROP_SLOP = 12;
+const TOUCH_DROP_SLOP = 30;
+const POINTER_DROP_SLOP = 16;
 
 export class StackGestures {
   private press: Press | null = null;
