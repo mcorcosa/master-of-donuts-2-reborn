@@ -24,7 +24,7 @@ describe('free booster celebration', () => {
     const { root } = celebration;
     const coin = root.getChildByLabel('awarded medallion') as Sprite;
     const banner = root.getChildByLabel('free booster banner')!;
-    expect((banner.getChildByLabel('free booster combo') as Text).text).toBe('5× Combo');
+    expect((banner.getChildByLabel('free booster combo') as Text).text).toBe('5× COMBO');
     expect((banner.getChildByLabel('free booster title') as Text).text).toBe(title);
     expect(coin.texture).toBe(target.texture);
 

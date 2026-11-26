@@ -37,6 +37,10 @@ const scene = vi.hoisted(() => ({
   showScoreEffects: vi.fn(), cancelScoreEffects: vi.fn(),
   resize: vi.fn(), startMatch: vi.fn(), showMatch: vi.fn(), showMatchTail: vi.fn(), cancelMatch: vi.fn(),
   startMove: vi.fn(), showMove: vi.fn(), finishMove: vi.fn(), moveAnimating: false,
+  startMoveCost: vi.fn<(to: number, started: number, reduced: boolean, remaining: number) => void>(),
+  startMoveRecovery: vi.fn(),
+  showMoveCosts: vi.fn(), clearMoveCosts: vi.fn(), moveCostAnimating: false, moveCostDeadline: 0,
+  showIcingVial: vi.fn(), icingVialAnimating: false, icingVialDeadline: 0,
   startStackUnlock: vi.fn<(state: GameState, inserts: readonly DoughInsert[], now: number, reduced: boolean) => void>(),
   finishStackUnlock: vi.fn(), stackUnlockAnimating: false,
   selectionAnimating: false, effectsAnimating: false,
@@ -56,7 +60,6 @@ const scene = vi.hoisted(() => ({
 }));
 
 vi.mock('./scene', () => ({ GameScene: class { constructor() { return scene; } }, loadArt: async () => new Map() }));
-vi.mock('./matchEffect', () => ({ preloadScoreFont: async () => {} }));
 vi.mock('../game', async importOriginal => {
   const game = await importOriginal<typeof import('../game')>();
   return { ...game, createGame: vi.fn(), move: vi.fn(game.move), findSetupHint: vi.fn(game.findSetupHint) };
@@ -138,6 +141,8 @@ async function setup(
   let refillEnds = 0;
   let unlockEnds = 0;
   scene.moveAnimating = false;
+  scene.moveCostAnimating = false;
+  scene.moveCostDeadline = 0;
   scene.stackUnlockAnimating = false;
   scene.selectionAnimating = false;
   scene.effectsAnimating = false;
@@ -197,8 +202,10 @@ async function setup(
   let requestId = 0;
   let timerId = 0;
   let pause = () => {};
+  let safeAreaBottom = 0;
   const window = Object.assign(new EventTarget(), {
     matchMedia: (query: string) => query.includes('prefers-reduced-motion') ? motion : new EventTarget(),
+    getComputedStyle: () => ({ getPropertyValue: () => `${safeAreaBottom}px` }),
     innerWidth: 400, innerHeight: 700, devicePixelRatio, location: { search }, localStorage, sessionStorage,
     requestAnimationFrame(callback: FrameRequestCallback) {
       callbacks.set(++requestId, callback);
@@ -293,7 +300,8 @@ async function setup(
     callbacks.clear();
     for (const frame of current) frame(now);
   };
-  const resizeViewport = (width: number, height: number) => {
+  const resizeViewport = (width: number, height: number, inset = 0) => {
+    safeAreaBottom = inset;
     Object.assign(window, { innerWidth: width, innerHeight: height });
     window.dispatchEvent(new Event('resize'));
     tick(now);
@@ -354,6 +362,65 @@ describe('board diagnostics', () => {
     expect(read()).toEqual({ current: { ...opening.current, runId: 2 }, lastGameOver: captured.lastGameOver });
     destroy();
     expect(window).not.toHaveProperty('rebornBoardSnapshot');
+  });
+});
+
+describe('committed move cost feedback', () => {
+  it.each([
+    { meter: undefined, movesLeft: 5, reduced: false, touch: false },
+    { meter: 3, movesLeft: 1, reduced: false, touch: true },
+    { meter: 27, movesLeft: 1, reduced: true, touch: false },
+  ])('emits exactly once for meter $meter, pressure $movesLeft and reduced motion $reduced', async ({ meter, movesLeft, reduced, touch }) => {
+    vi.mocked(createGame).mockReturnValueOnce({ ...initial, movesLeft, doughMeter: meter });
+    const { pointer, tap, suspendFromHost } = await setup(reduced);
+    const clearCount = scene.clearMoveCosts.mock.calls.length;
+    if (touch) {
+      pointer('pointerdown', 250, 4, 'touch', 1);
+      pointer('pointermove', 50, 4, 'touch', 1);
+      pointer('pointerup', 50, 4, 'touch');
+    } else {
+      tap(250);
+      tap(50);
+    }
+    const after = scene.draw.mock.lastCall![0];
+    expect(after).toMatchObject({ doughMeter: (meter ?? 0) + 1, gameOver: meter === 27 });
+    if (movesLeft === 1 && meter !== 27) expect(after.movesLeft).toBeGreaterThanOrEqual(6);
+    suspendFromHost();
+    expect(scene.startMoveCost).toHaveBeenCalledExactlyOnceWith(0, 0, reduced, 27 - (meter ?? 0));
+    expect(scene.clearMoveCosts.mock.calls.length).toBeGreaterThan(clearCount);
+  });
+
+  it('skips a scoring match and a blocked transfer', async () => {
+    const full = ['blue', 'green', 'blue', 'green', 'blue', 'green'];
+    vi.mocked(createGame).mockReturnValueOnce({ ...initial, stacks: [...initial.stacks.slice(0, 2), full] });
+    const { tap, tick } = await setup(true);
+    tap(50);
+    tap(250);
+    expect(scene.startMoveCost).not.toHaveBeenCalled();
+    tap(150);
+    tick(1000);
+    expect(scene.startMatch).toHaveBeenCalledOnce();
+    expect(scene.startMoveCost).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { spent: 0, levelGain: 0, comboGain: 0 },
+    { spent: 3, levelGain: 3, comboGain: 0 },
+    { spent: 7, levelGain: 7, comboGain: 0 },
+    { spent: 9, levelGain: 7, comboGain: 1 },
+  ])('shows actual level recovery $levelGain and combo recovery $comboGain at $spent spent', async ({ spent, levelGain, comboGain }) => {
+    vi.mocked(createGame).mockReturnValueOnce({ ...initial, combo: 4, doughMeter: spent });
+    const { match, tick } = await setup(true);
+    match();
+    const levelRemaining = 28 - spent + levelGain;
+    expect(scene.startMoveRecovery.mock.calls).toEqual([
+      ...(levelGain ? [[{ source: 'level', restored: levelGain, remaining: levelRemaining }, 230, true]] : []),
+      ...(comboGain ? [[{ source: 'combo', restored: comboGain, remaining: levelRemaining + comboGain }, 230, true]] : []),
+    ]);
+    expect(scene.startMoveCost).not.toHaveBeenCalled();
+    tick(230);
+    tick(385);
+    expect(scene.startLevelCelebration).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ movesRestored: levelGain }), 385, true);
   });
 });
 
@@ -610,6 +677,7 @@ describe('game view monetization', () => {
     game.window.dispatchEvent(new Event('focus'));
     const revived = scene.draw.mock.lastCall?.[0];
     expect(revived).toMatchObject({ ...full, gameOver: false, doughMeter: 21, stacks: expect.any(Array) });
+    expect(scene.startMoveRecovery).toHaveBeenLastCalledWith({ source: 'extra', restored: 7, remaining: 7 }, expect.any(Number), true);
     expect(revived?.stacks).not.toEqual(full.stacks);
     expect(read()).toMatchObject({ current: { runId: terminalSnapshot.current.runId, gameOver: false,
       lastAction: { kind: 'extra-chance', refillInsertions: [] } }, lastGameOver: terminalSnapshot.lastGameOver });
@@ -1344,6 +1412,16 @@ describe('game view match playback', () => {
     expect(vi.mocked(move).mock.lastCall?.slice(1, 3)).toEqual([0, 2]);
   });
 
+  it('refreshes layout when only the safe area changes', async () => {
+    const { resizeViewport } = await setup();
+    expect(scene.resize).toHaveBeenLastCalledWith(400, 700, 0);
+    resizeViewport(400, 700, 34);
+    expect(scene.resize).toHaveBeenLastCalledWith(400, 700, 34);
+    resizeViewport(400, 700);
+    expect(scene.resize).toHaveBeenCalledTimes(3);
+    expect(scene.resize).toHaveBeenLastCalledWith(400, 700, 0);
+  });
+
   it.each(['active touch', 'width change', 'large height change'])('cancels input on resize with %s', async scenario => {
     const { pointer, resizeViewport } = await setup();
     const touch = (type: string, x: number) => pointer(type, x, 1, 'touch');
@@ -1651,6 +1729,7 @@ describe('game view match playback', () => {
     ]);
     expect(vi.mocked(move).mock.calls.slice(1).map(([state]) => state.stacks[2].length)).toEqual([6, 5, 6]);
     expect(scene.draw.mock.lastCall?.[0].stacks[2]).toEqual(fullStack.slice(0, -1));
+    expect(scene.startMoveCost.mock.calls.map(([to]) => to)).toEqual([0, 2, 0]);
   });
 
   it('keeps touch destination grace when the source tap is still queued', async () => {
@@ -1766,7 +1845,7 @@ describe('game view match playback', () => {
       score: 1555, level: 3, rank: 'Fryer Fighter', nextLevelScore: 2600, levelStartScore: 1500,
     });
     expect(scene.startLevelCelebration).toHaveBeenCalledExactlyOnceWith({
-      level: 3, rank: 'Fryer Fighter', upgrade: { kind: 'stack', firstNewStack: 3, stackCount: 4 },
+      level: 3, rank: 'Fryer Fighter', movesRestored: 0, upgrade: { kind: 'stack', firstNewStack: 3, stackCount: 4 },
     }, revealAt, false);
     game.tap(50);
     game.tap(350);
@@ -1828,7 +1907,7 @@ describe('game view match playback', () => {
     tick(230);
     tick(385);
     expect(scene.startLevelCelebration).toHaveBeenCalledExactlyOnceWith({
-      level: 2, rank: 'Pastry Pupil', upgrade: { kind: 'slots', previousCapacity: 5, capacity: 6 },
+      level: 2, rank: 'Pastry Pupil', movesRestored: 0, upgrade: { kind: 'slots', previousCapacity: 5, capacity: 6 },
     }, 385, true);
   });
 
@@ -2109,6 +2188,8 @@ describe('game view match playback', () => {
     }
     expect(scene.draw.mock.lastCall?.[0]).toMatchObject({ score: 210, level: 1, combo: 0, endReason: 'dough-meter' });
     expect(scene.showResults).not.toHaveBeenCalled();
+    expect(scene.startMoveCost).toHaveBeenCalledTimes(3);
+    scene.moveCostAnimating = true;
     tick(5000);
     await settleResults();
     finishGameOverReveal(tick, 5000);

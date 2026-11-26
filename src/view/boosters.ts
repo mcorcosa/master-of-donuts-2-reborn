@@ -1,5 +1,6 @@
 import { Container, Graphics, Sprite, Text, type Texture } from 'pixi.js';
 import { createBoosterMedallion, MEDALLION_ART_SIZE } from './boosterMedallion';
+import { GAME_FONT_FAMILY } from './gameFont';
 import type { BoosterDropLanding, BoosterDropTarget } from './freeBoosterCelebration';
 import type { BoosterButton, Point } from './gestures';
 import { contains, footerCenterY } from './layout';
@@ -9,13 +10,13 @@ const BUTTONS = [
   { kind: 'joker', x: 156.25 },
   { kind: 'sweep', x: 233.75 },
 ] as const;
-const MEDALLION_DIAMETER = 57.5;
+const MEDALLION_DIAMETER = 70;
 // The gold bezel spans 32.4 units inside the 40-unit texture.
 const MEDALLION_SCALE = MEDALLION_DIAMETER / 32.4;
 const MEDALLION_SIZE = MEDALLION_ART_SIZE * MEDALLION_SCALE;
 const MEDALLION_RADIUS = MEDALLION_DIAMETER / 2;
 const RING_RADIUS = MEDALLION_RADIUS + 0.9;
-const HIT_RADIUS = MEDALLION_RADIUS + 4.5;
+const HIT_RADIUS = MEDALLION_RADIUS + 2.5;
 const ARMED_RADIUS = MEDALLION_RADIUS + 2.6;
 const LANDING_RADIUS = MEDALLION_RADIUS + 1.55;
 const BADGE_INK = 0x572947;
@@ -61,7 +62,7 @@ function medallionButton(parent: Container, kind: BoosterButton, x: number, joke
   tag.addChild(new Graphics().roundRect(tagX, tagY, width, height, 4.1).fill(0xfff6dd)
     .stroke({ color: 0x70452d, width: 0.85 }));
   const badgeText = tag.addChild(new Text({ text: '', anchor: 0.5, style: {
-    fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize: 8, fontWeight: '700', fill: BADGE_INK,
+    fontFamily: GAME_FONT_FAMILY, fontSize: 8, fontWeight: '700', fill: BADGE_INK,
   } }));
   return { kind, root, texture, face, glow, armed, meter, progress, badge, play, tag, badgeText, fill: 0 };
 }
@@ -103,7 +104,7 @@ export class BoosterControls {
     this.root.visible = view.visible;
     for (const button of this.buttons) {
       const { mode, usable } = view[button.kind];
-      button.face.alpha = usable ? 1 : 0.46;
+      button.face.alpha = usable ? 1 : 0.75;
       if (button.armed) button.armed.visible = view.armed;
       button.meter.visible = mode === 'charging' || mode === 'ad' || mode === 'loading';
       if (button.meter.visible && button.fill !== view.progress) {

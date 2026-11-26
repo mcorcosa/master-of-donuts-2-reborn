@@ -6,7 +6,8 @@
   border-radius: 14px;
   background: #fff2dc;
   color: #672e20;
-  font: 700 13px/1.15 system-ui, sans-serif;
+  font: 700 13px/1.15 var(--game-font);
+  text-transform: uppercase;
   cursor: pointer;
 }
 
@@ -16,6 +17,9 @@
   right: max(8px, env(safe-area-inset-right), calc(50% - 312px));
   z-index: 1;
   max-width: 28vw;
+  padding-inline: 5px;
+  font-size: min(12px, 3.15vw);
+  overflow-wrap: anywhere;
   box-shadow: 0 2px #843d29;
 }
 
@@ -28,7 +32,8 @@
   background: #fff2dc;
   color: #672e20;
   box-shadow: 0 6px 28px #30130f60;
-  font: 500 16px/1.45 system-ui, sans-serif;
+  font: 500 16px/1.45 var(--game-font);
+  text-transform: uppercase;
 }
 
 .remove-ads-dialog::backdrop { background: #30130f9e; }

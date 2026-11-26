@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { StackGestures, type Target } from './gestures';
-import { contains, layoutStacks, stackHit, STACK_LIFT, viewport } from './layout';
+import { BOARD_CENTER, contains, layoutStacks, stackHit, STACK_LIFT, viewport } from './layout';
 import { STACK_UNLOCK_MS, stackUnlockFrame } from './stackUnlock';
 
 const left = { x: 48, y: 100 };
@@ -312,7 +312,7 @@ describe('stack gestures', () => {
     const upperRow = slots.filter(slot => slot.base < lowerBase);
     expect(lowerRow).toHaveLength(lower);
     for (const row of [lowerRow, upperRow].filter(row => row.length > 0)) {
-      expect((row[0].x + row.at(-1)!.x) / 2).toBeCloseTo(200);
+      expect((row[0].x + row.at(-1)!.x) / 2).toBeCloseTo(BOARD_CENTER);
       expect(new Set(row.map(slot => slot.base)).size).toBe(1);
       expect(row.map(slot => slot.x)).toEqual(row.map(slot => slot.x).sort((a, b) => a - b));
     }

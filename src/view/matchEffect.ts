@@ -1,4 +1,5 @@
-import { Container, DOMAdapter, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
+import { Container, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
+import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
 import type { JokerArt } from './jokerArt';
 import { BOARD_FOOTER_SPACE, BOARD_TOP, VIEW_WIDTH } from './layout';
@@ -8,7 +9,6 @@ import {
 } from './matchPlayback';
 import { flightPosition, unit } from './movePlayback';
 
-const FONT = 'Reborn Fredoka';
 const CREAM = 0xfff3d1;
 const COMBO_GAP = 5;
 const SPRINKLES = 6;
@@ -19,15 +19,6 @@ const DONUT_FILLS: Record<string, number> = {
   gray: 0x84929d, purple: 0x9c50ec, blue: 0x3049c8, green: 0x32c96a,
 };
 const number = new Intl.NumberFormat();
-let fontReady: Promise<void> | undefined;
-
-export function preloadScoreFont(): Promise<void> {
-  if (typeof FontFace === 'undefined') return Promise.resolve();
-  fontReady ??= new FontFace(FONT, `url("${import.meta.env.BASE_URL}fonts/Fredoka.ttf")`, { weight: '300 700' })
-    .load().then(font => { DOMAdapter.get().getFontFaceSet()?.add(font); })
-    .catch(error => { fontReady = undefined; throw error; });
-  return fontReady;
-}
 
 function deepHue(color: number): number {
   const red = Math.round((color >> 16 & 255) * 0.48);
@@ -78,13 +69,13 @@ export class MatchEffect {
 
   constructor() {
     const style = {
-      fontFamily: [FONT, 'Comic Sans MS', 'cursive'],
+      fontFamily: GAME_FONT_FAMILY,
       fontSize: scoreSize(0), fontWeight: '700' as const,
     };
-    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 6, join: 'round' } } });
-    this.face = new Text({ text: '', style: { ...style, stroke: { color: CREAM, width: 2, join: 'round' } } });
+    this.outline = new Text({ text: '', style: { ...style, stroke: { color: 0x734d13, width: 9, join: 'round' } } });
+    this.face = new Text({ text: '', style: { ...style, stroke: { color: CREAM, width: 4, join: 'round' } } });
     this.combo = new Text({ text: '', style: {
-      ...style, fontSize: 24, fill: CREAM,
+      ...style, fontSize: 26, fill: CREAM,
     } });
     this.outline.anchor.set(0.5);
     this.face.anchor.set(0.5);
@@ -158,7 +149,7 @@ export class MatchEffect {
       layer.style.fill = fill;
       layer.style.fontSize = size;
     }
-    this.outline.style.stroke = { color: deepHue(fill), width: 6, join: 'round' };
+    this.outline.style.stroke = { color: deepHue(fill), width: 9, join: 'round' };
     const bounds = this.outline.getLocalBounds();
     const x = -(bounds.minX + bounds.maxX) / 2;
     const y = -(bounds.minY + bounds.maxY) / 2;
@@ -172,7 +163,7 @@ export class MatchEffect {
     this.scoreY = 0;
     let extraHeight = 0;
     if (playback.combo >= 2) {
-      this.combo.text = `${number.format(playback.combo)}× Combo`;
+      this.combo.text = gameText(`${number.format(playback.combo)}× Combo`);
       const bounds = this.combo.getLocalBounds();
       this.combo.position.set(-(bounds.minX + bounds.maxX) / 2, -(bounds.minY + bounds.maxY) / 2);
       const width = bounds.width + 26;

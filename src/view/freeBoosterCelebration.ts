@@ -1,5 +1,6 @@
 import { Container, Graphics, Sprite, Text, Texture } from 'pixi.js';
 import type { BoosterKind } from '../game/boosters';
+import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
 import { BOARD_TOP, VIEW_WIDTH } from './layout';
 import { unit } from './movePlayback';
@@ -28,8 +29,8 @@ export interface BoosterDropLanding {
 }
 
 function caption(text: string, y: number, fontSize: number, fill: number, label: string): Text {
-  return new Text({ text, y, anchor: 0.5, label, style: {
-    fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize, fontWeight: '700', fill,
+  return new Text({ text: gameText(text), y, anchor: 0.5, label, style: {
+    fontFamily: GAME_FONT_FAMILY, fontSize, fontWeight: '700', fill,
     stroke: { color: INK, width: 2.5, join: 'round' },
   } });
 }

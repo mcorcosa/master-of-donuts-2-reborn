@@ -1,29 +1,34 @@
-import { Container, Graphics, Sprite, Text, type TextStyleOptions, type Texture } from 'pixi.js';
+import { Container, Graphics, Sprite, Text, type TextStyleOptions, Texture } from 'pixi.js';
 import type { GameState } from '../game';
+import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point } from './gestures';
-import { VIEW_WIDTH } from './layout';
 import { unit } from './movePlayback';
 
-const COMPANION_WIDTH = 68;
-const COMPANION_HEIGHT = 64;
-const COMPANION_GAP = 8;
-const WIDTH = 252;
-const HEIGHT = 54;
-const RADIUS = 14;
-const PANEL_X = (VIEW_WIDTH - WIDTH + COMPANION_WIDTH + COMPANION_GAP) / 2 - 5;
-const INSET = 12;
-const CREAM_RIGHT = 150;
-const SCORE_Y = 23;
-const LEVEL_X = 211;
-const LEVEL_WIDTH = 64;
-const SCORE_WIDTH = CREAM_RIGHT - INSET;
-const SCORE_PUNCH = 1.27;
+const BISCUIT_WIDTH = 226;
+const SCORE_CENTER = BISCUIT_WIDTH / 2;
+const SCORE_Y = 34;
+const LEVEL_X = 268;
+const LEVEL_Y = 56.5;
+// Inside the jam highlights of the 92 × 95 cookie.
+const JAM_CENTER_Y = 47;
+const JAM_RADIUS_X = 35;
+const JAM_RADIUS_Y = 33.5;
+const LEVEL_ARC_RADIUS = 62;
+const LEVEL_ARC_Y = 25;
+const LEVEL_LETTER_GAP = 1;
+const LEVEL_LINE_GAP = 4;
+const SCORE_WIDTH = 172;
+const SCORE_LEFT = SCORE_CENTER - SCORE_WIDTH / 2;
+const SCORE_PUNCH = 1.38;
 const SCORE_PUNCH_MS = 235;
 const REDUCED_GLOW_MS = 155;
-const TRACK_WIDTH = SCORE_WIDTH;
-const TRACK_Y = 45;
-const SCORE_INK = '#a63850';
-const LEVEL_INK = '#fff4d6';
+// Leave room for the marker and its shadow at both rounded ends of the icing.
+const TRACK_WIDTH = 150;
+const TRACK_LEFT = SCORE_CENTER - TRACK_WIDTH / 2;
+const TRACK_Y = 54;
+const TRACK_HEIGHT = 6;
+const SCORE_INK = '#731328';
+const LEVEL_INK = '#fff3d7';
 const number = new Intl.NumberFormat();
 
 export const GOAL_GLEAM_MS = 155;
@@ -31,8 +36,8 @@ export type ScoreDisplay = Pick<GameState, 'score' | 'level' | 'rank' | 'nextLev
 
 function label(text: string, x: number, y: number, fontSize: number,
   fontWeight: TextStyleOptions['fontWeight'], fill: string, anchorX = 0): Text {
-  return new Text({ text, x, y, anchor: { x: anchorX, y: 0.5 }, style: {
-    fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize, fontWeight, fill,
+  return new Text({ text: gameText(text), x, y, anchor: { x: anchorX, y: 0.5 }, style: {
+    fontFamily: GAME_FONT_FAMILY, fontSize, fontWeight, fill,
   } });
 }
 
@@ -41,52 +46,84 @@ function fitText(label: Text, maxWidth: number): void {
   label.scale.set(width > maxWidth ? maxWidth / width : 1);
 }
 
-function glazeFace(): Graphics {
-  return new Graphics()
-    .roundRect(0, 2, WIDTH, HEIGHT, RADIUS).fill({ color: 0x9a4b42, alpha: 0.27 })
-    .roundRect(0, 0, WIDTH, HEIGHT, RADIUS).fill(0xffebcf)
-    .roundRect(2, 2, WIDTH - 4, 28, 12).fill({ color: 0xfffbe7, alpha: 0.68 })
-    .moveTo(178, 0).lineTo(WIDTH - RADIUS, 0)
-    .quadraticCurveTo(WIDTH, 0, WIDTH, RADIUS).lineTo(WIDTH, HEIGHT - RADIUS)
-    .quadraticCurveTo(WIDTH, HEIGHT, WIDTH - RADIUS, HEIGHT).lineTo(184, HEIGHT)
-    .bezierCurveTo(157, HEIGHT, 152, 19, 178, 0).closePath().fill(0xb34861)
-    .moveTo(178, 1).lineTo(WIDTH - RADIUS, 1)
-    .quadraticCurveTo(WIDTH - 1, 1, WIDTH - 1, RADIUS).lineTo(WIDTH - 1, 34)
-    .bezierCurveTo(242, 24, 188, 12, 163, 30)
-    .bezierCurveTo(163, 16, 171, 7, 178, 1).closePath().fill(0xc45a70)
-    .moveTo(170, 17).bezierCurveTo(178, 5, 193, 4, 207, 5)
-    .bezierCurveTo(189, 7, 181, 11, 170, 17).closePath()
-    .fill({ color: 0xffc6bc, alpha: 0.72 })
-    .roundRect(0, 0, WIDTH, HEIGHT, RADIUS).stroke({ color: 0xfff4d7, width: 1 });
+function cookieText(text: string, fontSize: number, fontWeight: '600' | '700'): Text {
+  return new Text({ text, anchor: 0.5, style: {
+    fontFamily: GAME_FONT_FAMILY, fontSize, fontWeight, fill: LEVEL_INK, trim: true, padding: 3,
+  } });
+}
+
+function levelCaption(): Container {
+  const caption = new Container({ x: LEVEL_X, y: LEVEL_ARC_Y, label: 'level-caption' });
+  const letters = Array.from(gameText('Level'), letter => {
+    const glyph = caption.addChild(cookieText(letter, 15, '600'));
+    return { glyph, width: glyph.getLocalBounds().width };
+  });
+  const width = letters.reduce((sum, letter) => sum + letter.width, (letters.length - 1) * LEVEL_LETTER_GAP);
+  let left = -width / 2;
+  for (const { glyph, width } of letters) {
+    const angle = (left + width / 2) / LEVEL_ARC_RADIUS;
+    glyph.position.set(LEVEL_ARC_RADIUS * Math.sin(angle), LEVEL_ARC_RADIUS * (1 - Math.cos(angle)));
+    glyph.rotation = angle;
+    left += width + LEVEL_LETTER_GAP;
+  }
+  const { minX, maxX } = caption.getLocalBounds();
+  caption.pivot.x = (minX + maxX) / 2;
+  return caption;
+}
+
+function fitLevel(level: Text, captionBottom: number): void {
+  const { width, height } = level.getLocalBounds();
+  const halfWidth = width / (2 * JAM_RADIUS_X);
+  const halfHeight = height / (2 * JAM_RADIUS_Y);
+  // Wide values can sit nearer the widest part of the jam.
+  const top = captionBottom + LEVEL_LINE_GAP;
+  const heightAtFullWidth = height * Math.min(1, 1 / halfWidth);
+  level.y = Math.min(LEVEL_Y, Math.max(JAM_CENTER_Y + 3, top + heightAtFullWidth / 2));
+  const centerOffset = (level.y - JAM_CENTER_Y) / JAM_RADIUS_Y;
+  // Find the scale where the numeral's outer corners reach the safe jam ellipse.
+  const a = halfWidth ** 2 + halfHeight ** 2;
+  const b = centerOffset * halfHeight;
+  const room = 1 - centerOffset ** 2;
+  const jamScale = room / (Math.sqrt(b ** 2 + a * room) + b);
+  const lineScale = (level.y - top) / (height / 2);
+  level.scale.set(Math.max(0, Math.min(1, jamScale, lineScale)));
+}
+
+function art(texture: Texture, x: number, y: number, width: number, height: number): Sprite {
+  return new Sprite({ texture, x, y, width, height });
 }
 
 export class ScoreBar {
-  readonly root = new Container({ x: PANEL_X, y: 68 });
+  readonly root = new Container({ x: 64, y: 88, label: 'score-and-level' });
   private readonly progress = new Graphics();
-  private readonly goalGleam = new Graphics().roundRect(INSET, TRACK_Y - 1, TRACK_WIDTH, 5, 2.5).fill(0xffc347)
-    .roundRect(INSET + 1, TRACK_Y, TRACK_WIDTH - 2, 1.5, 0.75).fill(0xfff3b3);
-  private readonly glow = new Graphics().roundRect(INSET - 4, SCORE_Y - 14, SCORE_WIDTH + 8, 28, 11).fill(0xffe194);
-  private readonly score = label('', INSET, SCORE_Y, 24, '700', SCORE_INK);
-  private readonly levelLabel = label('Level', LEVEL_X, 10, 11, '600', LEVEL_INK, 0.5);
-  private readonly level = label('', LEVEL_X, 32, 32, '700', LEVEL_INK, 0.5);
+  private readonly marker = new Graphics().circle(0, 0.7, 5.4).fill({ color: 0x995617, alpha: 0.4 })
+    .circle(0, 0, 5.1).fill(0xfec40b).circle(-1.3, -1.6, 1.65).fill({ color: 0xffed93, alpha: 0.65 });
+  private readonly goalGleam = new Graphics().roundRect(TRACK_LEFT, TRACK_Y - 1, TRACK_WIDTH, 8, 4).fill(0xffc347)
+    .roundRect(TRACK_LEFT + 1, TRACK_Y, TRACK_WIDTH - 2, 2, 1).fill(0xfff3b3);
+  private readonly glow = new Graphics().roundRect(SCORE_LEFT - 4, SCORE_Y - 17, SCORE_WIDTH + 8, 34, 12).fill(0xffcc75);
+  private readonly score = label('', SCORE_CENTER, SCORE_Y, 34, '700', SCORE_INK, 0.5);
+  private readonly levelLabel = levelCaption();
+  private readonly levelCaptionBottom = this.levelLabel.y + this.levelLabel.getLocalBounds().maxY;
+  private readonly level = cookieText('', 53, '700');
   private scoreScale = 1;
   private impact: { started: number; reduced: boolean } | null = null;
   private gleam: { started: number; reduced: boolean } | null = null;
 
-  constructor(companionTexture: Texture) {
-    const companion = new Sprite({ texture: companionTexture, anchor: { x: 0.5, y: 1 },
-      x: -COMPANION_GAP - COMPANION_WIDTH / 2, y: 52 });
-    companion.scale.set(Math.min(COMPANION_WIDTH / companionTexture.width, COMPANION_HEIGHT / companionTexture.height));
+  constructor(companion: Texture, biscuit = Texture.EMPTY, jamCookie = Texture.EMPTY) {
+    this.level.position.set(LEVEL_X, LEVEL_Y);
+    this.level.style.dropShadow = { color: '#4f0919', alpha: 0.78, blur: 1, angle: Math.PI / 2, distance: 1.5 };
     const track = new Graphics()
-      .roundRect(INSET, TRACK_Y + 1, TRACK_WIDTH, 4, 2).fill(0xfff6e3)
-      .roundRect(INSET, TRACK_Y, TRACK_WIDTH, 4, 2).fill(0xdeb1a7);
-    this.root.addChild(glazeFace(), track, this.progress, this.goalGleam, this.glow, this.score,
-      this.levelLabel, this.level, companion);
+      .roundRect(TRACK_LEFT, TRACK_Y + 1, TRACK_WIDTH, TRACK_HEIGHT, 3).fill(0xfffae9)
+      .roundRect(TRACK_LEFT, TRACK_Y, TRACK_WIDTH, TRACK_HEIGHT, 3).fill(0xdca775)
+      .roundRect(TRACK_LEFT + 1, TRACK_Y + 1, TRACK_WIDTH - 2, 2, 1).fill({ color: 0x995b30, alpha: 0.25 });
+    this.root.addChild(art(biscuit, 0, 7, BISCUIT_WIDTH, 83), art(jamCookie, LEVEL_X - 46, 1, 92, 95),
+      art(companion, -50, 16, 47, 64), track, this.progress, this.goalGleam, this.marker, this.glow,
+      this.score, this.levelLabel, this.level);
     this.resetEffects();
   }
 
   get creditTarget(): Point {
-    return { x: this.root.x + this.score.x + 7 * this.scoreScale, y: this.root.y + this.score.y };
+    return { x: this.root.x + this.score.x, y: this.root.y + this.score.y };
   }
 
   get animating(): boolean {
@@ -100,16 +137,20 @@ export class ScoreBar {
       fitText(this.score, SCORE_WIDTH / SCORE_PUNCH);
       this.scoreScale = this.score.scale.x;
     }
-    this.level.text = number.format(level);
-    fitText(this.level, LEVEL_WIDTH);
+    const levelNumber = number.format(level);
+    if (levelNumber !== this.level.text) {
+      this.level.text = levelNumber;
+      fitLevel(this.level, this.levelCaptionBottom);
+    }
 
     const levelRange = nextLevelScore - levelStartScore;
     const progress = levelRange > 0 ? (score - levelStartScore) / levelRange : 0;
     const fillWidth = TRACK_WIDTH * Math.max(0, Math.min(progress, 1));
     this.progress.clear();
     if (fillWidth > 0) {
-      this.progress.roundRect(INSET, TRACK_Y, fillWidth, 4, Math.min(2, fillWidth / 2)).fill(0xb64760);
+      this.progress.roundRect(TRACK_LEFT, TRACK_Y, fillWidth, TRACK_HEIGHT, Math.min(3, fillWidth / 2)).fill(SCORE_INK);
     }
+    this.marker.position.set(TRACK_LEFT + fillWidth, TRACK_Y + TRACK_HEIGHT / 2);
   }
 
   credit(now: number, reduced: boolean): void {
@@ -126,7 +167,7 @@ export class ScoreBar {
     const punch = !impact || impact.reduced ? 0 : age < 36 ? 0.55 + 0.45 * unit(age / 36)
       : (1 - unit((age - 36) / (SCORE_PUNCH_MS - 36))) ** 2.4;
     this.score.scale.set(this.scoreScale * (1 + (SCORE_PUNCH - 1) * punch));
-    const glow = impact?.reduced && age < REDUCED_GLOW_MS ? 0.43 : 0.54 * punch;
+    const glow = impact?.reduced && age < REDUCED_GLOW_MS ? 0.56 : 0.72 * punch;
     this.glow.visible = glow > 0;
     this.glow.alpha = glow;
 

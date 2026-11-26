@@ -1,77 +1,65 @@
-import { CanvasSource, DOMAdapter, Texture } from 'pixi.js';
+import { CanvasSource, DOMAdapter, Rectangle, Texture } from 'pixi.js';
 
-const WIDTH = 215;
-const HEIGHT = 160;
-const ART_BODY_ALPHA = 153;
-const BODY_OPACITY = 0.15;
-const RIM_OPACITY = 0.37;
-const RIM_RADIUS = 3;
-
-function stride(fractionOfDonutHeight: number): number {
-  // Equivalent layouts can differ in the last few floating-point bits after a resize.
-  return Math.round(fractionOfDonutHeight * HEIGHT * 1e6) / 1e6;
-}
-
-function vacancyMask(texture: Texture): Uint8ClampedArray {
-  const canvas = DOMAdapter.get().createCanvas(WIDTH, HEIGHT);
-  const context = canvas.getContext('2d')!;
-  context.drawImage(texture.source.resource as CanvasImageSource, 0, 0, WIDTH, HEIGHT);
-  const { data } = context.getImageData(0, 0, WIDTH, HEIGHT);
-  const mask = new Uint8ClampedArray(WIDTH * HEIGHT);
-  const alphaAt = (x: number, y: number) => x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT
-    ? 0 : data[(y * WIDTH + x) * 4 + 3];
-
-  for (let y = 0; y < HEIGHT; y++) {
-    for (let x = 0; x < WIDTH; x++) {
-      const pixel = y * WIDTH + x;
-      const offset = pixel * 4;
-      const alpha = data[offset + 3];
-      if (!alpha) continue;
-      const interior = Math.min(alpha, alphaAt(x - RIM_RADIUS, y), alphaAt(x + RIM_RADIUS, y),
-        alphaAt(x, y - RIM_RADIUS), alphaAt(x, y + RIM_RADIUS));
-      const luminance = (data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722) / 255;
-      // Keep the ice's highlights and cavities in the white mask.
-      const relief = Math.max(0, Math.min(1, (luminance - 0.68) / 0.27));
-      const coverage = Math.min(1, alpha / ART_BODY_ALPHA);
-      const body = 255 * BODY_OPACITY * coverage * relief * relief * (3 - 2 * relief);
-      mask[pixel] = Math.max(body, RIM_OPACITY * (alpha - interior));
-    }
-  }
-  return mask;
-}
-
-export function stackVacancyMask(
-  mask: Uint8ClampedArray, width: number, height: number, step: number, count: number,
-): Uint8ClampedArray {
-  const extra = Math.ceil((count - 1) * step);
-  const stack = new Uint8ClampedArray(width * (height + extra));
+export function stackVacancyPixels(
+  pixels: Uint8ClampedArray, width: number, height: number, step: number, count: number,
+) {
+  const span = (count - 1) * step;
+  const extra = Math.ceil(span);
+  const rowBytes = width * 4;
+  const stack = new Uint8ClampedArray(rowBytes * (height + extra));
+  // Transparent rows on either side make fractional seat sampling safe at the edges.
+  const padded = new Uint8ClampedArray(rowBytes * (height + 2));
+  padded.set(pixels, rowBytes);
   for (let slot = 0; slot < count; slot++) {
     const offset = extra - slot * step;
     const top = Math.floor(offset);
     const fraction = offset - top;
     for (let y = 0; y <= height && top + y < height + extra; y++) {
-      const target = (top + y) * width;
-      for (let x = 0; x < width; x++) {
-        const current = y < height ? mask[y * width + x] : 0;
-        const previous = y > 0 ? mask[(y - 1) * width + x] : 0;
-        const alpha = current * (1 - fraction) + previous * fraction;
-        stack[target + x] = Math.max(stack[target + x], alpha);
+      const prevRow = y * rowBytes;
+      const nextRow = prevRow + rowBytes;
+      const stackRow = (top + y) * rowBytes;
+      for (let x = 0; x < rowBytes; x += 4) {
+        const previous = prevRow + x;
+        const next = nextRow + x;
+        const before = padded[previous + 3] * fraction;
+        const after = padded[next + 3] * (1 - fraction);
+        const alpha = before + after;
+        const target = stackRow + x;
+        // Use a single sample at overlaps. The higher seat wins ties.
+        const coverage = Math.round(alpha);
+        if (!coverage || coverage < stack[target + 3]) continue;
+        for (let channel = 0; channel < 3; channel++) {
+          stack[target + channel] = (padded[previous + channel] * before + padded[next + channel] * after) / alpha;
+        }
+        stack[target + 3] = coverage;
       }
     }
   }
-  return stack;
+  return { pixels: stack, height: height + extra, top: extra - span };
 }
 
 export class VacancyArt {
-  private readonly mask: Uint8ClampedArray;
+  private readonly pixels: Uint8ClampedArray;
+  private readonly width: number;
+  private readonly height: number;
   private readonly textures = new Map<number, Map<number, Texture>>();
 
   constructor(texture: Texture) {
-    this.mask = vacancyMask(texture);
+    this.width = texture.width;
+    this.height = texture.height;
+    const canvas = DOMAdapter.get().createCanvas(this.width, this.height);
+    const context = canvas.getContext('2d')!;
+    context.drawImage(texture.source.resource as CanvasImageSource, 0, 0, this.width, this.height);
+    this.pixels = context.getImageData(0, 0, this.width, this.height).data;
+  }
+
+  private stride(fractionOfDonutHeight: number): number {
+    // Equivalent layouts can differ in the last few floating-point bits after a resize.
+    return Math.round(fractionOfDonutHeight * this.height * 1e6) / 1e6;
   }
 
   keepStrides(...fractionsOfDonutHeight: number[]): void {
-    const steps = fractionsOfDonutHeight.map(stride);
+    const steps = fractionsOfDonutHeight.map(fraction => this.stride(fraction));
     for (const [step, textures] of this.textures) {
       if (steps.includes(step)) continue;
       for (const texture of textures.values()) texture.destroy(true);
@@ -80,7 +68,7 @@ export class VacancyArt {
   }
 
   texture(count: number, fractionOfDonutHeight: number): Texture {
-    const step = stride(fractionOfDonutHeight);
+    const step = this.stride(fractionOfDonutHeight);
     let textures = this.textures.get(step);
     if (!textures) {
       textures = new Map();
@@ -88,14 +76,17 @@ export class VacancyArt {
     }
     const cached = textures.get(count);
     if (cached) return cached;
-    const alpha = stackVacancyMask(this.mask, WIDTH, HEIGHT, step, count);
-    const canvas = DOMAdapter.get().createCanvas(WIDTH, alpha.length / WIDTH);
+    const stack = stackVacancyPixels(this.pixels, this.width, this.height, step, count);
+    const canvas = DOMAdapter.get().createCanvas(this.width, stack.height);
     const context = canvas.getContext('2d')!;
     const image = context.createImageData(canvas.width, canvas.height);
-    image.data.fill(255);
-    for (let i = 0; i < alpha.length; i++) image.data[i * 4 + 3] = alpha[i];
+    image.data.set(stack.pixels);
     context.putImageData(image, 0, 0);
-    const texture = new Texture({ source: new CanvasSource({ resource: canvas, autoGenerateMipmaps: true }) });
+    const texture = new Texture({
+      source: new CanvasSource({ resource: canvas, autoGenerateMipmaps: true }),
+      // Crop the fractional padding so the lowest seat keeps the original art scale.
+      frame: new Rectangle(0, stack.top, this.width, stack.height - stack.top),
+    });
     textures.set(count, texture);
     return texture;
   }

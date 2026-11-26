@@ -1,5 +1,6 @@
 import { Container, Graphics, GraphicsContext, Sprite, Text, type Texture } from 'pixi.js';
 import type { GameState } from '../game';
+import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { Point, ResultsAction } from './gestures';
 import { contains, type Rect, VIEW_WIDTH } from './layout';
 import type { ResultsView, ScoreSubmission } from './resultsSession';
@@ -19,7 +20,7 @@ const ROW_HEIGHT = 24;
 const ROW_PITCH = 27;
 const RESTART_HEIGHT = 46;
 const PERSONAL_FOOTER_SPACE = 10;
-const FRIENDS_FOOTER_SPACE = 68;
+const FRIENDS_FOOTER_SPACE = 72;
 const VIEW_MARGIN = 11;
 const LIST_LEFT = INSET - 1;
 const LIST_WIDTH = INNER_WIDTH + 2;
@@ -28,7 +29,7 @@ const SCROLLBAR_WIDTH = 4;
 const TAB_WIDTH = INNER_WIDTH / 2 - 6;
 const PERSONAL_TAB: Rect = { x: INSET, y: 243, width: TAB_WIDTH, height: 34 };
 const FRIENDS_TAB: Rect = { ...PERSONAL_TAB, x: WIDTH - INSET - TAB_WIDTH };
-const SUBMIT: Rect = { x: INSET, y: 24, width: INNER_WIDTH, height: 34 };
+const SUBMIT: Rect = { x: INSET, y: 28, width: INNER_WIDTH, height: 34 };
 const SUBMISSION_LABELS: Record<ScoreSubmission, string> = {
   idle: 'Submit score', submitting: 'Submitting score…', sent: 'Score submitted', error: 'Couldn’t submit · Retry',
 };
@@ -39,9 +40,10 @@ function rowsHeight(count: number): number {
 }
 
 function fitName(display: Text, name: string, maxWidth: number): void {
-  const characters = Array.from(name);
+  const caption = gameText(name);
+  const characters = Array.from(caption);
   let length = Math.min(characters.length, 18);
-  display.text = characters.length > length ? `${characters.slice(0, length).join('')}…` : name;
+  display.text = characters.length > length ? `${characters.slice(0, length).join('')}…` : caption;
   while (length > 0 && display.getLocalBounds().width > maxWidth) {
     length--;
     display.text = `${characters.slice(0, length).join('')}…`;
@@ -53,8 +55,8 @@ function label(parent: Container, text: string, x: number, y: number, size: numb
   fill?: string;
   maxWidth?: number;
 } = {}): Text {
-  const display = new Text({ text, x, y, anchor: { x: options.align ?? 0, y: 0.5 }, style: {
-    fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize: size, fontWeight: '600',
+  const display = new Text({ text: gameText(text), x, y, anchor: { x: options.align ?? 0, y: 0.5 }, style: {
+    fontFamily: GAME_FONT_FAMILY, fontSize: size, fontWeight: '600',
     fill: options.fill ?? INK,
   } });
   if (options.maxWidth !== undefined) {
@@ -64,8 +66,9 @@ function label(parent: Container, text: string, x: number, y: number, size: numb
 }
 
 function fitText(display: Text, value: string, maxWidth: number): void {
-  if (display.text === value) return;
-  display.text = value;
+  const text = gameText(value);
+  if (display.text === text) return;
+  display.text = text;
   display.scale.set(Math.min(1, maxWidth / Math.max(1, display.getLocalBounds().width)));
 }
 
@@ -138,7 +141,7 @@ export class ResultsPanel {
       this.scroll.friends = 0;
     }
     this.attach(shell.best, isPersonalBest);
-    fitText(shell.heading, reason === 'dough-meter' ? 'Dough meter full' : 'Game Over', 218);
+    fitText(shell.heading, reason === 'dough-meter' ? 'Out of moves' : 'Game Over', 218);
     fitText(shell.score, number.format(run.score), 214);
     fitText(shell.level, number.format(run.level), TAB_WIDTH - 24);
     fitText(shell.combo, `${number.format(run.bestCombo)}×`, TAB_WIDTH - 24);
@@ -178,7 +181,7 @@ export class ResultsPanel {
         this.drawFriends(shell.friendsBody, friends.list);
       }
       if (this.renderedFriends?.submission !== friends.submission) {
-        shell.submit.text.text = SUBMISSION_LABELS[friends.submission];
+        fitText(shell.submit.text, SUBMISSION_LABELS[friends.submission], SUBMIT.width - 24);
         this.drawButton(shell.submit, SUBMIT, friends.submission === 'idle' || friends.submission === 'error');
       }
       this.renderedFriends = friends;
@@ -197,14 +200,14 @@ export class ResultsPanel {
     const companion = new Sprite({ texture: this.companionTexture, x: 290, y: 150, anchor: { x: 0.5, y: 1 } });
     companion.scale.set(Math.min(78 / companion.texture.width, 98 / companion.texture.height));
     this.root.addChild(companion);
-    const heading = label(this.root, 'Game Over', 29, 41, 29);
+    const heading = label(this.root, 'Game Over', 29, 41, 29, { maxWidth: 218 });
     heading.label = 'result-heading';
     label(this.root, 'Final score', 30, 73, 17, { fill: SOFT_INK });
     const score = label(this.root, '', 29, 105, 38);
     score.label = 'result-score-value';
     const best = this.hidden.addChild(new Container());
     best.addChild(new Graphics().roundRect(27, 129, 154, 22, 11).fill(0xffebcb));
-    label(best, 'New personal best!', 104, 140, 15, { align: 0.5 }).label = 'result-personal-best';
+    label(best, 'New personal best!', 104, 140, 15, { align: 0.5, maxWidth: 142 }).label = 'result-personal-best';
 
     const level = this.stat('Level', INSET, 'result-level-value');
     const combo = this.stat('Best combo', FRIENDS_TAB.x, 'result-combo-value');
@@ -220,8 +223,8 @@ export class ResultsPanel {
     const deviceWithTabs = this.hidden.addChild(new Container());
     label(deviceWithTabs, 'On this device', 22, 291, 14, { fill: SOFT_INK });
     const deviceWithoutTabs = this.hidden.addChild(new Container());
-    label(deviceWithoutTabs, 'Personal scores', 22, 255, 21);
-    label(deviceWithoutTabs, 'On this device', WIDTH - 22, 256, 14, { align: 1, fill: SOFT_INK });
+    label(deviceWithoutTabs, 'Personal scores', 22, 255, 21, { maxWidth: 182 });
+    label(deviceWithoutTabs, 'On this device', WIDTH - 22, 256, 14, { align: 1, fill: SOFT_INK, maxWidth: 115 });
 
     const list = this.root.addChild(new Container({ label: 'results-list' }));
     const listContent = list.addChild(new Container({ label: 'results-list-content' }));
@@ -232,8 +235,11 @@ export class ResultsPanel {
     const personalBody = this.hidden.addChild(new Container({ label: 'personal-list' }));
     const friendsBody = this.hidden.addChild(new Container({ label: 'friends-list' }));
     const friendsFooter = this.hidden.addChild(new Container());
-    label(friendsFooter, 'Share your final score on the Facebook friends leaderboard.', CENTER, 11, 15,
-      { align: 0.5, fill: SOFT_INK, maxWidth: INNER_WIDTH }).label = 'friends-submit-disclosure';
+    const disclosure = label(friendsFooter, 'Share your final score on the\nFacebook friends leaderboard.', CENTER, 13, 14,
+      { align: 0.5, fill: SOFT_INK, maxWidth: INNER_WIDTH - 16 });
+    disclosure.style.align = 'center';
+    disclosure.style.lineHeight = 13;
+    disclosure.label = 'friends-submit-disclosure';
     const submit = this.button(friendsFooter, SUBMIT, SUBMISSION_LABELS.idle, 'friends-submit');
     this.drawButton(submit, SUBMIT, true);
 
@@ -278,9 +284,11 @@ export class ResultsPanel {
         label(group, number.format(score), WIDTH - 26, 12, 17, { align: 1, maxWidth: 139 });
       });
     } else {
-      const message = list.status === 'error' ? 'Couldn’t load scores. Tap Friends to retry.'
+      const message = list.status === 'error' ? 'Couldn’t load scores.\nTap Friends to retry.'
         : list.status === 'ready' ? 'No friends scores yet.' : 'Loading friends scores…';
-      label(parent, message, CENTER, 47, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 }).label = 'friends-list-status';
+      const status = label(parent, message, CENTER, 47, 17, { align: 0.5, maxWidth: INNER_WIDTH - 12 });
+      status.style.align = 'center';
+      status.label = 'friends-list-status';
     }
   }
 

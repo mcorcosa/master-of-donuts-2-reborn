@@ -85,7 +85,7 @@ export function createBoosterMedallion(kind: BoosterKind, jokerArt: Texture): Te
   context.restore();
 
   const metal = shade(context.createLinearGradient(-8, -15, 10, 16), [
-    [0, '#ffffd7'], [0.21, '#ffd383'], [0.4, '#ac5c29'], [0.57, '#ffe29b'], [0.75, '#ca8744'], [1, '#71351f'],
+    [0, '#ffffd7'], [0.21, '#ffdb7f'], [0.4, '#bf721e'], [0.57, '#ffe39a'], [0.75, '#de9a38'], [1, '#98501b'],
   ]);
   disc(context, 0, 16.2, '#6f3526');
   disc(context, -0.45, 15.45, metal);

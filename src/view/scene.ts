@@ -1,9 +1,11 @@
-import { Assets, Container, DOMAdapter, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
-import { DOUGH_METER_LIMIT, type DoughInsert, type DoughSwap, type GameState, getBoardRepair, JOKER } from '../game';
+import { Assets, Container, DOMAdapter, FillGradient, Graphics, type GraphicsContext, type Renderer, Sprite, Text, Texture } from 'pixi.js';
+import { type DoughInsert, type DoughSwap, type GameState, getBoardRepair, JOKER } from '../game';
 import { BoosterControls, BoosterCue, type BoosterFooterView } from './boosters';
 import { FirstMatchHand, type FirstMatchHandMotion } from './firstMatchHand';
 import { FreeBoosterCelebration } from './freeBoosterCelebration';
+import { GAME_FONT_FAMILY, gameText } from './gameFont';
 import type { BoosterButton, Point, StackGestures, Target } from './gestures';
+import { IcingVial } from './icingVial';
 import { JokerArt } from './jokerArt';
 import {
   BOARD_FOOTER_SPACE, BOARD_TOP, contains, footerCenterY, type HitMode, layoutStacks, type Rect, stackHit, STACK_LIFT, type StackLayout, type StackSlot,
@@ -12,6 +14,7 @@ import {
 import { LevelCelebration, type LevelCelebrationDetails } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import type { MatchFrame, MatchPlayback } from './matchPlayback';
+import { MoveCost, type MoveRecovery } from './moveCost';
 import { FLIGHT_MS, flightPosition, LAND_MS, landingSquash, refillDuration, refillFrame, refillPlan, unit } from './movePlayback';
 import { ResultsPanel } from './resultsPanel';
 import type { ResultsView } from './resultsSession';
@@ -27,8 +30,9 @@ const GOLD = 0xab591a;
 const RED = 0xaa3339;
 const CENTER = VIEW_WIDTH / 2;
 const FOOTER_STATUS_X = 63;
-const HINT_WIDTH = 90;
-const HINT_HEIGHT = 36;
+const FOOTER_STATUS_WIDTH = 94;
+const HINT_WIDTH = 108;
+const HINT_HEIGHT = 60;
 const REDUCED_TRANSFER_REFILL_DELAY_MS = 110;
 const DOUGH_REPAIR_MS = 320;
 const REDUCED_DOUGH_REPAIR_MS = 240;
@@ -36,8 +40,11 @@ const SELECTION_LIFT_MS = 105;
 const SELECTION_WIGGLE_MS = 540;
 
 export async function loadArt(): Promise<Map<string, Texture>> {
-  const textures = await Promise.all(['kitchen', 'logo', 'clear', 'strawberry-glaze', ...DONUT_ART, JOKER].map(async name => {
-    const src = `${import.meta.env.BASE_URL}art/${name}.${name === JOKER ? 'webp' : 'png'}`;
+  const pastries = ['wordmark', 'score', 'level', 'mascot', 'hint'].map(part => `vanilla-bean-${part}`);
+  const textures = await Promise.all([...pastries, 'clear', 'strawberry-glaze', ...DONUT_ART, JOKER].map(async name => {
+    const extension = name === JOKER || pastries.includes(name) ? 'webp' : 'png';
+    const file = name === 'clear' ? 'sugar-glass.webp' : `${name}.${extension}`;
+    const src = `${import.meta.env.BASE_URL}art/${file}`;
     const texture = await Assets.load<Texture>(DONUT_ART.includes(name)
       ? { src, data: { autoGenerateMipmaps: true, scaleMode: 'linear' } }
       : src);
@@ -115,12 +122,19 @@ function createContactTexture(): Texture {
 }
 
 function label(parent: Container, value: string, size: number, x: number, y: number, fill = INK): Text {
-  const display = new Text({ text: value, style: {
-    fontFamily: ['Reborn Fredoka', 'Trebuchet MS', 'sans-serif'], fontSize: size, fontWeight: '600', fill,
+  const display = new Text({ text: gameText(value), style: {
+    fontFamily: GAME_FONT_FAMILY, fontSize: size, fontWeight: '600', fill,
   } });
   display.anchor.set(0.5);
   display.position.set(x, y);
   return parent.addChild(display);
+}
+
+function setFooterStatus(display: Text, value: string): void {
+  const text = gameText(value);
+  if (display.text === text) return;
+  display.text = text;
+  display.scale.x = Math.min(1, FOOTER_STATUS_WIDTH / Math.max(1, display.getLocalBounds().width));
 }
 
 function capacityRail(width: number, capacity: number) {
@@ -134,34 +148,31 @@ function drawCapacity(rail: Container, count: number, capacity: number, width: n
   const cue = rail.addChild(new Graphics());
 
   if (count === capacity) {
-    cue.roundRect(-half, 5, half * 2, 14, 6).fill(0x562a1e);
-    for (let x = 6 - half; x <= half - 5; x += 6) {
-      cue.circle(x, 7, 3).fill(0x83452e).circle(x, 16, 3).fill(0x83452e);
-    }
-    cue.roundRect(1 - half, 6, half * 2 - 2, 10, 5).fill(0x773e2b)
-      .moveTo(6 - half, 13).lineTo(11 - half, 8)
-      .moveTo(11 - half, 15).lineTo(16 - half, 10)
-      .moveTo(half - 16, 13).lineTo(half - 11, 8)
-      .moveTo(half - 11, 15).lineTo(half - 6, 10)
-      .stroke({ color: 0xc6885b, width: 1.2, cap: 'round' });
+    cue.roundRect(-half + 0.5, 7, half * 2, 14, 7).fill({ color: 0x8d4a28, alpha: 0.22 })
+      .roundRect(-half, 5, half * 2, 14, 7).fill(0x731328)
+      .roundRect(1 - half, 5.75, half * 2 - 2, 6.6, 3.3).fill(0x901637);
     label(rail, 'FULL', 10.5, 0, 11.5, CREAM);
     return half;
   }
 
-  cue.roundRect(-half, 7, half * 2, 8, 4).fill(0xc48561)
-    .roundRect(1 - half, 8, half * 2 - 2, 6, 3).fill(0xa66244);
+  cue.roundRect(-half, 7, half * 2, 8, 4).fill(0x731328)
+    .roundRect(1 - half, 8, half * 2 - 2, 6, 3).fill(0xa3544c);
   for (let index = 0; index < capacity; index++) {
     const left = first + index * pitch;
     const filled = index < count;
-    cue.roundRect(left, 8.5, pitch - 0.8, 5, 1.6).fill(filled ? 0xe5a02f : 0xffe0b8)
-      .roundRect(left + 0.5, 9, pitch - 1.8, 1.5, 0.75).fill(filled ? 0xffd572 : 0xffedcf);
+    cue.roundRect(left, 8.5, pitch - 0.8, 5, 1.6).fill(filled ? 0xfec40b : 0xf4d7a7)
+      .roundRect(left + 0.5, 9, pitch - 1.8, 1.5, 0.75).fill(filled ? 0xffe374 : 0xffedcf);
   }
   return half;
 }
 
 export class GameScene {
   readonly root = new Container({ eventMode: 'none' });
-  private readonly kitchen: Sprite;
+  private readonly backdrop = new Graphics({ label: 'pale-pine backdrop' });
+  private readonly backdropColor = new FillGradient({
+    type: 'radial', center: { x: 0.47, y: 0.44 }, outerRadius: 0.68,
+    colorStops: [{ offset: 0, color: 0xfff5e2 }, { offset: 0.77, color: 0xfdefd6 }, { offset: 1, color: 0xf9e8cc }],
+  });
   private readonly content = new Container();
   private readonly hud = new Container();
   private readonly board = new Container();
@@ -170,8 +181,11 @@ export class GameScene {
   private readonly arrow = new SelectionArrow();
   private readonly hintArrow = new SelectionArrow();
   private readonly firstMatchHand = new FirstMatchHand();
-  private readonly hintButton = new Container({ visible: false });
+  private readonly hintButton = new Container({ label: 'hint-button' });
   private readonly hintBounds = { x: 336.25 - HINT_WIDTH / 2, y: 0, width: HINT_WIDTH, height: HINT_HEIGHT };
+  private readonly hintFace: Sprite;
+  private readonly hintLabel: Text;
+  private hintAvailable = false;
   private readonly hintStatus: Text;
   private readonly boosterControls: BoosterControls;
   private readonly boosterCue = new BoosterCue();
@@ -183,15 +197,13 @@ export class GameScene {
     .circle(0, 0, 5).stroke({ color: RED, width: 3 });
   private readonly contactTexture = createContactTexture();
   private readonly vacancyArt: VacancyArt;
-  private readonly celebration = new LevelCelebration();
+  private readonly celebration: LevelCelebration;
   private readonly matchEffects = new Container();
+  private readonly moveCost = new MoveCost();
   private readonly matchPool: MatchEffect[] = [];
   private readonly scoreBar: ScoreBar;
-  private readonly doughFill = new Graphics();
+  private readonly icingVial = new IcingVial();
   private readonly doughRepairCue = new Graphics({ visible: false, eventMode: 'none', label: 'dough-repair-cue' });
-  private readonly doughValue: Text;
-  private readonly doughWarning: Text;
-  private doughMeter = -1;
   private boardSwaps: readonly DoughSwap[] = [];
   private endReason: GameState['endReason'];
   private readonly status: Text;
@@ -220,6 +232,14 @@ export class GameScene {
     return this.movePresentation !== null;
   }
 
+  get moveCostAnimating(): boolean { return this.moveCost.animating; }
+
+  get moveCostDeadline(): number { return this.moveCost.deadline; }
+
+  get icingVialAnimating(): boolean { return this.icingVial.animating; }
+
+  get icingVialDeadline(): number { return this.icingVial.deadline; }
+
   get stackUnlockAnimating(): boolean {
     return this.stackUnlock !== null;
   }
@@ -243,11 +263,15 @@ export class GameScene {
   constructor(private readonly art: Map<string, Texture>) {
     const companion = this.texture('strawberry-glaze');
     this.boosterControls = new BoosterControls(this.art.get(JOKER)!);
-    this.scoreBar = new ScoreBar(companion);
+    const scoreBiscuit = this.texture('vanilla-bean-score');
+    const jamCookie = this.texture('vanilla-bean-level');
+    this.scoreBar = new ScoreBar(this.texture('vanilla-bean-mascot'), scoreBiscuit, jamCookie);
+    this.celebration = new LevelCelebration(jamCookie, scoreBiscuit);
     this.results = new ResultsPanel(companion);
     this.vacancyArt = new VacancyArt(this.texture('clear'));
     this.root.once('destroyed', () => {
       this.contactTexture.destroy(true);
+      this.backdropColor.destroy();
       this.vacancyArt.destroy();
       this.joker?.destroy();
       this.releasePreparedText();
@@ -255,36 +279,31 @@ export class GameScene {
         if (!effect.root.destroyed) effect.root.destroy({ children: true });
       }
     });
-    this.kitchen = sprite(this.root, this.texture('kitchen'));
-    this.kitchen.anchor.set(0.5);
-    this.root.addChild(this.content, this.scrim, this.overlay);
-    this.content.addChild(this.board);
+    this.root.addChild(this.backdrop, this.content, this.scrim, this.overlay);
+    this.content.addChild(this.icingVial.root, this.board);
     this.flight = sprite(this.content, Texture.EMPTY);
     this.flight.anchor.set(0.5, 1);
     this.flight.visible = false;
     this.content.addChild(this.doughRepairCue, this.selectionCue, this.feedbackCue, this.arrow.root, this.hintArrow.root,
       this.firstMatchHand.root,
-      this.boosterCue.root, this.celebration.root, this.hud, this.matchEffects, this.freeBooster.root);
+      this.boosterCue.root, this.celebration.root, this.hud, this.moveCost.root, this.matchEffects, this.freeBooster.root);
 
-    const logo = sprite(this.hud, this.texture('logo'), CENTER, 34);
+    const logo = sprite(this.hud, this.texture('vanilla-bean-wordmark'), CENTER, 49, 282, 96);
     logo.anchor.set(0.5);
-    logo.scale.set(Math.min(150 / logo.texture.width, 58 / logo.texture.height));
-    const meter = this.hud.addChild(new Container({ x: 277, y: 10, label: 'dough-meter' }));
-    meter.addChild(new Graphics().roundRect(0, 0, 115, 50, 10).fill(0xffebcf)
-      .roundRect(9, 24, 97, 6, 3).fill(0xdeb1a7), this.doughFill);
-    this.doughValue = label(meter, '', 15, 57.5, 14);
-    this.doughWarning = label(meter, '', 11, 57.5, 39, '#8e243b');
     this.hud.addChild(this.scoreBar.root);
     this.status = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
     this.hintStatus = label(this.hud, '', 13, FOOTER_STATUS_X, 0);
-    this.boosterPrompt = label(this.hud, 'Pick a stack', 15, FOOTER_STATUS_X, 0, '#ffedb9');
+    this.boosterPrompt = label(this.hud, '', 14, FOOTER_STATUS_X, 0, '#ffedb9');
+    this.status.style.lineHeight = this.hintStatus.style.lineHeight = this.boosterPrompt.style.lineHeight = 13;
+    this.status.style.align = this.hintStatus.style.align = this.boosterPrompt.style.align = 'center';
     this.boosterPrompt.style.stroke = { color: INK, width: 2.5, join: 'round' };
     this.boosterPrompt.visible = false;
     this.hud.addChild(this.boosterControls.root);
     const { width, height } = this.hintBounds;
-    this.hintButton.addChild(new Graphics().roundRect(0, 2, width, height - 4, 12)
-      .fill(0x164c48).stroke({ color: 0xa6fff0, width: 1.5 }));
-    label(this.hintButton, 'Hint', 18, width / 2, height / 2, '#effffb');
+    this.hintFace = sprite(this.hintButton, this.texture('vanilla-bean-hint'), 0, 0, width, height);
+    this.hintLabel = label(this.hintButton, 'Hint', 25, width / 2, height * 0.45);
+    this.hintLabel.style.fontWeight = '700';
+    this.setHintAvailable(false);
     this.hud.addChild(this.hintButton);
 
     this.overlay.addChild(this.results.root);
@@ -344,22 +363,21 @@ export class GameScene {
     this.joker?.update(now, reduced);
   }
 
-  resize(width: number, height: number): void {
+  resize(width: number, height: number, safeAreaBottom = 0): void {
     this.hideMoveGuides();
     this.clearHint();
-    this.fit = viewport(width, height);
+    this.fit = viewport(width, height, safeAreaBottom);
     for (const layer of [this.content, this.overlay]) {
       layer.position.set(this.fit.x, this.fit.y);
       layer.scale.set(this.fit.scale);
     }
-    const cover = Math.max(width / this.kitchen.texture.width, height / this.kitchen.texture.height);
-    this.kitchen.scale.set(cover);
-    this.kitchen.position.set(width / 2, height / 2);
+    this.backdrop.clear().rect(0, 0, width, height).fill(this.backdropColor);
+    this.icingVial.resize(this.fit.height);
     this.scrim.clear().rect(0, 0, width, height).fill({ color: 0x4e2019, alpha: 0.6 });
     const footerY = footerCenterY(this.fit.height);
-    this.status.y = footerY - 9;
+    this.status.y = footerY - 14;
     this.hintStatus.y = this.status.y;
-    this.boosterPrompt.y = footerY + 9;
+    this.boosterPrompt.y = footerY + 14;
     this.boosterControls.resize(this.fit.height);
     this.hintBounds.y = footerY - HINT_HEIGHT / 2;
     this.hintButton.position.set(this.hintBounds.x, this.hintBounds.y);
@@ -401,13 +419,16 @@ export class GameScene {
   }
 
   setHintAvailable(available: boolean): void {
-    this.hintButton.visible = available;
+    this.hintAvailable = available;
+    this.hintFace.alpha = available ? 1 : 0.56;
+    this.hintFace.tint = available ? 0xffffff : 0xe9ded1;
+    this.hintLabel.style.fill = available ? '#731328' : '#755f54';
   }
 
   setBoosterControls(view: BoosterFooterView): void {
     this.boosterControls.show(view);
     this.boosterPrompt.visible = view.visible && (view.armed || view.adUnavailable);
-    this.boosterPrompt.text = view.armed ? 'Pick a stack' : 'Ad unavailable';
+    setFooterStatus(this.boosterPrompt, view.armed ? 'Pick a stack' : 'Ad\nunavailable');
   }
 
   startBoosterCue(kind: BoosterButton, targets: readonly { stack: number; color: string }[], now: number, reduced: boolean): void {
@@ -444,7 +465,7 @@ export class GameScene {
   showHint(move: { from: number; to: number } | null): void {
     this.clearHint();
     if (!move) {
-      this.hintStatus.text = 'No verified hint';
+      setFooterStatus(this.hintStatus, 'No verified\nhint');
       return;
     }
     const { slot, pieces } = this.stacks[move.to];
@@ -478,7 +499,7 @@ export class GameScene {
     this.firstMatchHand.hide();
   }
 
-  draw(state: GameState): void {
+  draw(state: GameState, refreshVial = true): void {
     this.finishMove();
     this.finishStackUnlock();
     this.hideMoveGuides();
@@ -489,23 +510,13 @@ export class GameScene {
     this.stacks = state.stacks.map((colors, index) => this.createStack(colors, this.layout.slots[index], this.layout));
     this.updateVacancies();
     this.gameOver = state.gameOver;
-    this.drawDoughMeter(state);
+    this.endReason = state.endReason;
+    if (refreshVial) this.icingVial.sync(state);
     this.boardSwaps = getBoardRepair(state)?.swaps ?? [];
   }
 
-  private drawDoughMeter({ doughMeter = 0, endReason }: GameState): void {
-    this.endReason = endReason;
-    if (doughMeter === this.doughMeter) return;
-    this.doughMeter = doughMeter;
-    this.doughValue.text = `Dough ${doughMeter}/${DOUGH_METER_LIMIT}`;
-    this.doughWarning.text = doughMeter === DOUGH_METER_LIMIT ? 'Dough meter full' :
-      doughMeter === DOUGH_METER_LIMIT - 1 ? 'Next miss ends run' : '';
-    const width = 97 * doughMeter / DOUGH_METER_LIMIT;
-    this.doughFill.clear();
-    if (width > 0) {
-      this.doughFill.roundRect(9, 24, width, 6, Math.min(3, width / 2))
-        .fill(doughMeter >= DOUGH_METER_LIMIT - 1 ? 0xa52640 : 0xb34861);
-    }
+  showIcingVial(now: number, still: boolean): void {
+    if (this.icingVial.animating || this.icingVial.deadline) this.icingVial.show(now, still);
   }
 
   private createDonut(group: Container, color: string): Container {
@@ -597,7 +608,7 @@ export class GameScene {
       this.stacks.push(added);
     }
     this.gameOver = state.gameOver;
-    this.drawDoughMeter(state);
+    this.endReason = state.endReason;
     this.boardSwaps = getBoardRepair(state)?.swaps ?? [];
     if (inserts.length || this.boardSwaps.length) this.playMove(refills, now, reduced);
     else this.showMove(now);
@@ -667,13 +678,22 @@ export class GameScene {
 
   startLevelCelebration(details: LevelCelebrationDetails, now: number, reduced: boolean): void {
     const { upgrade } = details;
+    const { donutWidth, donutHeight, step } = this.layout;
     const markers: Rect[] = [];
     if (upgrade?.kind === 'slots') {
-      const { first, pitch } = capacityRail(this.layout.donutWidth, this.capacity);
+      const { first, pitch } = capacityRail(donutWidth, this.capacity);
       for (const { slot } of this.stacks) {
         markers.push({
           x: slot.x + first + upgrade.previousCapacity * pitch - 1.4, y: slot.base + 7.5,
           width: (upgrade.capacity - upgrade.previousCapacity) * pitch + 2.2, height: 6.8,
+        });
+      }
+    } else if (upgrade?.kind === 'stack') {
+      const stackHeight = donutHeight + (this.capacity - 1) * step;
+      for (const { slot } of this.stacks.slice(upgrade.firstNewStack, upgrade.stackCount)) {
+        markers.push({
+          x: slot.x - donutWidth / 2 - 4, y: slot.base - stackHeight - 4,
+          width: donutWidth + 8, height: stackHeight + 22,
         });
       }
     }
@@ -731,13 +751,11 @@ export class GameScene {
   }
 
   private placeVacancies(sprite: Sprite, count: number, slot: StackSlot, occupied: number, layout: StackLayout, art: StackLayout): void {
-    const { donutWidth, step } = layout;
+    const { donutWidth, donutHeight, step } = layout;
     sprite.texture = this.vacancyArt.texture(count, art.step / art.donutHeight);
     sprite.position.set(slot.x, slot.base - occupied * step);
     sprite.width = donutWidth;
-    // Both masks stay in the same footprint as the spacing changes between their two silhouettes.
-    sprite.height = sprite.texture.height * donutWidth / sprite.texture.width +
-      (count - 1) * (step - art.step * donutWidth / art.donutWidth);
+    sprite.height = donutHeight + (count - 1) * step;
   }
 
   toLocal(point: Point): Point {
@@ -748,7 +766,7 @@ export class GameScene {
     if (this.stackUnlock) return duringUnlock ? this.hitMovingStack(point) : null;
     if (this.overlay.visible) return this.results.hit(point);
     if (this.gameOver) return null;
-    if (this.hintButton.visible && contains(this.hintBounds, point)) return 'hint';
+    if (this.hintAvailable && contains(this.hintBounds, point)) return 'hint';
     return this.boosterControls.hit(point) ?? stackTarget(this.stacks, point, this.fit.height, mode);
   }
 
@@ -801,6 +819,28 @@ export class GameScene {
     if (!inserts.length && !this.boardSwaps.length && (!transfer || reduced)) return;
     const refills = refillPlan(this.stacks.map(stack => stack.pieces.length), inserts);
     this.playMove(refills, started, reduced, transfer);
+  }
+
+  startMoveCost(to: number, started: number, reduced: boolean, remaining: number): void {
+    const { x, y } = this.movePresentation?.transfer?.landing ?? this.topPosition(to);
+    this.moveCost.enqueue({ x, y: y - this.layout.donutHeight * 0.62 }, started + (reduced ? 0 : FLIGHT_MS), reduced, remaining);
+  }
+
+  startMoveRecovery(recovery: MoveRecovery, now: number, reduced: boolean): void {
+    this.moveCost.recover(recovery, now, reduced);
+  }
+
+  showMoveCosts(now: number): void {
+    const boardLeft = Math.min(...this.layout.slots.map(slot => slot.hit.x));
+    const cue = this.moveCost.show(now, this.fit.height, remaining => this.icingVial.spendTarget(remaining), boardLeft);
+    if (!cue) return;
+    if ('recovery' in cue) this.icingVial.apply(cue.recovery.remaining, now, cue.reduced, cue.recovery);
+    else this.icingVial.apply(cue.remaining, now, cue.reduced);
+  }
+
+  clearMoveCosts(state: Pick<GameState, 'doughMeter'>): void {
+    this.moveCost.clear();
+    this.icingVial.sync(state);
   }
 
   private playMove(refills: MovePresentation['refills'], started: number, reduced: boolean, transfer?: Transfer): void {
@@ -1027,7 +1067,7 @@ export class GameScene {
       this.feedbackCue.alpha = reduced ? 1 : 1 - 0.7 * (now - feedback.started) / feedback.duration;
     }
 
-    this.status.text = feedback ? 'That stack is full' : '';
+    setFooterStatus(this.status, feedback ? 'That stack\nis full' : '');
     this.status.style.fill = feedback ? RED : INK;
   }
 }

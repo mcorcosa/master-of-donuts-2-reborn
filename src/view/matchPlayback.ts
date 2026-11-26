@@ -173,16 +173,16 @@ function scoreEmphasis(points: number): number {
 }
 
 export function scoreSize(points: number): number {
-  return 40 + 24 * scoreEmphasis(points);
+  return 50 + 24 * scoreEmphasis(points);
 }
 
 export function scorePopPeak(points: number) {
   const strength = scoreEmphasis(points);
-  return { x: 1.29 + 0.14 * strength, y: 1.39 + 0.13 * strength };
+  return { x: 1.38 + 0.14 * strength, y: 1.51 + 0.14 * strength };
 }
 
 export function comboPopPeak(combo: number): number {
-  return 1.13 + 0.12 * unit((combo - 2) / 4);
+  return 1.19 + 0.14 * unit((combo - 2) / 4);
 }
 
 function flightStart(match: MatchPlayback): number {

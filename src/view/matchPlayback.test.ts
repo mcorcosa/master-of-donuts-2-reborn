@@ -2,13 +2,14 @@ import { Bounds, DOMAdapter, Sprite, Text, Texture, TextureSource } from 'pixi.j
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type DoughInsert, type GameState, getBoardRepair, JOKER, move } from '../game';
 import { type Point, StackGestures } from './gestures';
-import { BOARD_FOOTER_SPACE, BOARD_TOP, layoutStacks, VIEW_WIDTH } from './layout';
-import { LevelCelebration } from './levelCelebration';
+import { BOARD_FOOTER_SPACE, BOARD_TOP, footerCenterY, layoutStacks, VIEW_WIDTH } from './layout';
+import { LEVEL_CELEBRATION_MS, LevelCelebration } from './levelCelebration';
 import { MatchEffect } from './matchEffect';
 import {
   awardFrame, beginMatch, matchFrame, matchLaunches, type MatchPlayback, matchPopTime,
   scoreFlightFrame, scoreFlightPosition, scoreImpactTime, scoreSize,
 } from './matchPlayback';
+import { MOVE_SPEND_MS } from './moveCost';
 import { FLIGHT_MS, LAND_MS } from './movePlayback';
 import { GameScene } from './scene';
 import { ScoreBar } from './scoreBar';
@@ -21,12 +22,13 @@ const counter = { x: 118, y: 84 };
 
 function makeScene(): GameScene {
   vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
+  vi.spyOn(Text.prototype, 'bounds', 'get').mockReturnValue(new Bounds(-34, -18, 34, 18));
   const imageData = (width: number, height: number) => ({ data: new Uint8ClampedArray(width * height * 4) });
   const gradient = () => ({ addColorStop() {} });
   const context = {
     createRadialGradient: gradient, createLinearGradient: gradient, fillRect() {}, drawImage() {}, putImageData() {},
     createImageData: imageData, getImageData: (_x: number, _y: number, width: number, height: number) => imageData(width, height),
-    setTransform() {}, save() {}, restore() {}, rotate() {}, beginPath() {},
+    setTransform() {}, save() {}, restore() {}, rotate() {}, translate() {}, scale() {}, beginPath() {},
     moveTo() {}, lineTo() {}, quadraticCurveTo() {}, bezierCurveTo() {}, arc() {}, fill() {}, stroke() {},
   };
   vi.spyOn(DOMAdapter.get(), 'createCanvas').mockImplementation((width, height) =>
@@ -42,6 +44,75 @@ function makeScene(): GameScene {
 afterEach(() => vi.restoreAllMocks());
 
 describe('dough meter presentation', () => {
+  const openingVialFixture: GameState = {
+    stacks: [['red', 'gold'], ['yellow', 'blue'], ['green', 'red']], capacity: 5,
+    score: 0, level: 1, rank: 'Dough Enthusiast', nextLevelScore: 500, movesLeft: 5, gameOver: false,
+  };
+
+  it.each([28, 4, 1])('docks at the old icing surface and drains exactly one slice from %i moves', before => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 28 - before });
+    const vial = scene['icingVial'];
+    const next = before - 1;
+    const dock = vial.spendTarget(next);
+    const oldTop = dock.y - vial.root.y;
+    const newTop = next ? vial.spendTarget(next - 1).y - vial.root.y : vial['fillBottom'];
+    scene.startMoveCost(1, 0, false, next);
+    scene.showMoveCosts(FLIGHT_MS);
+    scene.showMoveCosts(FLIGHT_MS + 369);
+    expect(vial['count'].text).toBe(String(before));
+    expect(vial['spendSlice'].visible).toBe(false);
+
+    const impact = FLIGHT_MS + 370;
+    scene.showMoveCosts(impact);
+    const dockingLabel = scene['moveCost']['visible'][0].label;
+    expect(dockingLabel.position).toMatchObject(dock);
+    expect(vial['count'].text).toBe(String(next));
+    expect(vial['count'].scale.x).toBeCloseTo(1.25);
+    const slice = vial['spendSlice'];
+    expect(slice.visible).toBe(true);
+    expect(slice.y).toBeCloseTo(oldTop);
+    expect(slice.y + slice.scale.y).toBeCloseTo(newTop);
+    scene.showIcingVial(impact + 60, false);
+    expect(vial['displayed']).toBeCloseTo(before / 28);
+    expect(slice.y).toBeCloseTo(oldTop);
+    scene.showIcingVial(impact + 100, false);
+    expect(vial['displayed']).toBeLessThan(before / 28);
+    expect(vial['displayed']).toBeGreaterThan(next / 28);
+    expect(slice.y).toBeGreaterThan(oldTop);
+    expect(slice.y + slice.scale.y).toBeCloseTo(newTop);
+    scene.showIcingVial(impact + MOVE_SPEND_MS, false);
+    expect(vial['displayed']).toBeCloseTo(next / 28);
+    expect(vial['count'].scale.x).toBe(1);
+    expect(slice.visible).toBe(false);
+    expect(scene.icingVialAnimating).toBe(false);
+    scene.root.destroy({ children: true });
+  });
+
+  it('shows a bounded stationary impact when reduced motion spends the move', () => {
+    const scene = makeScene();
+    scene.draw({ ...openingVialFixture, doughMeter: 24 });
+    const vial = scene['icingVial'];
+    scene.startMoveCost(1, 0, true, 3);
+    scene.showMoveCosts(0);
+    expect(vial['count'].text).toBe('3');
+    expect(vial['displayed']).toBeCloseTo(4 / 28);
+    expect(vial['spendSlice'].visible).toBe(true);
+    expect(scene.icingVialDeadline).toBe(MOVE_SPEND_MS);
+    expect(scene.icingVialAnimating).toBe(false);
+    scene.showIcingVial(MOVE_SPEND_MS - 1, true);
+    expect(vial.root.x).toBe(33);
+    expect(vial['count'].x).toBe(0);
+    expect(vial['count'].scale.x).toBe(1);
+    expect(vial['spendSlice'].visible).toBe(true);
+    expect(vial['displayed']).toBeCloseTo(4 / 28);
+    scene.showIcingVial(MOVE_SPEND_MS, true);
+    expect(vial['spendSlice'].visible).toBe(false);
+    expect(vial['displayed']).toBeCloseTo(3 / 28);
+    expect(scene.icingVialDeadline).toBe(0);
+    scene.root.destroy({ children: true });
+  });
+
   it.each([false, true])('marks an exchange of intact donuts with reduced motion %s', reduced => {
     const before: GameState = {
       stacks: [['gold', 'blue', 'red'], ['green', 'blue', 'gold', 'gold', 'red'], ['red', 'green', 'red', 'blue', 'blue']],
@@ -65,8 +136,9 @@ describe('dough meter presentation', () => {
         expect((piece.children[1] as Sprite).texture).toBe(scene['art'].get(after.stacks[stack][depth]));
       }
     };
-    expect(scene['doughValue'].text).toBe('Dough 27/28');
-    expect(scene['doughWarning'].text).toBe('Next miss ends run');
+    const vial = scene['icingVial'];
+    expect(vial['count'].text).toBe('1');
+    expect(vial['reading'].tone).toBe('critical');
     scene.startMove([], 0, reduced, { to: 0, start, color: 'red' });
     expect(scene['doughRepairCue'].visible).toBe(true);
     expect(first.pivot.x).toBeCloseTo(reduced ? 0 : first.x - second.x);
@@ -82,11 +154,11 @@ describe('dough meter presentation', () => {
     expect(second.pivot.y).toBe(0);
     expectFlavors();
     scene.draw({ ...after, doughMeter: 28, gameOver: true, endReason: 'dough-meter' });
-    expect(scene['doughValue'].text).toBe('Dough 28/28');
-    expect(scene['doughWarning'].text).toBe('Dough meter full');
+    expect(vial['count'].text).toBe('0');
+    expect(vial['displayed']).toBe(0);
     scene.draw({ ...before, doughMeter: 0 });
-    expect(scene['doughValue'].text).toBe('Dough 0/28');
-    expect(scene['doughWarning'].text).toBe('');
+    expect(vial['count'].text).toBe('28');
+    expect(vial['reading'].tone).toBe('full');
     scene.root.destroy({ children: true });
     red.destroy();
   });
@@ -315,7 +387,7 @@ describe('match presentation', () => {
       effect.showTail(onset - 1, counter);
       expect(award.visible).toBe(false);
       expect(outline.text).toBe(`+${number.format(points)}`);
-      expect(streak.text).toBe(`${combo}× Combo`);
+      expect(streak.text).toBe(`${combo}× COMBO`);
 
       for (const age of [12, 34, 56, 57, 90, 116, 165, ...(reduced ? [400] : [])]) {
         const time = onset + age;
@@ -398,11 +470,11 @@ describe('match presentation', () => {
     const high = { ...playback, points: 2500 };
     const pop = high.arrivalMs + matchPopTime(high.runLength, high.runLength - 1);
     const at = (age: number) => awardFrame(high, pop + age)!;
-    expect(scoreSize(110)).toBe(40);
-    expect(scoreSize(2500)).toBe(64);
+    expect(scoreSize(110)).toBe(50);
+    expect(scoreSize(2500)).toBe(74);
     expect(awardFrame(playback, pop - 1)).toBeNull();
-    expect(awardFrame(playback, pop + 34)).toMatchObject({ scaleX: 1.29, scaleY: 1.39, alpha: 1 });
-    expect(at(34)).toMatchObject({ scaleX: expect.closeTo(1.43), scaleY: expect.closeTo(1.52), alpha: 1 });
+    expect(awardFrame(playback, pop + 34)).toMatchObject({ scaleX: 1.38, scaleY: 1.51, alpha: 1 });
+    expect(at(34)).toMatchObject({ scaleX: expect.closeTo(1.52), scaleY: expect.closeTo(1.65), alpha: 1 });
     expect(at(116)).toMatchObject({ scaleX: 1, scaleY: 1 });
     expect(at(165).alpha).toBe(1);
     expect(at(166)).toBeNull();
@@ -421,7 +493,7 @@ describe('match presentation', () => {
     expect(at(2, 34).comboAlpha).toBe(0);
     expect(at(2, 56).comboAlpha).toBe(0);
     expect(at(2, 67).comboAlpha).toBe(0.5);
-    expect(at(2, 90)).toMatchObject({ comboAlpha: 1, comboScale: 1.13 });
+    expect(at(2, 90)).toMatchObject({ comboAlpha: 1, comboScale: 1.19 });
     expect(at(5, 90).comboScale).toBeGreaterThan(at(2, 90).comboScale);
     expect(at(120, 90).comboScale).toBe(at(6, 90).comboScale);
     expect(at(6, 140).comboScale).toBe(1);
@@ -463,21 +535,28 @@ describe('match presentation', () => {
 
 describe('score and level effects', () => {
   it('fits and punches the exact large score and uses a stationary highlight in reduced motion', () => {
-    vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(0, -14, 210, 14));
+    const bounds = function (this: Text) {
+      if (this.text.length === 1) return new Bounds(-4, -5, 4, 5);
+      return new Bounds(0, -14, 210, 14);
+    };
+    vi.spyOn(Text.prototype, 'getLocalBounds').mockImplementation(bounds);
+    vi.spyOn(Text.prototype, 'bounds', 'get').mockImplementation(bounds);
     const bar = new ScoreBar(Texture.WHITE);
     const score = 123456789.5;
     bar.draw({ score, level: 8, rank: 'Doughnut Dynamo', nextLevelScore: score * 2, levelStartScore: 0 });
     const digits = bar['score'];
     const fitted = digits.scale.x;
     expect(bar.root.children.filter(child => child instanceof Text).map(child => child.text))
-      .toEqual([new Intl.NumberFormat().format(score), 'Level', '8']);
+      .toEqual([new Intl.NumberFormat().format(score), '8']);
+    expect(bar['levelLabel'].children.map(child => (child as Text).text).join('')).toBe('LEVEL');
     bar.credit(0, false);
     bar.showEffects(36);
-    expect(digits.scale.x).toBeCloseTo(fitted * 1.27);
+    expect(digits.scale.x).toBeCloseTo(fitted * 1.38);
     const punchedWidth = digits.getLocalBounds().width * digits.scale.x;
-    expect(digits.x + punchedWidth).toBeLessThan(bar['levelLabel'].x);
-    expect(bar.creditTarget.x).toBeGreaterThan(bar.root.x + digits.x);
-    expect(bar.creditTarget.x).toBeLessThan(bar.root.x + digits.x + punchedWidth);
+    expect(digits.anchor.x).toBe(0.5);
+    expect(digits.x).toBe((bar.root.children[0] as Sprite).width / 2);
+    expect(digits.x + punchedWidth / 2).toBeLessThan(bar['levelLabel'].x);
+    expect(bar.creditTarget.x).toBe(bar.root.x + digits.x);
     expect(bar['glow'].visible).toBe(true);
 
     bar.credit(100, true);
@@ -494,22 +573,27 @@ describe('score and level effects', () => {
 
   it('shows the level and upgrade with static board focus in reduced motion', () => {
     vi.spyOn(Text.prototype, 'getLocalBounds').mockReturnValue(new Bounds(-34, -18, 34, 18));
-    const level = new LevelCelebration();
+    const level = new LevelCelebration(Texture.WHITE, Texture.WHITE);
     const { root } = level;
-    const [markers, rays, particles, hero] = root.children;
-    level.start({ level: 3, rank: 'Fryer Fighter', upgrade: { kind: 'stack', firstNewStack: 3, stackCount: 4 } },
+    const [markers, particles, hero] = root.children;
+    level.start({ level: 3, rank: 'Fryer Fighter', movesRestored: 4, upgrade: { kind: 'stack', firstNewStack: 3, stackCount: 4 } },
       [{ x: 320, y: 300, width: 65, height: 86 }], 0, true, 540);
-    expect(hero.children.slice(1).map(child => (child as Text).text)).toEqual(['Level 3', 'New stack']);
+    expect(hero.children.filter(child => child instanceof Text).map(child => child.text))
+      .toEqual(['LEVEL', '3', '+4 MOVES', 'NEW STACK']);
     expect(markers.getLocalBounds().width).toBeGreaterThan(60);
-    expect(rays.visible).toBe(false);
     expect(particles.visible).toBe(false);
     const position = { x: hero.x, y: hero.y };
     level.show(500);
     expect(hero.position).toMatchObject(position);
     expect(hero.scale.x).toBe(1);
-    level.show(1040);
+    level.show(LEVEL_CELEBRATION_MS - 1);
+    expect(root.visible).toBe(true);
+    level.show(LEVEL_CELEBRATION_MS);
     expect(root.visible).toBe(false);
+    level.start({ level: 4, rank: '', movesRestored: 0 }, [], LEVEL_CELEBRATION_MS, false, 540);
+    expect(level.animating).toBe(true);
     root.destroy({ children: true });
+    expect(level.animating).toBe(false);
   });
 });
 
@@ -634,7 +718,13 @@ describe('new stack layout', () => {
       level: 9, rank: 'Fryer Freak', upgrade: { kind: 'stack' as const, firstNewStack: 5, stackCount: 6 },
     };
     scene.startLevelCelebration(details, started + 245, true);
-    expect(celebrate).toHaveBeenCalledWith(details, [], started + 245, true, scene['fit'].height);
+    const stackHeight = newLayout.donutHeight + (after.capacity - 1) * newLayout.step;
+    expect(celebrate).toHaveBeenCalledWith(details, [{
+      x: x - newLayout.donutWidth / 2 - 4,
+      y: base - stackHeight - 4,
+      width: newLayout.donutWidth + 8,
+      height: stackHeight + 22,
+    }], started + 245, true, scene['fit'].height);
     scene.root.destroy({ children: true });
   });
 });
@@ -645,15 +735,18 @@ describe('move presentation', () => {
     capacity: 7, nextLevelScore: 4500, movesLeft: 1, gameOver: false,
   };
 
-  it('hits the visible Hint footer separately and anchors the static arrow to the receiving seat', () => {
+  it('keeps Hint visible when unavailable and anchors the active arrow to the receiving seat', () => {
     const scene = makeScene();
     scene.draw(state);
     const { x, y, width, height } = scene['hintBounds'];
     const button = { x: x + width / 2, y: y + height / 2 };
+    expect(scene['hintButton'].visible).toBe(true);
+    expect(scene['hintFace'].alpha).toBeLessThan(1);
     expect(scene.hit(button, 'tap')).toBe('outside');
     scene.setHintAvailable(true);
+    expect(scene['hintFace'].alpha).toBe(1);
     for (const mode of ['exact', 'tap', 'swipe'] as const) expect(scene.hit(button, mode)).toBe('hint');
-    expect(scene.hit({ x: 200, y: button.y }, 'tap')).toBe('outside');
+    expect(scene.hit({ x: 195, y: button.y }, 'tap')).toBe('outside');
 
     const arrow = scene['hintArrow'];
     const renderArrow = vi.spyOn(arrow, 'show');
@@ -668,47 +761,56 @@ describe('move presentation', () => {
     expect(scene['arrow'].root.visible).toBe(false);
     scene.showHint(null);
     expect(arrow.root.visible).toBe(false);
-    expect(scene['hintStatus'].text).toBe('No verified hint');
+    expect(scene['hintStatus'].text).toBe('NO VERIFIED\nHINT');
+    scene.setHintAvailable(false);
+    expect(scene['hintButton'].visible).toBe(true);
+    expect(scene.hit(button, 'tap')).toBe('outside');
     scene.resize(390, 844);
     expect(scene['hintStatus'].text).toBe('');
     scene.root.destroy({ children: true });
   });
 
-  it('fits the centered medallions and their badges inside a shared footer with separate hit areas', () => {
-    const scene = makeScene();
-    const dense = { ...state, capacity: 10, stacks: Array.from({ length: 8 }, () => Array(10).fill('blue')) };
-    const ready = { mode: 'held', usable: true } as const;
-    const free = { mode: 'free', usable: true } as const;
-    for (const board of [state, dense]) {
-      scene.draw(board);
-      scene.setHintAvailable(true);
-      scene.setBoosterControls({ joker: free, sweep: ready, progress: 0, armed: true, visible: true, adUnavailable: false });
-      const controls = scene['boosterControls'];
-      const joker = controls.dropTarget('joker');
-      const sweep = controls.dropTarget('sweep');
-      const { x, y, width, height } = scene['hintBounds'];
-      const footerY = scene['fit'].height - 34;
-      expect([joker.x, sweep.x, x + width / 2]).toEqual([156.25, 233.75, 336.25]);
-      expect([joker.y, sweep.y, y + height / 2]).toEqual([footerY, footerY, footerY]);
-      expect(joker.size * 32.4 / 40).toBeCloseTo(57.5);
-      expect([width, height]).toEqual([90, 36]);
-      expect(scene.hit({ x: joker.x - 32, y: footerY }, 'tap')).toBe('joker');
-      expect(scene.hit({ x: sweep.x + 28.5, y: footerY }, 'tap')).toBe('sweep');
-      expect(scene.hit({ x: sweep.x, y: footerY - 29 }, 'tap')).toBe('sweep');
-      const badge = { x: joker.x + 37, y: footerY - 17 };
-      expect(scene.hit(badge, 'tap')).toBe('joker');
-      expect(scene.hit({ x: (joker.x + sweep.x) / 2, y: footerY }, 'tap')).toBe('outside');
-      expect(scene.hit({ x: 278, y: footerY }, 'tap')).toBe('outside');
-      expect(scene.hit({ x: x + width / 2, y: footerY }, 'tap')).toBe('hint');
+  it.each([[320, 568, 0, 14], [390, 844, 0, 18], [390, 932, 34, 18]])(
+    'fits the centered medallions and their badges at %i × %i with %i px safe inset', (screenWidth, screenHeight, inset, gap) => {
+      const scene = makeScene();
+      scene.resize(screenWidth, screenHeight, inset);
+      const dense = { ...state, capacity: 10, stacks: Array.from({ length: 8 }, () => Array(10).fill('blue')) };
+      const ready = { mode: 'held', usable: true } as const;
+      const free = { mode: 'free', usable: true } as const;
+      for (const board of [state, dense]) {
+        scene.draw(board);
+        scene.setHintAvailable(true);
+        scene.setBoosterControls({ joker: free, sweep: ready, progress: 0, armed: true, visible: true, adUnavailable: false });
+        const controls = scene['boosterControls'];
+        const joker = controls.dropTarget('joker');
+        const sweep = controls.dropTarget('sweep');
+        const { x, y, width, height } = scene['hintBounds'];
+        const fit = scene['fit'];
+        const footerY = footerCenterY(fit.height);
+        const artBottom = fit.y + (footerY + joker.size / 2) * fit.scale;
+        expect(screenHeight - inset - artBottom).toBeGreaterThanOrEqual(gap);
+        expect([joker.x, sweep.x, x + width / 2]).toEqual([156.25, 233.75, 336.25]);
+        expect([joker.y, sweep.y, y + height / 2]).toEqual([footerY, footerY, footerY]);
+        expect(joker.size * 32.4 / 40).toBeCloseTo(70);
+        expect([width, height]).toEqual([108, 60]);
+        expect(scene.hit({ x: joker.x - 32, y: footerY }, 'tap')).toBe('joker');
+        expect(scene.hit({ x: sweep.x + 28.5, y: footerY }, 'tap')).toBe('sweep');
+        expect(scene.hit({ x: sweep.x, y: footerY - 29 }, 'tap')).toBe('sweep');
+        const badge = { x: joker.x + 42, y: footerY - 20 };
+        expect(scene.hit(badge, 'tap')).toBe('joker');
+        expect(scene.hit({ x: (joker.x + sweep.x) / 2, y: footerY }, 'tap')).toBe('outside');
+        expect(scene.hit({ x: 278, y: footerY }, 'tap')).toBe('outside');
+        expect(scene.hit({ x: x + width / 2, y: footerY }, 'tap')).toBe('hint');
 
-      scene.setBoosterControls({ joker: ready, sweep: ready, progress: 0, armed: false, visible: true, adUnavailable: false });
-      expect(scene.hit(badge, 'tap')).toBe('outside');
-      const bottom = scene['stacks'][1];
-      expect(bottom.hit.y + bottom.hit.height).toBeLessThanOrEqual(footerY - 34);
-      expect(scene.hit({ x: bottom.slot.x, y: bottom.hit.y + bottom.hit.height - 1 }, 'tap')).toBe(1);
-    }
-    scene.root.destroy({ children: true });
-  });
+        scene.setBoosterControls({ joker: ready, sweep: ready, progress: 0, armed: false, visible: true, adUnavailable: false });
+        expect(scene.hit(badge, 'tap')).toBe('outside');
+        const bottom = scene['stacks'][1];
+        expect(bottom.hit.y + bottom.hit.height).toBeLessThanOrEqual(fit.height - BOARD_FOOTER_SPACE);
+        expect(scene.hit({ x: bottom.slot.x, y: bottom.hit.y + bottom.hit.height - 1 }, 'tap')).toBe(1);
+      }
+      scene.root.destroy({ children: true });
+    },
+  );
 
   it('presses before selection and keeps the release hit area stable', () => {
     const scene = makeScene();

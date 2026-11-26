@@ -2,7 +2,7 @@ import type { AdOutcome } from '@playbridge/core';
 import type { Application } from 'pixi.js';
 import { GameSound } from '../audio/GameSound';
 import {
-  canMove, canRequestSetupHint, canUseJokerBooster, createGame, type DoughInsert, findSetupHint, type GameState,
+  canMove, canRequestSetupHint, canUseJokerBooster, createGame, DOUGH_METER_LIMIT, type DoughInsert, findSetupHint, type GameState,
   getBoardRepair, JOKER, LEVEL_DOUGH_RELIEF, move, previewExtraChance, useJokerBooster, useStackSweep,
 } from '../game';
 import { RunBoosters } from '../game/boosters';
@@ -15,11 +15,11 @@ import { AdDialog, type AdDialogContent } from './adDialog';
 import { installBoardDebug } from './boardDebug';
 import type { BoosterButtonView, BoosterFooterView } from './boosters';
 import { arrangeFirstMatch, findFirstMatch, type FirstMatchProgress } from './firstMatch';
+import { preloadGameFont } from './gameFont';
 import { GameOverPresentation } from './gameOverPresentation';
 import { type BoosterButton, type Point, StackGestures } from './gestures';
 import { VIEW_WIDTH } from './layout';
 import { LEVEL_CELEBRATION_MS, type LevelCelebrationDetails } from './levelCelebration';
-import { preloadScoreFont } from './matchEffect';
 import { awardFrame, beginMatch, clearStart, matchFrame, type MatchPlayback, matchPopTime, scoreImpactTime } from './matchPlayback';
 import { FLIGHT_MS } from './movePlayback';
 import { ResultsSession } from './resultsSession';
@@ -77,7 +77,9 @@ function levelReveal(before: GameState, after: GameState, reduced: boolean): Lev
   const { level, rank, capacity, nextLevelScore, stacks } = after;
   const newStack = stacks.length > before.stacks.length;
   const newSlots = capacity > before.capacity;
-  const details: LevelCelebrationDetails = { level, rank };
+  const spent = before.doughMeter ?? 0;
+  const movesRestored = Math.min(LEVEL_DOUGH_RELIEF, Math.max(0, spent - (after.doughMeter ?? 0)));
+  const details: LevelCelebrationDetails = { level, rank, movesRestored };
   if (newStack) details.upgrade = { kind: 'stack', firstNewStack: before.stacks.length, stackCount: stacks.length };
   else if (newSlots) details.upgrade = { kind: 'slots', previousCapacity: before.capacity, capacity };
   return { details, nextLevelScore, levelStartScore: before.nextLevelScore, reduced, settled: false, credited: false, gleamAt: null };
@@ -97,13 +99,13 @@ interface GameResultsOptions {
 export async function mountGame(app: Application, {
   jokerPlaytest, firstMatch, personalScores, getFriendsScores, monetization, quality, onPause, onResultsVisibilityChange,
 }: GameResultsOptions): Promise<void> {
-  const [art] = await Promise.all([loadArt(), preloadScoreFont().catch(error => {
-    console.warn('The bundled score font could not be loaded.', error);
+  const { canvas, renderer, stage } = app;
+  const document = canvas.ownerDocument;
+  const [art] = await Promise.all([loadArt(), preloadGameFont(document.fonts).catch(error => {
+    console.warn('The bundled game font could not be loaded.', error);
   })]);
   const scene = new GameScene(art);
   const sound = new GameSound();
-  const { canvas, renderer, stage } = app;
-  const document = canvas.ownerDocument;
   const window = document.defaultView!;
   const adDialog = monetization ? new AdDialog(document) : null;
   const createRun = jokerPlaytest ? (): GameState => ({
@@ -168,6 +170,7 @@ export async function mountGame(app: Application, {
   let viewportDirty = true;
   let viewportWidth = app.screen.width;
   let viewportHeight = app.screen.height;
+  let safeAreaBottom = readSafeAreaBottom();
   let displayQuery: MediaQueryList | undefined;
   let painted = false;
   let wakeAt = 0;
@@ -186,8 +189,8 @@ export async function mountGame(app: Application, {
   }
 
   function timedWork(): boolean {
-    return boardAnimating() || boosterDrop !== null || scene.freeBoosterAnimating ||
-      (!motion.matches && gameOver?.cueAnimating === true);
+    return boardAnimating() || scene.moveCostAnimating || boosterDrop !== null || scene.freeBoosterAnimating ||
+      scene.icingVialAnimating || (!motion.matches && gameOver?.cueAnimating === true);
   }
 
   function needsAnimation(): boolean {
@@ -196,6 +199,10 @@ export async function mountGame(app: Application, {
 
   function queueDeadline(now: number): void {
     let next = hintStatusUntil;
+    const moveCost = scene.moveCostDeadline;
+    if (moveCost && (!next || moveCost < next)) next = moveCost;
+    const vial = scene.icingVialDeadline;
+    if (vial && (!next || vial < next)) next = vial;
     if (firstMatchGuideAt && (!next || firstMatchGuideAt < next)) next = firstMatchGuideAt;
     const gameOverDeadline = results || adDialog?.element.open ? 0 : gameOver?.deadline(motion.matches) ?? 0;
     if (gameOverDeadline && (!next || gameOverDeadline < next)) next = gameOverDeadline;
@@ -281,6 +288,10 @@ export async function mountGame(app: Application, {
     displayQuery.addEventListener('change', wakeViewport, options);
   }
 
+  function readSafeAreaBottom(): number {
+    return parseFloat(window.getComputedStyle(canvas).getPropertyValue('--game-safe-area-bottom')) || 0;
+  }
+
   function syncViewport(): void {
     if (!viewportDirty) return;
     viewportDirty = false;
@@ -288,11 +299,15 @@ export async function mountGame(app: Application, {
     quality.syncDisplay();
     if (dpr !== quality.nativeDpr) watchDisplay();
     const { innerWidth, innerHeight } = window;
+    const inset = readSafeAreaBottom();
+    const insetChanged = safeAreaBottom !== inset;
+    safeAreaBottom = inset;
     if (innerWidth === viewportWidth && innerHeight === viewportHeight) {
       if (renderer.resolution !== quality.frames.resolution) {
         renderer.resolution = quality.frames.resolution;
         resolutionChanged();
       }
+      if (insetChanged) resize();
       return;
     }
     viewportWidth = innerWidth;
@@ -465,8 +480,9 @@ export async function mountGame(app: Application, {
     scene.showInteraction(gestures, preview, feedback, now, motion.matches);
   }
 
-  function draw(): void {
-    scene.draw(state);
+  function draw(refreshVial = true): void {
+    if (refreshVial) scene.draw(state);
+    else scene.draw(state, false);
     updateInteraction();
   }
 
@@ -516,7 +532,7 @@ export async function mountGame(app: Application, {
     const score = resultNumber.format(presentation.run.score);
     adDialog.show({
       title,
-      description: `Dough meter full. Score ${score}. Watch an ad to clear ${LEVEL_DOUGH_RELIEF} dough and keep playing.`,
+      description: `Out of moves. Score ${score}. Watch an ad to get ${LEVEL_DOUGH_RELIEF} moves back and keep playing.`,
       primary: { label: 'Watch ad', activate: event => {
         if (event.isTrusted && hostPaused) wake();
         if (!foreground() || otherDialogOpen() || adPlayback || gameOver !== presentation) return;
@@ -535,13 +551,18 @@ export async function mountGame(app: Application, {
           gameOver = null;
           extraChance = null;
           boardDebug?.applied(state, rescued, { kind: 'extra-chance' });
+          const spentAtLoss = state.doughMeter ?? DOUGH_METER_LIMIT;
+          scene.clearMoveCosts({ doughMeter: spentAtLoss });
+          const restored = spentAtLoss - (rescued.doughMeter ?? 0);
           state = rescued;
           gestures.reset();
           scene.showGameOverCue(null, motion.matches);
           setResultsVisible(false);
-          draw();
+          draw(false);
+          const now = performance.now();
+          scene.startMoveRecovery({ source: 'extra', restored, remaining: DOUGH_METER_LIMIT - (state.doughMeter ?? 0) }, now, motion.matches);
           const repair = getBoardRepair(state);
-          if (repair) scene.startMove(repair.inserts, performance.now(), motion.matches);
+          if (repair) scene.startMove(repair.inserts, now, motion.matches);
         }, { title, description: 'Opening ad…' });
       } },
       secondary: { label: 'Skip · See results', activate: () => declineExtraChance(presentation) },
@@ -694,6 +715,7 @@ export async function mountGame(app: Application, {
 
   function silencePresentation(): void {
     sound.stop();
+    scene.clearMoveCosts(state);
     landing = null;
     if (pending) pending.popAt = null;
     for (const level of levels) level.silent = true;
@@ -739,7 +761,7 @@ export async function mountGame(app: Application, {
     renderedSize = { width: viewportWidth, height: viewportHeight };
     resultsDrag = null;
     cancelPresentation();
-    scene.resize(width, height);
+    scene.resize(width, height, safeAreaBottom * height / viewportHeight);
     draw();
     syncControls();
   }
@@ -981,7 +1003,7 @@ export async function mountGame(app: Application, {
     feedback = null;
     clearHint();
     scene.startBoosterCue(kind, targets, performance.now(), motion.matches);
-    draw();
+    draw(false);
     const repair = getBoardRepair(state);
     if (repair) scene.startMove(repair.inserts, performance.now(), motion.matches);
     syncControls();
@@ -1000,6 +1022,9 @@ export async function mountGame(app: Application, {
     }
     bestCombo = Math.max(bestCombo, state.combo ?? 0);
     const started = performance.now();
+    const spent = state.doughMeter ?? 0;
+    const previousSpent = before.doughMeter ?? 0;
+    const remaining = DOUGH_METER_LIMIT - spent;
     boosters.start();
     const dropLegality = !state.gameOver && state.combo === 5 ? boosterLegality() : null;
     const awarded = dropLegality
@@ -1032,6 +1057,10 @@ export async function mountGame(app: Application, {
       const previous = credits.at(-1);
       const at = Math.max(scoreImpactTime(playback), previous ? previous.at + MIN_CREDIT_SPACING_MS : 0);
       credits.push({ at, total: state.score, reduced: playback.reduced, level });
+      const levelMoves = level?.details.movesRestored ?? 0;
+      const comboMoves = previousSpent - spent - levelMoves;
+      if (levelMoves > 0) scene.startMoveRecovery({ source: 'level', restored: levelMoves, remaining: remaining - comboMoves }, at, playback.reduced);
+      if (comboMoves > 0) scene.startMoveRecovery({ source: 'combo', restored: comboMoves, remaining }, at, playback.reduced);
       if (awarded && focused && !hostPaused && !document.hidden && !pageHidden) {
         boosterDrop = { kind: awarded, creditAt: at, playback };
       }
@@ -1046,8 +1075,11 @@ export async function mountGame(app: Application, {
     const start = scene.topPosition(from);
     const color = before.stacks[from].at(-1)!;
     feedback = null;
-    draw();
+    draw(false);
     scene.startMove(inserts, started, motion.matches, { to, start, color });
+    if (spent === previousSpent + 1) {
+      scene.startMoveCost(to, started, motion.matches, remaining);
+    }
     if (motion.matches) sound.landing(color);
     else landing = { color, at: started + FLIGHT_MS };
     syncControls();
@@ -1105,7 +1137,7 @@ export async function mountGame(app: Application, {
         if (level?.details.upgrade?.kind === 'stack') {
           scene.startStackUnlock(state, inserts, now, playback.reduced);
         } else {
-          draw();
+          draw(false);
           scene.startMove(inserts, now, playback.reduced);
         }
         unsettledLevel = level;
@@ -1123,8 +1155,10 @@ export async function mountGame(app: Application, {
     if (scene.freeBoosterDeadline) scene.showFreeBoosterCelebration(now);
     advanceScore(now);
     scene.showMatchTail(now);
+    scene.showMoveCosts(now);
     if (scene.boosterCueDeadline) scene.showBoosterCue(now, motion.matches);
     advanceGameOver(now);
+    scene.showIcingVial(now, motion.matches || !foreground() || !!adDialog?.element.open || otherDialogOpen());
     syncControls(now);
     if (!timedWork() && !gestures.active && gestures.source === null) applyQuality();
     const guideAnimating = renderFirstMatchGuide(now);
@@ -1247,6 +1281,7 @@ export async function mountGame(app: Application, {
   }, options);
   motion.addEventListener('change', () => {
     scene.cancelFreeBoosterCelebration();
+    scene.clearMoveCosts(state);
     quality.frames.interrupt();
     updateInteraction();
     frames.invalidate();

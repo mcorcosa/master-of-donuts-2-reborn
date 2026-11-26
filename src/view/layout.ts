@@ -14,11 +14,14 @@ export interface StackSlot {
 export type StackLayout = ReturnType<typeof layoutStacks>;
 
 export const VIEW_WIDTH = 400;
-export const BOARD_TOP = 124;
-export const BOARD_FOOTER_SPACE = 68;
+export const BOARD_TOP = 174;
+const FOOTER_CENTER_FROM_BOTTOM = 62;
+export const BOARD_FOOTER_SPACE = FOOTER_CENTER_FROM_BOTTOM + 42;
 export const STACK_LIFT = 6;
 
-const BOARD_INSET = 12;
+const BOARD_LEFT = 62;
+const BOARD_RIGHT = VIEW_WIDTH - 13;
+export const BOARD_CENTER = (BOARD_LEFT + BOARD_RIGHT) / 2;
 const BASE_HIT_DEPTH = 20;
 const ROW_PADDING = 5;
 const DONUT_ASPECT = 320 / 430;
@@ -29,17 +32,18 @@ const SWIPE_SLOP = 22;
 export type HitMode = 'exact' | 'tap' | 'swipe';
 
 export function footerCenterY(height: number): number {
-  return height - BOARD_FOOTER_SPACE / 2;
+  return height - FOOTER_CENTER_FROM_BOTTOM;
 }
 
-export function viewport(width: number, height: number) {
-  const scale = Math.min(Math.max(1, width) / VIEW_WIDTH, Math.max(1, height) / 540, 1.6);
-  const contentHeight = Math.min(height / scale, 740);
+export function viewport(width: number, height: number, safeAreaBottom = 0) {
+  const usableHeight = Math.max(1, height - Math.max(0, safeAreaBottom));
+  const scale = Math.min(Math.max(1, width) / VIEW_WIDTH, usableHeight / 540, 1.6);
+  const contentHeight = Math.min(usableHeight / scale, 870);
   return {
     scale,
     height: contentHeight,
     x: (width - VIEW_WIDTH * scale) / 2,
-    y: (height - contentHeight * scale) / 2,
+    y: (usableHeight - contentHeight * scale) / 2,
   };
 }
 
@@ -47,7 +51,7 @@ export function layoutStacks(height: number, count: number, capacity = Math.min(
   // Compute two-row formations from the lower row up.
   const rows = count < 5 ? [count] : [Math.floor(count / 2), Math.ceil(count / 2)];
   const rowHeight = (height - BOARD_TOP - BOARD_FOOTER_SPACE) / rows.length;
-  const cellWidth = (VIEW_WIDTH - BOARD_INSET * 2) / Math.max(...rows);
+  const cellWidth = (BOARD_RIGHT - BOARD_LEFT) / Math.max(...rows);
   // Five stacks use their current capacity. Other formations reserve their next capacity.
   const maxCapacity = count === 5 ? capacity : Math.min(10, count + 3);
   const stackHeightRatio = DONUT_ASPECT * (1 + (maxCapacity - 1) * DONUT_STEP_RATIO);
@@ -61,7 +65,7 @@ export function layoutStacks(height: number, count: number, capacity = Math.min(
   const rowSlots: StackSlot[] = rows.flatMap((columns, index) => {
     const rowTop = BOARD_TOP + (rows.length - 1 - index) * rowHeight;
     const base = rowTop + Math.max(centeredBase, ROW_PADDING + STACK_LIFT + stackHeight);
-    const rowLeft = (VIEW_WIDTH - columns * cellWidth) / 2;
+    const rowLeft = BOARD_CENTER - columns * cellWidth / 2;
     return Array.from({ length: columns }, (_, column) => {
       const left = rowLeft + column * cellWidth;
       return {
@@ -89,7 +93,7 @@ export function contains(rect: Rect, point: Point): boolean {
 }
 
 export function stackTarget(stacks: readonly { hit: Rect }[], point: Point, height: number, mode: HitMode): Target {
-  if (point.x < BOARD_INSET || point.x >= VIEW_WIDTH - BOARD_INSET ||
+  if (point.x < BOARD_LEFT || point.x >= BOARD_RIGHT ||
       point.y < BOARD_TOP || point.y >= height - BOARD_FOOTER_SPACE) return 'outside';
 
   const exact = stacks.findIndex(({ hit }) => contains(hit, point));

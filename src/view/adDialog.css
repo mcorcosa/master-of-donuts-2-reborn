@@ -7,7 +7,8 @@
   background: #fff2dc;
   color: #672e20;
   box-shadow: 0 6px 28px #30130f60;
-  font: 500 16px/1.45 system-ui, sans-serif;
+  font: 500 16px/1.45 var(--game-font);
+  text-transform: uppercase;
 }
 
 .game-ad-dialog::backdrop { background: #30130f9e; }
@@ -29,7 +30,8 @@
   border-radius: 14px;
   background: #fff2dc;
   color: #672e20;
-  font: 700 14px/1.15 system-ui, sans-serif;
+  font: 700 14px/1.15 var(--game-font);
+  text-transform: inherit;
   cursor: pointer;
 }
 

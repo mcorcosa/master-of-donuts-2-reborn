@@ -36,10 +36,10 @@ function list(panel: ResultsPanel, tab: 'personal' | 'friends') {
 }
 
 describe('Pixi results panel', () => {
-  it('shows a full dough meter as the terminal reason', () => {
+  it('shows that the run ended when the move budget reached zero', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     panel.show({ personal, tab: 'personal', friends: null }, 650, 'dough-meter');
-    expect(getText(panel, 'result-heading').text).toBe('Dough meter full');
+    expect(getText(panel, 'result-heading').text).toBe('OUT OF MOVES');
     panel.root.destroy({ children: true });
   });
 
@@ -71,7 +71,7 @@ describe('Pixi results panel', () => {
     expect(current.children).toHaveLength(4);
     expect((current.children[1] as Text).text).toBe('10.');
     expect(panel.scrollBy(500)).toBe(false);
-    expect(getText(panel, 'result-personal-best').text).toBe('New personal best!');
+    expect(getText(panel, 'result-personal-best').text).toBe('NEW PERSONAL BEST!');
     const number = new Intl.NumberFormat();
     const values = ['score', 'level', 'combo'].map(stat => getText(panel, `result-${stat}-value`));
     expect(values.map(value => value.text)).toEqual([number.format(large), number.format(large), `${number.format(large)}×`]);
@@ -95,8 +95,8 @@ describe('Pixi results panel', () => {
     const view: ResultsView = { personal: { ...personal, isPersonalBest: false }, tab: 'friends', friends };
     panel.show({ ...view, tab: 'personal' }, viewport(320, 568).height);
     panel.show(view, viewport(320, 568).height);
-    expect(getText(panel, 'friends-list-status').text).toBe('No friends scores yet.');
-    expect(getText(panel, 'friends-submit-disclosure').text).toContain('Facebook friends leaderboard');
+    expect(getText(panel, 'friends-list-status').text).toBe('NO FRIENDS SCORES YET.');
+    expect(getText(panel, 'friends-submit-disclosure').text).toContain('FACEBOOK FRIENDS LEADERBOARD');
     const submit = center(panel, 'friends-submit');
     const restart = center(panel, 'result-restart');
     expect(panel.hit(submit)).toBe('submit');
@@ -174,6 +174,19 @@ describe('Pixi results panel', () => {
     panel.root.destroy({ children: true });
   });
 
+  it('uppercases displayed player names without changing the provider records', () => {
+    const panel = new ResultsPanel(Texture.WHITE);
+    const names = ['Élodie', 'Straße', 'Λουκάς', '李小雨'];
+    const scores = names.map((name, index) => Object.freeze({ rank: index + 1, name, score: 100, current: false }));
+    const friends: ResultsView['friends'] = { list: { status: 'ready', scores }, submission: 'idle' };
+    panel.show({ personal, friends, tab: 'friends' }, viewport(320, 568).height);
+
+    expect(list(panel, 'friends').children.map(row => (row.children[2] as Text).text))
+      .toEqual(['ÉLODIE', 'STRASSE', 'ΛΟΥΚΆΣ', '李小雨']);
+    expect(scores.map(row => row.name)).toEqual(names);
+    panel.root.destroy({ children: true });
+  });
+
   it('returns from overflow to the top for a refreshed short list or when a Friends request fails', () => {
     const panel = new ResultsPanel(Texture.WHITE);
     const rows = personal.rows.map(row => ({ ...row, name: 'Donut' }));
@@ -182,12 +195,12 @@ describe('Pixi results panel', () => {
     panel.show(view, 540);
     expect(panel.scrollBy(500)).toBe(true);
     panel.show({ ...view, friends: { list: { status: 'error' }, submission: 'error' } }, 540);
-    expect(getText(panel, 'friends-list-status').text).toContain('Tap Friends to retry');
+    expect(getText(panel, 'friends-list-status').text).toContain('TAP FRIENDS TO RETRY');
     expect(panel.scrollBy(500)).toBe(false);
     panel.show({ ...view, friends: { list: { status: 'ready', scores: rows.slice(0, 2) }, submission: 'sent' } }, 540);
     expect(list(panel, 'friends').children).toHaveLength(2);
     expect(panel.scrollBy(500)).toBe(false);
-    expect(getText(panel, 'friends-submit').text).toBe('Score submitted');
+    expect(getText(panel, 'friends-submit').text).toBe('SCORE SUBMITTED');
     panel.root.destroy({ children: true });
   });
 });

@@ -17,6 +17,9 @@ export function stackUnlockFrame(before: StackLayout, after: StackLayout, age: n
   const splitsRows = before.slots.length === 4 && after.slots.length === 5;
   const movesLeftStackDown = before.slots.length === 5 && after.slots.length === 6;
   const progress = splitsRows ? ease(time / 0.5) : ease(time);
+  // Tall screens can grow the donuts as four columns split into two rows.
+  // Wait until the rows separate before growing into the neighboring space.
+  const sizing = splitsRows && after.donutWidth > before.donutWidth ? ease((time - 0.5) / 0.34) : progress;
   const slots = before.slots.map((slot, index) => {
     let across = progress;
     let vertical = progress;
@@ -35,12 +38,12 @@ export function stackUnlockFrame(before: StackLayout, after: StackLayout, age: n
   const entrance = splitsRows || movesLeftStackDown ? ease((time - 0.8) / 0.19) : ease((time - 0.63) / 0.34);
   return {
     layout: {
-      donutWidth: mix(before.donutWidth, after.donutWidth, progress),
-      donutHeight: mix(before.donutHeight, after.donutHeight, progress),
-      step: mix(before.step, after.step, progress),
+      donutWidth: mix(before.donutWidth, after.donutWidth, sizing),
+      donutHeight: mix(before.donutHeight, after.donutHeight, sizing),
+      step: mix(before.step, after.step, sizing),
       slots,
     },
-    progress,
+    progress: sizing,
     entrance,
     trayOffset: 8 * (1 - entrance) ** 2 - 2.2 * Math.sin(Math.PI * entrance),
     trayScale: 0.91 + 0.09 * entrance,
